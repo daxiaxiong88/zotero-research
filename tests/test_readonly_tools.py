@@ -41,6 +41,26 @@ def test_health_check_reports_zotero_9_as_read_only() -> None:
     assert report.sqlite_access == "forbidden"
 
 
+def test_health_check_requires_local_api_v3_before_enabling_writes() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/"
+        return httpx.Response(
+            200,
+            headers={
+                "X-Zotero-Version": "10.0.1",
+                "Zotero-API-Version": "2",
+                "Zotero-Server-ID": "server-abc",
+            },
+        )
+
+    client = ZoteroLocalClient(transport=httpx.MockTransport(handler))
+    report = ResearchService(zotero=client).health_check()
+
+    assert report.zotero.read_supported is False
+    assert report.zotero.write_supported is False
+    assert report.write_mode == "preview_only"
+
+
 def test_search_items_returns_normalized_top_level_results() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

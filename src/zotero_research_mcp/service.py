@@ -21,7 +21,12 @@ from .pdf import PdfExtractor
 from .privacy import PrivacyPolicy
 from .reading import ReadingCardBuilder
 from .retrieval import EvidenceRetriever
-from .zotero import ZoteroLocalClient
+from .zotero import (
+    LocalWriteAuthorizationRequired,
+    LocalWriteFailed,
+    LocalWriteUnavailable,
+    ZoteroLocalClient,
+)
 
 
 class ResearchService:
@@ -169,8 +174,11 @@ class ResearchService:
                 claim.payload,
                 write_token=claim.write_token,
             )
-        except Exception:
+        except (LocalWriteUnavailable, LocalWriteAuthorizationRequired, LocalWriteFailed):
             self._note_previews.release(preview_token)
+            raise
+        except Exception:
+            self._note_previews.consume(preview_token)
             raise
         self._note_previews.consume(preview_token)
         return NoteWriteResult(

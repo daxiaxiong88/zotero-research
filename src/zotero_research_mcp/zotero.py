@@ -44,6 +44,10 @@ class LocalWriteFailed(RuntimeError):
     """Zotero accepted the request but did not create the requested object."""
 
 
+class LocalWriteOutcomeUnknown(RuntimeError):
+    """A write may have reached Zotero, so replaying it is unsafe."""
+
+
 @dataclass(frozen=True, slots=True)
 class CreatedItem:
     key: str
@@ -91,7 +95,12 @@ class ZoteroLocalClient:
         schema_version = _parse_int_header(response.headers, "Zotero-Schema-Version")
         server_id = response.headers.get("Zotero-Server-ID")
         major_version = _parse_major_version(version)
-        write_supported = major_version is not None and major_version >= 10 and bool(server_id)
+        write_supported = (
+            api_version == 3
+            and major_version is not None
+            and major_version >= 10
+            and bool(server_id)
+        )
         return ZoteroStatus(
             reachable=True,
             version=version,
@@ -263,15 +272,21 @@ class ZoteroLocalClient:
         key = self._write_key
         remembered = self._write_key_remembered
         try:
-            response = self._client.post(
-                "users/0/items",
-                headers={
-                    "Zotero-Server-ID": status.server_id,
-                    "Zotero-API-Key": key,
-                    "Zotero-Write-Token": idempotency_token,
-                },
-                json=[dict(payload)],
-            )
+            try:
+                response = self._client.post(
+                    "users/0/items",
+                    headers={
+                        "Zotero-Server-ID": status.server_id,
+                        "Zotero-API-Key": key,
+                        "Zotero-Write-Token": idempotency_token,
+                    },
+                    json=[dict(payload)],
+                )
+            except httpx.HTTPError as exc:
+                raise LocalWriteOutcomeUnknown(
+                    "The Zotero write outcome is unknown; regenerate a preview after checking "
+                    "the library."
+                ) from exc
         finally:
             if not remembered:
                 self._clear_write_authorization()
@@ -281,22 +296,50 @@ class ZoteroLocalClient:
             raise LocalWriteAuthorizationRequired(
                 "Zotero local write authorization expired; authorize again."
             )
-        response.raise_for_status()
-        result = _require_json_object(response)
+        if response.status_code >= 500:
+            raise LocalWriteOutcomeUnknown(
+                "Zotero returned a server error after receiving the write; check the library "
+                "before creating another preview."
+            )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise LocalWriteFailed(
+                f"Zotero rejected the child note request with HTTP {response.status_code}"
+            ) from exc
+        try:
+            result = _require_json_object(response)
+        except ValueError as exc:
+            raise LocalWriteOutcomeUnknown(
+                "Zotero returned an unreadable success response; check the library before "
+                "creating another preview."
+            ) from exc
         failed = result.get("failed", {})
         if isinstance(failed, Mapping) and failed:
             raise LocalWriteFailed("Zotero rejected the child note payload")
         successful = result.get("successful")
         if not isinstance(successful, Mapping):
-            raise LocalWriteFailed("Zotero response did not include a successful item")
+            raise LocalWriteOutcomeUnknown(
+                "Zotero response did not identify the created item; check the library before "
+                "creating another preview."
+            )
         created = successful.get("0")
         if not isinstance(created, Mapping):
-            raise LocalWriteFailed("Zotero did not create the child note")
-        data = _item_data(created)
-        return CreatedItem(
-            key=_item_key(created, data),
-            version=_item_version(created, data),
-        )
+            raise LocalWriteOutcomeUnknown(
+                "Zotero response did not identify the created child note; check the library "
+                "before creating another preview."
+            )
+        try:
+            data = _item_data(created)
+            return CreatedItem(
+                key=_item_key(created, data),
+                version=_item_version(created, data),
+            )
+        except (TypeError, ValueError) as exc:
+            raise LocalWriteOutcomeUnknown(
+                "Zotero created an item but returned incomplete metadata; check the library "
+                "before creating another preview."
+            ) from exc
 
     def _clear_write_authorization(self) -> None:
         self._write_key = None

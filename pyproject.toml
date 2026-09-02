@@ -45,4 +45,4 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["zotero_research_mcp"]
+files = ["src"]

@@ -56,6 +56,7 @@ Zotero Local API 与写入能力说明见
 cd D:\Research\ChatGPT
 uv sync --dev
 uv run zotero-research-doctor
+uv run mypy
 uv run pytest
 ```
 
@@ -119,4 +120,3 @@ PyMuPDF 是默认快路径。服务会根据可选文本量、空白页比例和
 - 当前写入目标是个人库 `users/0` 的子笔记；组库写入尚未开放。
 - 预览令牌只保存在内存中，默认 10 分钟有效；服务重启后自动失效。
 - 结构化阅读卡是证据驱动的工作流，不替代人工核对原文、统计方法和引文状态。
-

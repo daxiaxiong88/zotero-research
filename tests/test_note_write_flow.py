@@ -7,7 +7,11 @@ import pytest
 
 from zotero_research_mcp.notes import PreviewAlreadyUsed, PreviewMismatch, WriteConfirmationRequired
 from zotero_research_mcp.service import ResearchService
-from zotero_research_mcp.zotero import LocalWriteUnavailable, ZoteroLocalClient
+from zotero_research_mcp.zotero import (
+    LocalWriteOutcomeUnknown,
+    LocalWriteUnavailable,
+    ZoteroLocalClient,
+)
 
 
 def _parent_responses(request: httpx.Request) -> httpx.Response | None:
@@ -229,4 +233,58 @@ def test_zotero_10_authorizes_and_creates_exact_preview_once() -> None:
             expected_digest=preview.digest,
             confirmed_by_user=True,
         )
+    assert item_write_calls == 1
+
+
+def test_ambiguous_write_timeout_consumes_preview_to_prevent_replay() -> None:
+    authorization_calls = 0
+    item_write_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal authorization_calls, item_write_calls
+        response = _parent_responses(request)
+        if response is not None:
+            return response
+        if request.method == "GET" and request.url.path == "/api/":
+            return httpx.Response(
+                200,
+                headers={
+                    "X-Zotero-Version": "10.0.1",
+                    "Zotero-API-Version": "3",
+                    "Zotero-Server-ID": "server-abc",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/api/local/authorize":
+            authorization_calls += 1
+            return httpx.Response(200, json={"key": "K" * 32, "remember": False})
+        if request.method == "POST" and request.url.path == "/api/users/0/items":
+            item_write_calls += 1
+            raise httpx.ReadTimeout("response was lost", request=request)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    service = ResearchService(
+        zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler))
+    )
+    preview = service.preview_child_note(
+        "PARENT23",
+        title="AI reading card",
+        content="Potentially created despite a lost response.",
+    )
+    service.request_write_authorization()
+
+    with pytest.raises(LocalWriteOutcomeUnknown):
+        service.write_child_note(
+            preview.preview_token,
+            expected_digest=preview.digest,
+            confirmed_by_user=True,
+        )
+
+    service.request_write_authorization()
+    with pytest.raises(PreviewAlreadyUsed):
+        service.write_child_note(
+            preview.preview_token,
+            expected_digest=preview.digest,
+            confirmed_by_user=True,
+        )
+    assert authorization_calls == 2
     assert item_write_calls == 1
