@@ -1,122 +1,30 @@
-# Zotero Research MCP
+# Zotero Research 0.2
 
-一个面向科研阅读、证据检索和结构化笔记的安全优先 MCP 服务。它只通过 Zotero 官方
-Local API 访问文献库，永远不会读取或修改 `zotero.sqlite`。
+Zotero Research 是面向 Zotero 10 个人库的证据驱动科研阅读助手：右侧原生面板负责敏感全文的本机工作流，Codex 通过 stdio MCP 负责受策略约束的检索和元数据操作。它只调用 Zotero 官方 Local API，不读取或修改 `zotero.sqlite`。
 
-## 当前能力
+完整的中文安装、设置、隐私说明、面板操作、MCP 契约和排障步骤见：[Zotero 10 中文使用指南](docs/USAGE_ZOTERO10.md)。
 
-| MCP 工具 | 作用 | 外部状态变化 |
-| --- | --- | --- |
-| `health_check` | 检查 Zotero 版本、Local API 和写入能力 | 无 |
-| `search_items` | 检索 Zotero 顶层文献 | 无 |
-| `get_item_context` | 获取条目、PDF 附件和已有子笔记 | 无 |
-| `extract_pdf` | 通过附件 key 提取逐页文本并评估质量 | 无 |
-| `retrieve_evidence` | 返回带页码和稳定 evidence ID 的相关段落 | 无 |
-| `generate_reading_card` | 生成研究问题、方法、结论、局限四段式阅读卡 | 可选模型处理 |
-| `preview_child_note` | 生成转义后的精确笔记预览、摘要哈希和一次性令牌 | 仅进程内预览 |
-| `request_write_authorization` | 请求 Zotero 10+ 显示官方写入授权对话框 | 用户授权 |
-| `write_child_note` | 写入已确认且哈希完全匹配的子笔记 | 创建一条笔记 |
+## 快速开始
 
-没有删除、批量修改、直接数据库访问或任意文件路径读取工具。
+1. 准备 Python 3.11+、`uv`、正在运行的 Zotero 10，以及项目环境 `.venv-zotero10`。不要使用仓库中旧的 `.venv`。
+2. 复制 `.env.example` 为后端工作目录中的 `.env`，只填写自己实际配置的本地模型或可选云端模型；不要把密钥提交到 Git。
+3. 在 Zotero 中手动安装 `dist/zotero-research-0.2.0.xpi`：工具 → 插件 → 右上角齿轮 → 从文件安装插件，然后由用户确认安装。
+4. 在 Zotero“设置 → 高级”启用允许本机其他应用与 Zotero 通信。
+5. 打开个人库中的本地 PDF；右侧显示“科研助手”后，在“设置”中填写本地模型和可选 MinerU 路径，保存后重新连接。
 
-## 架构与安全边界
+这是本地开发版 XPI。manifest 的 `update_url` 是
+`https://zotero-research.invalid/updates.json`，`.invalid` 不是更新服务地址；不支持在线自动升级。安装新版时仍须由用户手动选择新的 XPI 文件。
 
-```text
-Codex / MCP 客户端
-        │ stdio
-        ▼
-Zotero Research MCP
-  ├─ 隐私策略：敏感全文只能送本地模型
-  ├─ 证据层：PDF 页码 + 稳定 evidence ID
-  ├─ 解析路由：PyMuPDF 快路径 → 本地重解析接口
-  └─ 写入闸门：预览 → SHA-256 → 人工确认 → 一次性提交
-        │ http://127.0.0.1:23119/api/
-        ▼
-Zotero 官方 Local API
-```
+## 安全边界
 
-关键约束：
+- 敏感全文从 Zotero 原生面板经本机回环 bridge 处理，不经过 Codex；本机回环服务若被用户部署为主动云转发，本项目无法保证物理离线。
+- 所有 MCP 正文内容（PDF、证据片段和 notes）默认拒绝；必须先在 Zotero 本地取得与当前论文/附件匹配的授权，再由调用方显式设置 `allow_cloud=true`。Codex 不能自行铸造授权。书目和附件元数据仍可能进入调用客户端上下文。
+- 公开论文不等于问题公开。面板发送“本次问题、选文和检索证据”到云端前，每次都必须单独勾选；Codex 的公开论文授权只绑定当前选中的 `attachment_key`，不连带同一条目的其他附件或私密草稿。已有 notes 另有独立公开确认，默认不放行。
+- 高亮和笔记均先预览；高亮要确认精确原文、物理页码和颜色，笔记要经过 Zotero 原生写入授权及“确认内容并写入笔记”。写入结果未知时不会自动重试。
+- 同一操作系统用户的其他程序仍可能拥有相同文件/进程权限；本工具的授权是应用边界，不是硬沙箱。
 
-- Local API 地址被硬限制为 HTTP loopback、端口 `23119` 和 `/api/` 路径，不能改指向远程主机。
-- PDF 只能通过 Zotero attachment key 定位，MCP 参数不接受任意磁盘路径。
-- 默认把文档标为 `sensitive`。敏感全文即使设置 `allow_cloud=true` 也不会发送给外部模型。
-- 公开全文只有在单次调用明确设置 `allow_cloud=true` 后，才允许发送给外部模型。
-- 写入 payload 会安全转义并绑定 SHA-256；确认缺失、摘要不匹配、过期或令牌复用都会在 HTTP 写请求前失败。
-- Zotero 9 及更早版本自动保持 `preview_only`。官方 Local API 写入只在 Zotero 10+ 放行。
+## 当前状态
 
-Zotero Local API 与写入能力说明见
-[Zotero 官方文档](https://www.zotero.org/support/dev/web_api/v3/local_api)。
+本轮不下载模型、MinerU 权重或其他 GB 级文件，也不假称本机 AI/MinerU 已跑通。当前说明以“本机 Ollama 无模型、MinerU 无权重”为基线；未配置模型时面板只能显示带页码的证据摘录，不会假称翻译或模拟审稿完成。
 
-## 本机安装与验证
-
-要求：Python 3.11+、[`uv`](https://docs.astral.sh/uv/) 和正在运行的 Zotero。在 Zotero 的
-“设置 → 高级”中启用“允许此计算机上的其他应用程序与 Zotero 通信”。
-
-```powershell
-cd D:\Research\ChatGPT
-uv sync --dev
-uv run zotero-research-doctor
-uv run mypy
-uv run pytest
-```
-
-本机已经注册了以下 Codex MCP：
-
-```toml
-[mcp_servers.zotero_research]
-command = 'D:\Research\ChatGPT\.venv\Scripts\zotero-research-mcp.exe'
-cwd = 'D:\Research\ChatGPT'
-startup_timeout_sec = 15
-tool_timeout_sec = 180
-default_tools_approval_mode = "writes"
-```
-
-这符合 [Codex 官方 MCP 配置说明](https://developers.openai.com/codex/mcp)。注册后需要在
-Codex 桌面端的 MCP 设置中重启/刷新服务器；新的任务也会自动读取同一份配置。
-
-## 推荐使用流程
-
-在 Codex 中可以直接这样说：
-
-1. “在 Zotero 中检索 protein folding，列出最相关的 5 篇。”
-2. “读取条目 `XXXXXXXX` 的 PDF，找出支持某个结论的证据，必须给出页码。”
-3. “为条目 `XXXXXXXX` 生成阅读卡；这是未发表材料，只能本地处理。”
-4. “把阅读卡做成子笔记预览，但先不要写入。”
-5. 检查 `note_html` 和 `digest` 后，再明确要求授权并写入。
-
-当前 Zotero 9.0.6 可以完整使用步骤 1–4；步骤 5 会被服务主动拒绝，升级到 Zotero 10+
-后才会启用官方本地写入。
-
-## 模型配置（可选）
-
-不配置第二个模型时，`generate_reading_card` 会返回确定性的证据摘录卡；Codex 本身仍可基于
-这些带页码证据进行分析。若希望 MCP 内部直接调用本地 Ollama/vLLM，可复制 `.env.example`
-为 `.env`：
-
-```dotenv
-ZRM_MODEL_BASE_URL=http://127.0.0.1:11434/v1
-ZRM_MODEL_NAME=your-local-model
-ZRM_MODEL_TRUST=local
-```
-
-对于局域网内的本地推理服务器，必须显式设置 `ZRM_MODEL_TRUST=local`。外部 API 应设置为
-`external`；API key 只放在 `.env` 或进程环境中，不能提交到 Git。
-
-## PDF 重解析策略
-
-PyMuPDF 是默认快路径。服务会根据可选文本量、空白页比例和乱码比例给出质量评分：
-
-- 质量正常：`route=fast`。
-- 疑似扫描件/乱码：`route=heavy_recommended`，不会自动上传或执行重型 OCR。
-- 显式允许且配置了声明为本地的 `HeavyPdfParser`：`route=heavy_fallback`。
-
-本机目前没有安装 MinerU，因此项目只启用了经过测试的本地回退接口，没有擅自下载模型或
-大型依赖。后续接入 MinerU 时无需改 MCP 工具契约。
-
-## 当前边界
-
-- 尚未实现 Zotero 阅读器侧边栏和原生 PDF 高亮；这需要 Zotero 插件在其 JavaScript
-  runtime 内调用注释 API，而不是由外部进程写数据库。
-- 当前写入目标是个人库 `users/0` 的子笔记；组库写入尚未开放。
-- 预览令牌只保存在内存中，默认 10 分钟有效；服务重启后自动失效。
-- 结构化阅读卡是证据驱动的工作流，不替代人工核对原文、统计方法和引文状态。
+Zotero 真实运行、主 profile 安装状态和最终验收以主线程记录为准；本文不宣称已装入主 profile，也不宣称与不可访问的 Feishu Pro 逐项等同。
