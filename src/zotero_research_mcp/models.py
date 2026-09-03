@@ -170,9 +170,11 @@ class NotePreview(BaseModel):
 
     preview_token: str
     digest: str
+    server_id: str | None = None
     parent_item_key: str
     title: str
     note_html: str
+    note_text: str = ""
     tags: list[str]
     expires_at: datetime
     requires_user_confirmation: Literal[True] = True

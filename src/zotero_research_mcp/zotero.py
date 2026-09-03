@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -79,9 +80,22 @@ class ZoteroLocalClient:
         self._write_key: str | None = None
         self._write_server_id: str | None = None
         self._write_key_remembered = False
+        self._pinned_server_id: ContextVar[str | None] = ContextVar(
+            "zotero_research_instance", default=None
+        )
 
     def close(self) -> None:
         self._client.close()
+
+    def pin_instance(self, expected_server_id: str) -> None:
+        status = self.health()
+        if not expected_server_id or status.server_id != expected_server_id:
+            raise ValueError("Zotero instance mismatch; reconnect from the correct local sidebar")
+        self._pinned_server_id.set(expected_server_id)
+
+    def _read_headers(self) -> dict[str, str]:
+        instance = self._pinned_server_id.get()
+        return {"Zotero-Server-ID": instance} if instance else {}
 
     def health(self) -> ZoteroStatus:
         try:
@@ -118,6 +132,7 @@ class ZoteroLocalClient:
 
         response = self._client.get(
             "users/0/items/top",
+            headers=self._read_headers(),
             params={"q": query, "limit": limit, "format": "json"},
         )
         response.raise_for_status()
@@ -128,11 +143,13 @@ class ZoteroLocalClient:
 
     def get_item_context(self, item_key: str) -> ItemContext:
         _validate_item_key(item_key)
-        item_response = self._client.get(f"users/0/items/{item_key}")
+        item_response = self._client.get(f"users/0/items/{item_key}", headers=self._read_headers())
         item_response.raise_for_status()
         raw_item = _require_json_object(item_response)
 
-        children_response = self._client.get(f"users/0/items/{item_key}/children")
+        children_response = self._client.get(
+            f"users/0/items/{item_key}/children", headers=self._read_headers()
+        )
         children_response.raise_for_status()
         raw_children = _require_json_list(children_response)
 
@@ -175,7 +192,7 @@ class ZoteroLocalClient:
         _validate_item_key(attachment_key)
         response = self._client.get(
             f"users/0/items/{attachment_key}/file/view/url",
-            headers={"Accept": "text/plain"},
+            headers={**self._read_headers(), "Accept": "text/plain"},
         )
         response.raise_for_status()
         location = response.text.strip()
@@ -197,6 +214,10 @@ class ZoteroLocalClient:
 
         if not path.is_absolute():
             raise ValueError("Zotero returned a non-absolute attachment path")
+        if path.suffix.casefold() != ".pdf":
+            raise ValueError("Only PDF attachments can be read by research tools")
+        if str(path).startswith(("\\\\", "//")):
+            raise ValueError("Network-share attachments are not allowed in local-only processing")
         return path
 
     def request_write_authorization(
@@ -208,13 +229,14 @@ class ZoteroLocalClient:
 
         status = self.health()
         if not status.write_supported or status.server_id is None:
-            raise LocalWriteUnavailable(
-                "Official Local API writes require Zotero 10 or newer."
-            )
+            raise LocalWriteUnavailable("Official Local API writes require Zotero 10 or newer.")
+        if self._pinned_server_id.get() and status.server_id != self._pinned_server_id.get():
+            raise LocalWriteUnavailable("Zotero instance changed; reconnect before authorizing")
         response = self._client.post(
             "local/authorize",
             headers={"Zotero-Server-ID": status.server_id},
             json={"appName": app_name},
+            timeout=120.0,
         )
         if response.status_code == 403:
             return WriteAuthorization(
@@ -253,9 +275,9 @@ class ZoteroLocalClient:
 
         status = self.health()
         if not status.write_supported or status.server_id is None:
-            raise LocalWriteUnavailable(
-                "Official Local API writes require Zotero 10 or newer."
-            )
+            raise LocalWriteUnavailable("Official Local API writes require Zotero 10 or newer.")
+        if self._pinned_server_id.get() and status.server_id != self._pinned_server_id.get():
+            raise LocalWriteUnavailable("Zotero instance changed; reconnect before writing")
         if self._write_server_id != status.server_id:
             self._clear_write_authorization()
             raise LocalWriteAuthorizationRequired(
@@ -436,6 +458,8 @@ def _validate_item_key(item_key: str) -> None:
 def _validate_local_api_base_url(base_url: str) -> None:
     parsed = urlparse(base_url)
     hostname = parsed.hostname
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Zotero Local API URL cannot contain credentials, query or fragment")
     is_loopback = hostname is not None and hostname.casefold() == "localhost"
     if hostname is not None and not is_loopback:
         try:

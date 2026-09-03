@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from datetime import timedelta
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .disclosure import ContentConsentStore, MCPContentPolicy
 from .model import ModelClient, OpenAICompatibleModelClient
 from .notes import NotePreviewStore
 from .service import ResearchService
@@ -29,6 +32,13 @@ class Settings(BaseSettings):
     model_name: str | None = None
     model_api_key: SecretStr | None = None
     model_trust: Literal["auto", "local", "external"] = "auto"
+    local_model_base_url: str = "http://127.0.0.1:11434/v1"
+    local_model_name: str | None = None
+    mcp_client: Literal["cloud", "local"] = "cloud"
+    state_directory: Path = Field(
+        default_factory=lambda: Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local")))
+        / "ZoteroResearch"
+    )
     model_timeout_seconds: float = Field(default=120.0, ge=1.0, le=600.0)
     note_preview_ttl_seconds: int = Field(default=600, ge=60, le=3600)
 
@@ -44,6 +54,14 @@ def build_service(settings: Settings | None = None) -> ResearchService:
 
     active = settings or Settings()
     model: ModelClient | None = None
+    local_model: ModelClient | None = None
+    if active.local_model_name:
+        local_model = OpenAICompatibleModelClient(
+            base_url=active.local_model_base_url,
+            model=active.local_model_name,
+            is_local=True,
+            timeout=active.model_timeout_seconds,
+        )
     if active.model_base_url is not None and active.model_name is not None:
         trust_override = {
             "auto": None,
@@ -64,7 +82,15 @@ def build_service(settings: Settings | None = None) -> ResearchService:
     return ResearchService(
         zotero=ZoteroLocalClient(base_url=active.zotero_base_url),
         model=model,
+        local_model=local_model,
         note_previews=NotePreviewStore(
             ttl=timedelta(seconds=active.note_preview_ttl_seconds)
         ),
+    )
+
+
+def build_content_policy(settings: Settings) -> MCPContentPolicy:
+    return MCPContentPolicy(
+        local_client=settings.mcp_client == "local",
+        consents=ContentConsentStore(settings.state_directory / "content-consents"),
     )

@@ -36,15 +36,37 @@ class OpenAICompatibleModelClient:
         api_key: str | None = None,
         is_local: bool | None = None,
         timeout: float = 120.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
+        parsed = urlparse(base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Model URL must be an HTTP(S) base URL without credentials or query")
+        loopback = _is_loopback_url(base_url)
+        if is_local is True and not loopback:
+            raise ValueError("A local model must use a loopback endpoint, never a remote host")
+        if not loopback and parsed.scheme != "https":
+            raise ValueError("Remote model endpoints must use HTTPS")
+        if parsed.hostname.casefold() == "localhost":
+            # Pin this name instead of relying on host/DNS/proxy configuration.
+            netloc = f"127.0.0.1:{parsed.port}" if parsed.port else "127.0.0.1"
+            base_url = parsed._replace(netloc=netloc).geturl()
         self.name = model
-        self.is_local = _is_loopback_url(base_url) if is_local is None else is_local
+        self.is_local = loopback if is_local is None else is_local
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = httpx.Client(
             base_url=f"{base_url.rstrip('/')}/",
             headers=headers,
             timeout=timeout,
             trust_env=not self.is_local,
+            follow_redirects=False,
+            transport=transport,
         )
         self._model = model
 
@@ -64,6 +86,7 @@ class OpenAICompatibleModelClient:
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": 0,
+                "max_tokens": 3000,
                 "response_format": {"type": "json_object"},
             },
         )
@@ -84,6 +107,9 @@ class OpenAICompatibleModelClient:
         if not isinstance(parsed, Mapping):
             raise ModelResponseError("Model JSON response must be an object")
         return parsed
+
+    def close(self) -> None:
+        self._client.close()
 
 
 def _is_loopback_url(url: str) -> bool:

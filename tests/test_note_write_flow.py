@@ -30,10 +30,7 @@ def _parent_responses(request: httpx.Request) -> httpx.Response | None:
                 },
             },
         )
-    if (
-        request.method == "GET"
-        and request.url.path == "/api/users/0/items/PARENT23/children"
-    ):
+    if request.method == "GET" and request.url.path == "/api/users/0/items/PARENT23/children":
         return httpx.Response(200, json=[])
     return None
 
@@ -43,14 +40,21 @@ def test_preview_child_note_escapes_content_and_binds_exact_digest() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_methods.append(request.method)
+        if request.url.path == "/api/":
+            return httpx.Response(
+                200,
+                headers={
+                    "X-Zotero-Version": "10.0.1",
+                    "Zotero-API-Version": "3",
+                    "Zotero-Server-ID": "instance-a",
+                },
+            )
         response = _parent_responses(request)
         if response is not None:
             return response
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
 
-    service = ResearchService(
-        zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    )
+    service = ResearchService(zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler)))
 
     preview = service.preview_child_note(
         "PARENT23",
@@ -67,13 +71,24 @@ def test_preview_child_note_escapes_content_and_binds_exact_digest() -> None:
     assert "<script>" not in preview.note_html
     assert "&lt;script&gt;" in preview.note_html
     assert preview.tags == ["AI review", "zotero-research-mcp"]
-    assert seen_methods == ["GET", "GET"]
+    assert set(seen_methods) == {"GET"}
+    assert preview.server_id == "instance-a"
+    assert preview.note_text == "AI reading card\n\nFinding: 12% improvement.\n\n<script>alert('x')</script>"
 
 
 def test_write_rejects_missing_confirmation_and_digest_mismatch_before_http_write() -> None:
     post_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/":
+            return httpx.Response(
+                200,
+                headers={
+                    "X-Zotero-Version": "10.0.1",
+                    "Zotero-API-Version": "3",
+                    "Zotero-Server-ID": "instance-a",
+                },
+            )
         response = _parent_responses(request)
         if response is not None:
             return response
@@ -81,9 +96,7 @@ def test_write_rejects_missing_confirmation_and_digest_mismatch_before_http_writ
             post_paths.append(request.url.path)
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
 
-    service = ResearchService(
-        zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    )
+    service = ResearchService(zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler)))
     preview = service.preview_child_note(
         "PARENT23",
         title="AI reading card",
@@ -125,9 +138,7 @@ def test_zotero_9_stays_preview_only_even_after_confirmation() -> None:
             post_paths.append(request.url.path)
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
 
-    service = ResearchService(
-        zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    )
+    service = ResearchService(zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler)))
     preview = service.preview_child_note(
         "PARENT23",
         title="AI reading card",
@@ -192,9 +203,7 @@ def test_zotero_10_authorizes_and_creates_exact_preview_once() -> None:
             )
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
 
-    service = ResearchService(
-        zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    )
+    service = ResearchService(zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler)))
     preview = service.preview_child_note(
         "PARENT23",
         title="AI reading card",
@@ -262,9 +271,7 @@ def test_ambiguous_write_timeout_consumes_preview_to_prevent_replay() -> None:
             raise httpx.ReadTimeout("response was lost", request=request)
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
 
-    service = ResearchService(
-        zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    )
+    service = ResearchService(zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler)))
     preview = service.preview_child_note(
         "PARENT23",
         title="AI reading card",

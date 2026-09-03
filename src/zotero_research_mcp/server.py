@@ -5,7 +5,8 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from .config import build_service
+from .config import Settings, build_content_policy, build_service
+from .disclosure import MCPContentPolicy
 from .models import (
     DocumentSensitivity,
     EvidenceResults,
@@ -40,16 +41,21 @@ _CONTROLLED_WRITE = ToolAnnotations(
 )
 
 
-def create_mcp_server(*, service: ResearchService) -> FastMCP[None]:
+def create_mcp_server(
+    *, service: ResearchService, content_policy: MCPContentPolicy | None = None
+) -> FastMCP[None]:
     """Register the stable public tool contract around an injected service."""
 
+    disclosure = content_policy or MCPContentPolicy()
     server: FastMCP[None] = FastMCP(
         "Zotero Research MCP",
         instructions=(
-            "Use Zotero's official Local API only. Never access zotero.sqlite. PDF tools accept "
-            "Zotero attachment keys, not arbitrary file paths. Treat documents as sensitive by "
-            "default. Always preview a child note and obtain explicit user confirmation of the "
-            "exact digest before writing. No delete operation is available."
+            "Use the official Zotero Local API; never access sqlite. MCP responses enter the "
+            "calling model's context: local execution is NOT offline confidentiality. Content "
+            "requires a short-lived public-paper consent granted in the Zotero sidebar plus "
+            "allow_cloud=true. Do not bypass this using shell/file tools. Keep sensitive material "
+            "in the local sidebar. Always preview notes and obtain exact user confirmation before "
+            "writing. No delete or arbitrary-path tool exists."
         ),
         log_level="WARNING",
     )
@@ -71,17 +77,30 @@ def create_mcp_server(*, service: ResearchService) -> FastMCP[None]:
         return service.search_items(query, limit=limit)
 
     @server.tool(
-        description="Read one Zotero item plus its direct PDF attachments and child notes.",
+        description=(
+            "Read item/attachment metadata. Notes are excluded unless include_notes=true and "
+            "the Zotero user has explicitly consented to sharing those notes with this client."
+        ),
         annotations=_READ_ONLY,
         structured_output=True,
     )
-    def get_item_context(item_key: str) -> ItemContext:
-        return service.get_item_context(item_key)
+    def get_item_context(
+        item_key: str, include_notes: bool = False, allow_cloud: bool = False
+    ) -> ItemContext:
+        if include_notes:
+            disclosure.require(
+                item_key,
+                allow_cloud=allow_cloud,
+                server_id=service.content_server_id,
+                notes=True,
+            )
+        context = service.get_item_context(item_key)
+        return context if include_notes else context.model_copy(update={"notes": []})
 
     @server.tool(
         description=(
             "Extract page-addressable text from a Zotero PDF attachment. Heavy fallback is local "
-            "only and runs solely when explicitly enabled."
+            "only. Cloud-backed callers require local Zotero public-paper consent and allow_cloud."
         ),
         annotations=_READ_ONLY,
         structured_output=True,
@@ -89,7 +108,13 @@ def create_mcp_server(*, service: ResearchService) -> FastMCP[None]:
     def extract_pdf(
         attachment_key: str,
         allow_heavy_fallback: bool = False,
+        allow_cloud: bool = False,
     ) -> PdfExtraction:
+        disclosure.require(
+            attachment_key,
+            allow_cloud=allow_cloud,
+            server_id=service.content_server_id,
+        )
         return service.extract_pdf(
             attachment_key,
             allow_heavy_fallback=allow_heavy_fallback,
@@ -105,7 +130,13 @@ def create_mcp_server(*, service: ResearchService) -> FastMCP[None]:
         query: str,
         top_k: int = 5,
         allow_heavy_fallback: bool = False,
+        allow_cloud: bool = False,
     ) -> EvidenceResults:
+        disclosure.require(
+            attachment_key,
+            allow_cloud=allow_cloud,
+            server_id=service.content_server_id,
+        )
         return service.retrieve_evidence(
             attachment_key,
             query,
@@ -115,8 +146,8 @@ def create_mcp_server(*, service: ResearchService) -> FastMCP[None]:
 
     @server.tool(
         description=(
-            "Build a four-part evidence-linked reading card. Full text is sensitive by default; "
-            "sensitive text never goes to an external model."
+            "Build a four-part evidence-linked reading card. For a cloud-backed MCP caller, "
+            "local public-paper disclosure consent and allow_cloud=true are required first."
         ),
         annotations=_MODEL_PROCESSING,
         structured_output=True,
@@ -128,6 +159,11 @@ def create_mcp_server(*, service: ResearchService) -> FastMCP[None]:
         allow_cloud: bool = False,
         allow_heavy_fallback: bool = False,
     ) -> ReadingCard:
+        disclosure.require(
+            item_key,
+            allow_cloud=allow_cloud,
+            server_id=service.content_server_id,
+        )
         return service.generate_reading_card(
             item_key,
             attachment_key=attachment_key,
@@ -193,8 +229,9 @@ def create_mcp_server(*, service: ResearchService) -> FastMCP[None]:
 def main() -> None:
     """Run the MCP server over stdio for Codex and other local MCP clients."""
 
-    service = build_service()
-    server = create_mcp_server(service=service)
+    settings = Settings()
+    service = build_service(settings)
+    server = create_mcp_server(service=service, content_policy=build_content_policy(settings))
     try:
         server.run(transport="stdio")
     finally:

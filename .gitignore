@@ -1,4 +1,5 @@
 .venv/
+.venv-zotero10/
 __pycache__/
 .pytest_cache/
 .mypy_cache/
@@ -9,3 +10,8 @@ __pycache__/
 htmlcov/
 .env
 .zotero-research-mcp/
+.worktrees/
+.research/
+dist/
+node_modules/
+artifacts/

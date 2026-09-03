@@ -46,6 +46,7 @@ class WriteConfirmationRequired(NotePreviewError):
 class _PendingNote:
     preview_token: str
     digest: str
+    server_id: str | None
     parent_item_key: str
     title: str
     note_html: str
@@ -62,6 +63,7 @@ class NoteWriteClaim:
 
     preview_token: str
     digest: str
+    server_id: str | None
     parent_item_key: str
     payload: dict[str, Any]
     write_token: str
@@ -90,6 +92,7 @@ class NotePreviewStore:
         title: str,
         content: str,
         tags: list[str] | None = None,
+        server_id: str | None = None,
     ) -> NotePreview:
         clean_title = title.strip()
         clean_content = content.strip()
@@ -110,12 +113,13 @@ class NotePreviewStore:
             "note": note_html,
             "tags": [{"tag": tag} for tag in normalized_tags],
         }
-        digest = _payload_digest(payload)
+        digest = _payload_digest({"server_id": server_id, "payload": payload})
         preview_token = secrets.token_urlsafe(32)
         expires_at = self._now() + self._ttl
         pending = _PendingNote(
             preview_token=preview_token,
             digest=digest,
+            server_id=server_id,
             parent_item_key=parent_item_key,
             title=clean_title,
             note_html=note_html,
@@ -130,9 +134,11 @@ class NotePreviewStore:
         return NotePreview(
             preview_token=preview_token,
             digest=digest,
+            server_id=server_id,
             parent_item_key=parent_item_key,
             title=clean_title,
             note_html=note_html,
+            note_text=f"{clean_title}\n\n{clean_content}",
             tags=normalized_tags,
             expires_at=expires_at,
         )
@@ -153,7 +159,7 @@ class NotePreviewStore:
                 raise PreviewExpired("Preview token has expired")
             if pending.state != "pending":
                 raise PreviewAlreadyUsed("Preview is already used or being written")
-            if not confirmed_by_user:
+            if confirmed_by_user is not True:
                 raise WriteConfirmationRequired(
                     "write_child_note requires explicit user confirmation"
                 )
@@ -163,6 +169,7 @@ class NotePreviewStore:
             return NoteWriteClaim(
                 preview_token=pending.preview_token,
                 digest=pending.digest,
+                server_id=pending.server_id,
                 parent_item_key=pending.parent_item_key,
                 payload=copy.deepcopy(pending.payload),
                 write_token=pending.write_token,
@@ -189,11 +196,7 @@ class NotePreviewStore:
 
     def _purge_expired_locked(self) -> None:
         now = self._now()
-        expired = [
-            token
-            for token, pending in self._pending.items()
-            if pending.expires_at <= now
-        ]
+        expired = [token for token, pending in self._pending.items() if pending.expires_at <= now]
         for token in expired:
             del self._pending[token]
 
