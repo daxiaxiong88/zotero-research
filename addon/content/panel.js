@@ -1,6 +1,9 @@
 (function attachResearchPanel(global) {
   'use strict';
 
+  var XHTML_NS = 'http://www.w3.org/1999/xhtml';
+  var INSTANCE_SEQUENCE = 0;
+
   var MODE_LABELS = {
     reading: '精读',
     question: '问答',
@@ -46,13 +49,13 @@
   }
 
   function createElement(document, tagName, attributes, content) {
-    var element = document.createElement(tagName);
+    var element = document.createElementNS(XHTML_NS, tagName);
     if (attributes) {
       Object.keys(attributes).forEach(function setAttribute(key) {
         var value = attributes[key];
         if (value === undefined || value === null || value === false) return;
         if (key === 'className') {
-          element.className = String(value);
+          element.setAttribute('class', String(value));
         } else if (key === 'textContent') {
           element.textContent = displayText(value);
         } else if (key === 'checked' || key === 'disabled' || key === 'hidden') {
@@ -158,6 +161,8 @@
     var document = body.ownerDocument;
     var view = document.defaultView || global;
     var rpcAdapter = adapter || {};
+    INSTANCE_SEQUENCE += 1;
+    var instanceRadioName = 'zrp-sensitivity-' + String(INSTANCE_SEQUENCE);
     var destroyed = false;
     var state = {
       context: null,
@@ -170,6 +175,8 @@
       highlightCommitAttempted: false,
       writeAttempted: false,
       cloudGrant: null,
+      cloudStatusMessage: '',
+      grantExpiryTimer: null,
       health: null,
       localModel: undefined,
       externalModel: undefined,
@@ -229,7 +236,7 @@
       var wrapper = createElement(document, 'label', { className: 'zrp-check' });
       var input = createElement(document, 'input', {
         type: 'radio',
-        name: 'zrp-sensitivity',
+        name: instanceRadioName,
         value: value,
         checked: checked,
         'data-testid': testId,
@@ -381,7 +388,7 @@
       });
       resultSection.hidden = true;
       addHeading(resultSection, 'h2', '分析结果');
-      refs.analysisMeta = createElement(document, 'div', { className: 'zrp-meta' }, '');
+      refs.analysisMeta = createElement(document, 'div', { className: 'zrp-meta', 'data-testid': 'analysis-meta' }, '');
       resultSection.appendChild(refs.analysisMeta);
       refs.analysisNotice = createElement(document, 'div', {
         className: 'zrp-notice',
@@ -436,7 +443,7 @@
       notePreview.appendChild(refs.notePreviewText);
       refs.notePreviewMeta = createElement(document, 'div', { className: 'zrp-preview-meta' }, '');
       notePreview.appendChild(refs.notePreviewMeta);
-      refs.noteSave = addButton(notePreview, 'note-save', '请求 Zotero 写入授权', 'note-save', 'zrp-button');
+      refs.noteSave = addButton(notePreview, 'note-save', '确认内容并写入笔记', 'note-save', 'zrp-button');
       noteSection.appendChild(notePreview);
       var writeConfirmation = createElement(document, 'div', {
         className: 'zrp-write-confirmation zrp-notice',
@@ -485,11 +492,11 @@
         '我明确允许 Codex 读取这篇公开论文 10 分钟（不自动包含 notes）',
       );
       addButton(cloudSection, 'grant-codex', '授权 10 分钟', 'grant-codex', 'zrp-button');
-      refs.revokeCodex = addButton(cloudSection, 'revoke-codex', '撤销读取授权', 'revoke-codex', 'zrp-button zrp-button-danger');
+      refs.revokeCodex = addButton(cloudSection, 'revoke-codex', '撤销当前文献读取授权', 'revoke-codex', 'zrp-button zrp-button-danger');
       refs.cloudStatus = createElement(document, 'div', {
         className: 'zrp-meta',
         'data-testid': 'cloud-status',
-      }, '未授权');
+      }, '授权状态未在本面板保留；请选择当前文献后可执行撤销。');
       cloudSection.appendChild(refs.cloudStatus);
       root.appendChild(cloudSection);
     }
@@ -678,8 +685,8 @@
       refs.noteSave.disabled = !state.notePreview || state.inFlight.has('authorizeWrite') || state.inFlight.has('writeNote');
       refs.noteWriteConfirm.disabled = !state.writeAuthorization || !state.writeAuthorization.authorized || state.writeAttempted || state.inFlight.has('writeNote');
       refs.highlightCommit.disabled = !state.highlightPreview || state.highlightCommitAttempted || state.inFlight.has('highlightCommit');
-      refs.revokeCodex.hidden = !state.cloudGrant;
-      refs.revokeCodex.disabled = !state.cloudGrant || state.inFlight.has('revokeCloud');
+      refs.revokeCodex.hidden = false;
+      refs.revokeCodex.disabled = !hasContext || state.inFlight.has('revokeCloud');
       var grantBusy = state.inFlight.has('grantCloud');
       var grantReady = hasContext && refs.codexConsent.checked && !grantBusy && !state.cloudGrant;
       var grantButton = root.querySelector('[data-testid="grant-codex"]');
@@ -716,6 +723,42 @@
       if (healthRequest) state.inFlight.set('health', healthRequest);
     }
 
+    function clearGrantExpiryTimer() {
+      if (state.grantExpiryTimer !== null && typeof view.clearTimeout === 'function') {
+        view.clearTimeout(state.grantExpiryTimer);
+      }
+      state.grantExpiryTimer = null;
+    }
+
+    function grantExpiryMs(grant) {
+      if (!grant || grant.expires_at === undefined || grant.expires_at === null) return null;
+      var timestamp = Date.parse(String(grant.expires_at));
+      return Number.isFinite(timestamp) ? timestamp : null;
+    }
+
+    function scheduleGrantExpiry(grant, generation) {
+      clearGrantExpiryTimer();
+      var expiry = grantExpiryMs(grant);
+      if (expiry === null || typeof view.setTimeout !== 'function') return;
+      var delay = expiry - Date.now();
+      if (delay <= 0) {
+        if (contextIsCurrent(generation) && state.cloudGrant === grant) {
+          state.cloudGrant = null;
+          state.cloudStatusMessage = '当前面板中的授权回执已到期；可对当前文献执行撤销。';
+          renderCloudGrant();
+        }
+        return;
+      }
+      state.grantExpiryTimer = view.setTimeout(function expireGrant() {
+        state.grantExpiryTimer = null;
+        if (contextIsCurrent(generation) && state.cloudGrant === grant) {
+          state.cloudGrant = null;
+          state.cloudStatusMessage = '当前面板中的授权回执已到期；可对当前文献执行撤销。';
+          renderCloudGrant();
+        }
+      }, Math.min(delay, 2147483647));
+    }
+
     function clearDocumentPreviews() {
       state.analysis = null;
       state.notePreview = null;
@@ -740,7 +783,6 @@
       setText(refs.notePreviewMeta, '');
       setText(refs.writeSummary, '');
       setText(refs.noteStatus, '');
-      setText(refs.cloudStatus, '未授权');
     }
 
     function normalizeAnalysis(result, requestedMode, requestedAllowCloud) {
@@ -750,9 +792,10 @@
         ? requestedLocation
         : 'none';
       var warnings = Array.isArray(analysis.warnings) ? analysis.warnings.slice() : [];
+      var privacyAnomaly = false;
       if (processingLocation === 'external' && !requestedAllowCloud) {
-        processingLocation = 'none';
-        warnings.push('服务返回了未获本次云端同意的处理位置，已降级为证据摘录。');
+        privacyAnomaly = true;
+        warnings.push('隐私异常：服务报告了未经本次明确同意的云端处理；已拒绝显示模型结论。请检查 bridge 配置。');
       }
       return {
         item_key: analysis.item_key,
@@ -763,6 +806,7 @@
         generated_by: analysis.generated_by,
         sensitivity: analysis.sensitivity || currentSensitivity(),
         processing_location: processingLocation,
+        privacy_anomaly: privacyAnomaly,
         sections: Array.isArray(analysis.sections) ? analysis.sections : [],
         evidence: Array.isArray(analysis.evidence) ? analysis.evidence : [],
         warnings: warnings,
@@ -805,7 +849,9 @@
       refs.analysisResult.hidden = !result;
       if (!result) return;
       var resultMode = result.mode || refs.mode.value;
-      var locationLabel = result.processing_location === 'local'
+      var locationLabel = result.privacy_anomaly
+        ? '隐私异常（拒绝显示模型结论）'
+        : result.processing_location === 'local'
         ? '本地模型'
         : result.processing_location === 'external'
           ? '云端模型（本次已同意）'
@@ -815,8 +861,11 @@
         displayText(result.task || MODE_LABELS[resultMode], '研究结果') + ' · 处理位置：' + locationLabel,
       );
       clearChildren(refs.sectionList);
-      var evidenceOnly = result.processing_location === 'none';
-      if (evidenceOnly && MODEL_MODES[resultMode]) {
+      var evidenceOnly = result.processing_location === 'none' || result.privacy_anomaly;
+      if (result.privacy_anomaly) {
+        setText(refs.analysisNotice, '隐私异常：服务报告了未经本次明确同意的云端处理；已拒绝显示模型结论。请检查 bridge 配置。');
+        refs.analysisNotice.hidden = false;
+      } else if (evidenceOnly && MODEL_MODES[resultMode]) {
         setText(refs.analysisNotice, '当前没有可用模型，以下仅保留页码证据摘录；未完成' + MODE_LABELS[resultMode] + '。');
         refs.analysisNotice.hidden = false;
       } else if (evidenceOnly) {
@@ -871,24 +920,30 @@
       refs.notePreview.hidden = !preview;
       refs.writeConfirmation.hidden = !(state.writeAuthorization && state.writeAuthorization.authorized);
       if (preview) {
-        setText(refs.notePreviewText, preview.note_html);
-        setText(refs.notePreviewMeta, '摘要：' + displayText(preview.digest, '未知') + ' · ' + formatExpiry(preview.expires_at));
+        setText(refs.notePreviewText, preview.note_text || preview.note_html);
+        setText(refs.notePreviewMeta, '校验码：' + displayText(preview.digest, '未知') + ' · ' + formatExpiry(preview.expires_at));
       }
       if (state.writeAuthorization && state.writeAuthorization.authorized && preview) {
         setText(
           refs.writeSummary,
-          '将写入 Zotero 子笔记\n标题：' + displayText(preview.title) + '\n摘要：' + displayText(preview.digest) + '\n令牌：' + displayText(preview.preview_token) + '\n' + formatExpiry(preview.expires_at),
+          '将写入 Zotero 子笔记\n标题：' + displayText(preview.title) + '\n校验码：' + displayText(preview.digest) + '\n' + formatExpiry(preview.expires_at),
         );
       }
       renderControls();
     }
 
     function renderCloudGrant() {
+      if (state.cloudGrant && grantExpiryMs(state.cloudGrant) !== null && grantExpiryMs(state.cloudGrant) <= Date.now()) {
+        clearGrantExpiryTimer();
+        state.cloudGrant = null;
+        state.cloudStatusMessage = '当前面板中的授权回执已到期；可对当前文献执行撤销。';
+      }
       if (!state.cloudGrant) {
-        setText(refs.cloudStatus, '未授权');
+        setText(refs.cloudStatus, state.cloudStatusMessage || '授权状态未在本面板保留；可对当前文献执行撤销。');
         renderControls();
         return;
       }
+      state.cloudStatusMessage = '';
       setText(refs.cloudStatus, '已授权读取公开论文至 ' + displayText(state.cloudGrant.expires_at, '未知时间') + '（不包含 notes）');
       renderControls();
     }
@@ -897,21 +952,88 @@
       var result = state.analysis;
       if (!result) return '';
       var lines = [];
-      if (result.processing_location !== 'none') {
+      if (result.processing_location !== 'none' && !result.privacy_anomaly) {
         result.sections.forEach(function sectionLine(section) {
           lines.push(displayText(section && section.title, '未命名部分'));
           lines.push(displayText(section && (section.content || section.summary)));
+          if (section && Array.isArray(section.evidence_ids) && section.evidence_ids.length) {
+            lines.push('证据链：' + section.evidence_ids.map(function sectionEvidenceId(id) {
+              return displayText(id);
+            }).join('、'));
+          }
         });
       }
       if (result.evidence.length) {
         lines.push('页码证据');
         result.evidence.forEach(function evidenceLine(span) {
-          lines.push('[' + formatPage(span && span.page, span && span.page_label) + '] ' + displayText(span && span.text));
+          var evidenceId = displayText(span && span.evidence_id, '未知证据');
+          var physicalPage = '物理页码 ' + displayText(span && span.page, '未知');
+          var source = displayText(span && span.source, '未知来源');
+          lines.push('[' + evidenceId + '] ' + physicalPage + ' · source: ' + source);
+          lines.push(displayText(span && span.text));
         });
       }
       return lines.filter(function nonEmpty(line) {
         return line !== '';
       }).join('\n\n');
+    }
+
+    function citationStatusText(status) {
+      var key = displayText(status, 'unknown').trim().toLowerCase();
+      var labels = {
+        ok: '通过',
+        valid: '有效',
+        verified: '已核验',
+        matched: '信息匹配',
+        mismatch: '信息不一致',
+        not_found: '未找到',
+        notfound: '未找到',
+        retracted: '发现撤稿/撤回风险',
+        withdrawn: '发现撤稿/撤回风险',
+        unknown: '未知（不能据此确认无撤稿）',
+        error: '核验失败',
+      };
+      return labels[key] || displayText(status, '未知');
+    }
+
+    function citationIssues(result) {
+      if (!isObject(result)) return '无';
+      var issues = result.issues;
+      if (issues === undefined || issues === null || issues === '') return '无';
+      if (Array.isArray(issues)) {
+        if (!issues.length) return '无';
+        return issues.map(function issueText(issue) {
+          return displayText(issue);
+        }).join('；');
+      }
+      return displayText(issues);
+    }
+
+    function renderCitationAudit(report) {
+      if (!isObject(report) || !Array.isArray(report.results)) {
+        return '核验结果格式异常：未收到 results 数组。';
+      }
+      var lines = [];
+      if (report.status !== undefined) lines.push('报告状态：' + citationStatusText(report.status));
+      if (!report.results.length) {
+        lines.push('本次没有返回 DOI 结果；未知状态不能表述为无撤稿。');
+      }
+      report.results.forEach(function renderCitationResult(result, index) {
+        if (!isObject(result)) {
+          lines.push('结果 ' + String(index + 1) + '：' + displayText(result));
+          return;
+        }
+        lines.push('DOI：' + displayText(result.doi, '未知'));
+        lines.push('状态：' + citationStatusText(result.status));
+        lines.push('问题：' + citationIssues(result));
+        if (result.details !== undefined) lines.push('详情：' + safeJson(result.details));
+      });
+      if (Array.isArray(report.warnings) && report.warnings.length) {
+        lines.push('提醒：' + report.warnings.map(function warningText(warning) {
+          return displayText(warning);
+        }).join('；'));
+      }
+      return lines.join('\n');
     }
 
     function rpc(method, params) {
@@ -1110,7 +1232,7 @@
         function acceptAuthorization(result) {
           if (isObject(result) && result.authorized === true) {
             state.writeAuthorization = cloneObject(result);
-            setText(refs.noteStatus, 'Zotero 已授权本次本地写入；请再次确认摘要和令牌。');
+            setText(refs.noteStatus, 'Zotero 已授权本次本地写入；请再次确认预览内容和校验码。');
             renderNote();
           } else {
             state.writeAuthorization = null;
@@ -1179,7 +1301,7 @@
           return rpc('audit_citations', { requests: requests, allow_network: true });
         },
         function acceptAudit(result) {
-          setText(refs.doiStatus, safeJson(result));
+          setText(refs.doiStatus, renderCitationAudit(result));
         },
         {
           status: '正在使用公网公开元数据核验…',
@@ -1205,6 +1327,8 @@
         function acceptGrant(result) {
           if (isObject(result) && (result.granted === true || result.expires_at)) {
             state.cloudGrant = cloneObject(result);
+            state.cloudStatusMessage = '';
+            scheduleGrantExpiry(state.cloudGrant, generation);
             renderCloudGrant();
           } else {
             showError('公开论文读取授权返回不完整，未标记为已授权。');
@@ -1218,7 +1342,7 @@
     }
 
     function runRevokeCloud() {
-      if (destroyed || !state.context || !state.cloudGrant || state.inFlight.has('revokeCloud')) return;
+      if (destroyed || !state.context || state.inFlight.has('revokeCloud')) return;
       var generation = state.contextGeneration;
       var itemKey = state.context.item_key;
       return runRequest(
@@ -1229,11 +1353,14 @@
         },
         function acceptRevoke(result) {
           if (isObject(result) && result.revoked === true) {
+            clearGrantExpiryTimer();
             state.cloudGrant = null;
-            setText(refs.cloudStatus, '读取授权已撤销。');
+            state.cloudStatusMessage = '当前文献读取授权已撤销。';
             renderCloudGrant();
           } else {
-            showError('撤销结果未知，未自动重试。');
+            state.cloudStatusMessage = '撤销结果未知；当前面板未改变授权状态。';
+            setText(refs.cloudStatus, state.cloudStatusMessage);
+            showError('撤销结果未知；当前面板未改变授权状态。');
           }
         },
         { status: '正在撤销 Codex 读取授权…' },
@@ -1329,7 +1456,9 @@
       invalidateDocumentRequests();
       state.context = nextContext ? cloneObject(nextContext) : null;
       state.selection = null;
+      clearGrantExpiryTimer();
       state.cloudGrant = null;
+      state.cloudStatusMessage = '';
       refs.sensitivitySensitive.checked = true;
       refs.sensitivityPublic.checked = false;
       refs.allowCloud.checked = false;
@@ -1343,6 +1472,7 @@
       renderContext();
       renderSelection();
       renderPrivacy();
+      renderCloudGrant();
       renderControls();
     }
 
@@ -1362,6 +1492,7 @@
       destroyed = true;
       state.contextGeneration += 1;
       state.inFlight.clear();
+      clearGrantExpiryTimer();
       cleanups.splice(0).forEach(function cleanupListener(cleanup) {
         cleanup();
       });

@@ -72,6 +72,27 @@ function setup(adapter = makeAdapter()) {
   return { dom, panel, root, adapter };
 }
 
+function setupXml(adapterA = makeAdapter(), adapterB = makeAdapter()) {
+  const dom = new JSDOM(
+    '<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"><box id="left"/><box id="right"/></window>',
+    {
+      contentType: 'application/xml',
+      runScripts: 'outside-only',
+      pretendToBeVisual: true,
+    },
+  );
+  dom.window.eval(PANEL_SOURCE);
+  const left = dom.window.document.getElementById('left');
+  const right = dom.window.document.getElementById('right');
+  const panelA = dom.window.ZoteroResearchPanel.mount(left, adapterA);
+  const panelB = dom.window.ZoteroResearchPanel.mount(right, adapterB);
+  const rootA = left.querySelector('[data-zrp-root]');
+  const rootB = right.querySelector('[data-zrp-root]');
+  assert.ok(rootA, 'XML mount should create the first panel root');
+  assert.ok(rootB, 'XML mount should create the second panel root');
+  return { dom, left, right, panelA, panelB, rootA, rootB, adapterA, adapterB };
+}
+
 async function settle() {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -153,6 +174,32 @@ test('设置文献与选文会显示快照，并默认保持本地敏感模式',
   panel.destroy();
 });
 
+test('XUL/XML 宿主使用 XHTML namespace，控件可交互且各实例 radio 不互相取消', async () => {
+  const { dom, panelA, panelB, rootA, rootB, adapterA } = setupXml();
+  const xhtml = 'http://www.w3.org/1999/xhtml';
+  panelA.setContext(context({ item_key: 'ITEM-A', title: 'XML paper A' }));
+  panelB.setContext(context({ item_key: 'ITEM-B', title: 'XML paper B' }));
+
+  assert.equal(rootA.namespaceURI, xhtml);
+  for (const control of rootA.querySelectorAll('input, button, select, textarea')) {
+    assert.equal(control.namespaceURI, xhtml, `${control.localName} should be XHTML`);
+  }
+  const firstRadio = rootA.querySelector('[data-testid="sensitivity-sensitive"]');
+  const secondRadio = rootB.querySelector('[data-testid="sensitivity-sensitive"]');
+  assert.notEqual(firstRadio.name, secondRadio.name);
+  rootA.querySelector('[data-testid="sensitivity-public"]').click();
+  assert.equal(rootA.querySelector('[data-testid="sensitivity-public"]').checked, true);
+  assert.equal(secondRadio.checked, true);
+
+  panelA.focusQuestion();
+  assert.equal(dom.window.document.activeElement, rootA.querySelector('[data-testid="question"]'));
+  rootA.querySelector('[data-testid="analysis-submit"]').click();
+  await settle();
+  assert.equal(adapterA.calls.filter((call) => call.method === 'analyze').length, 1);
+  panelA.destroy();
+  panelB.destroy();
+});
+
 test('无模型时只允许证据摘录，翻译/模拟审稿不伪称完成', async () => {
   const adapter = makeAdapter({
     rpc(method, params) {
@@ -172,6 +219,33 @@ test('无模型时只允许证据摘录，翻译/模拟审稿不伪称完成', a
   assert.equal(root.querySelector('[data-testid="analysis-submit"]').disabled, true);
   assert.match(root.querySelector('[data-testid="no-model-notice"]').textContent, /不会伪称完成/);
   assert.equal(adapter.calls.filter((call) => call.method === 'analyze').length, 0);
+  panel.destroy();
+});
+
+test('未经同意的 external processing_location 触发隐私异常，拒绝模型结论且不声称已降级', async () => {
+  const adapter = makeAdapter({
+    rpc(method, params) {
+      this.calls.push({ method, params });
+      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: { local: null, external: 'Cloud model' } });
+      if (method === 'analyze') return Promise.resolve(analysis({
+        processing_location: 'external',
+        sections: [{ title: 'Model conclusion', content: 'Do not show this', evidence_ids: ['ev-1'] }],
+      }));
+      return Promise.resolve({});
+    },
+  });
+  const { root, panel } = setup(adapter);
+  panel.setContext(context());
+  await settle();
+  root.querySelector('[data-testid="analysis-submit"]').click();
+  await settle();
+
+  assert.match(root.querySelector('[data-testid="analysis-notice"]').textContent, /隐私异常/);
+  assert.match(root.querySelector('[data-testid="analysis-notice"]').textContent, /未经本次明确同意的云端处理/);
+  assert.doesNotMatch(root.querySelector('[data-testid="analysis-notice"]').textContent, /降级/);
+  assert.doesNotMatch(root.querySelector('[data-testid="analysis-result"]').textContent, /Model conclusion/);
+  assert.equal(root.querySelectorAll('.zrp-analysis-section').length, 0);
+  assert.match(root.querySelector('[data-testid="analysis-meta"]')?.textContent || root.querySelector('[data-testid="analysis-result"]').textContent, /隐私异常/);
   panel.destroy();
 });
 
@@ -279,6 +353,7 @@ test('笔记预览只读显示，保存先授权，确认摘要/令牌后才 wri
           digest: 'note-digest',
           parent_item_key: 'ITEM-1',
           title: 'Safe note',
+          note_text: 'Safe note\nKey finding\n<script>window.__xss = true</script>',
           note_html: '<p><strong>Unsafe?</strong><script>window.__xss = true</script></p>',
           tags: ['research'],
           expires_at: '2099-01-01T00:00:00Z',
@@ -302,15 +377,23 @@ test('笔记预览只读显示，保存先授权，确认摘要/令牌后才 wri
   assert.equal(adapter.calls.filter((call) => call.method === 'write_note').length, 0);
   assert.equal(dom.window.__xss, undefined);
   assert.equal(root.querySelectorAll('script').length, 0);
-  assert.match(root.querySelector('[data-testid="note-preview"]').textContent, /<p>/);
+  assert.match(root.querySelector('[data-testid="note-preview"]').textContent, /Safe note/);
   assert.match(root.querySelector('[data-testid="note-preview"]').textContent, /<script>/);
+  assert.doesNotMatch(root.querySelector('[data-testid="note-preview"]').textContent, /<p>/);
+  const previewCall = adapter.calls.find((call) => call.method === 'preview_note');
+  assert.match(previewCall.params.content, /证据链：ev-1/);
+  assert.match(previewCall.params.content, /物理页码 4/);
+  assert.match(previewCall.params.content, /source: pdf/);
+  assert.equal(root.querySelector('[data-testid="note-save"]').textContent, '确认内容并写入笔记');
 
   root.querySelector('[data-testid="note-save"]').click();
   await settle();
   assert.equal(adapter.calls.filter((call) => call.method === 'authorize_write').length, 1);
   assert.equal(adapter.calls.filter((call) => call.method === 'write_note').length, 0);
   assert.match(root.querySelector('[data-testid="write-confirmation"]').textContent, /note-digest/);
-  assert.match(root.querySelector('[data-testid="write-confirmation"]').textContent, /note-token/);
+  assert.match(root.querySelector('[data-testid="write-confirmation"]').textContent, /校验码/);
+  assert.doesNotMatch(root.querySelector('[data-testid="write-confirmation"]').textContent, /note-token/);
+  assert.doesNotMatch(root.querySelector('[data-testid="write-confirmation"]').textContent, /令牌/);
 
   root.querySelector('[data-testid="note-write-confirm"]').click();
   root.querySelector('[data-testid="note-write-confirm"]').click();
@@ -377,7 +460,10 @@ test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤�
     rpc(method, params) {
       this.calls.push({ method, params });
       if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-      if (method === 'audit_citations') return Promise.resolve({ findings: [{ doi: '10.1000/test', status: 'ok' }] });
+      if (method === 'audit_citations') return Promise.resolve({
+        status: 'ok',
+        results: [{ doi: '10.1000/test', status: 'unknown', issues: ['撤稿状态未确定'], details: { source: 'public-metadata' } }],
+      });
       if (method === 'grant_cloud_access') return Promise.resolve({ granted: true, expires_at: '2099-01-01T00:10:00Z' });
       if (method === 'revoke_cloud_access') return Promise.resolve({ revoked: true });
       return Promise.resolve({});
@@ -394,6 +480,10 @@ test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤�
   assert.equal(doiParams.allow_network, true);
   assert.equal(doiParams.requests.length, 1);
   assert.equal(doiParams.requests[0].doi, '10.1000/test');
+  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /状态：未知/);
+  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /问题：撤稿状态未确定/);
+  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /详情：/);
+  assert.doesNotMatch(root.querySelector('[data-testid="doi-status"]').textContent, /items/);
 
   root.querySelector('[data-testid="codex-consent"]').click();
   root.querySelector('[data-testid="grant-codex"]').click();
@@ -409,6 +499,44 @@ test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤�
   await settle();
   assert.equal(adapter.calls.filter((call) => call.method === 'revoke_cloud_access').length, 1);
   assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, false);
+  panel.destroy();
+});
+
+test('授权回执只在当前面板内存，撤销按钮始终可用，过期会清除 UI 回执', async () => {
+  const adapter = makeAdapter({
+    rpc(method, params) {
+      this.calls.push({ method, params });
+      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
+      if (method === 'grant_cloud_access') {
+        return Promise.resolve({ granted: true, expires_at: new Date(Date.now() + 30).toISOString() });
+      }
+      if (method === 'revoke_cloud_access') return Promise.resolve({ revoked: true });
+      return Promise.resolve({});
+    },
+  });
+  const { root, panel } = setup(adapter);
+  panel.setContext(context({ item_key: 'ITEM-A' }));
+  assert.equal(root.querySelector('[data-testid="revoke-codex"]').hidden, false);
+  assert.equal(root.querySelector('[data-testid="revoke-codex"]').disabled, false);
+  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /未在本面板保留/);
+
+  root.querySelector('[data-testid="codex-consent"]').click();
+  root.querySelector('[data-testid="grant-codex"]').click();
+  await settle();
+  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, true);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, false);
+  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /回执已到期/);
+
+  panel.setContext(context({ item_key: 'ITEM-B' }));
+  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, false);
+  assert.equal(root.querySelector('[data-testid="revoke-codex"]').hidden, false);
+  assert.equal(root.querySelector('[data-testid="revoke-codex"]').disabled, false);
+  root.querySelector('[data-testid="revoke-codex"]').click();
+  await settle();
+  const revoke = adapter.calls.filter((call) => call.method === 'revoke_cloud_access').at(-1);
+  assert.equal(revoke.params.item_key, 'ITEM-B');
+  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /已撤销/);
   panel.destroy();
 });
 
