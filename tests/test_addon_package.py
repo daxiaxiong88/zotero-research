@@ -32,6 +32,12 @@ _RUNTIME_FILES = (
     "locale/en-US/zotero-research.ftl",
     "locale/zh-CN/zotero-research.ftl",
 )
+_DIRECTORY_ENTRIES = (
+    "content/",
+    "locale/",
+    "locale/en-US/",
+    "locale/zh-CN/",
+)
 
 
 def _make_addon_tree(root: Path) -> None:
@@ -44,14 +50,13 @@ def _make_addon_tree(root: Path) -> None:
                 "id": "zotero-research@local.invalid",
                 "strict_min_version": "10.0",
                 "strict_max_version": "10.0.*",
+                "update_url": "https://zotero-research.invalid/fixture-updates.json",
             }
         },
     }
     config = {
         "bridgeExecutable": "template-placeholder",
         "workingDirectory": "template-placeholder",
-        "host": "127.0.0.1",
-        "port": 23120,
     }
     for relative_path in _RUNTIME_FILES:
         path = root / relative_path
@@ -88,16 +93,21 @@ def test_build_addon_injects_local_paths_and_writes_sidecars(tmp_path: Path) -> 
     assert result.manifest_path == output.with_name(output.name + ".manifest.json")
 
     with zipfile.ZipFile(result.xpi_path) as archive:
-        assert archive.namelist() == sorted(_RUNTIME_FILES)
+        assert archive.namelist() == sorted([*_DIRECTORY_ENTRIES, *_RUNTIME_FILES])
         assert {info.date_time for info in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
         assert {info.create_system for info in archive.infolist()} == {0}
         config = json.loads(archive.read("config.json"))
         assert config == {
             "bridgeExecutable": str(bridge_executable.resolve()),
             "workingDirectory": str(working_directory.resolve()),
-            "host": "127.0.0.1",
-            "port": 23120,
         }
+        assert archive.read("manifest.json") == (addon_dir / "manifest.json").read_bytes()
+        zipped_manifest = json.loads(archive.read("manifest.json"))
+        assert (
+            zipped_manifest["applications"]["zotero"]["update_url"]
+            == "https://zotero-research.invalid/fixture-updates.json"
+        )
+        assert zipped_manifest["manifest_version"] == 2
 
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     assert result.sha256_path.read_text(encoding="utf-8") == f"{digest}  {output.name}\n"
@@ -141,6 +151,32 @@ def test_build_addon_is_byte_for_byte_deterministic(tmp_path: Path) -> None:
     assert first_output.read_bytes() == second_output.read_bytes()
 
 
+def test_build_addon_preserves_declared_main_update_url(tmp_path: Path) -> None:
+    addon_dir, bridge_executable, working_directory, output = _valid_inputs(tmp_path)
+    manifest_path = addon_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["applications"]["zotero"]["update_url"] = (
+        "https://zotero-research.invalid/updates.json"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = build_addon(
+        addon_dir=addon_dir,
+        bridge_executable=bridge_executable,
+        working_directory=working_directory,
+        output=output,
+    )
+
+    with zipfile.ZipFile(result.xpi_path) as archive:
+        packaged_manifest = json.loads(archive.read("manifest.json"))
+
+    assert packaged_manifest["manifest_version"] == 2
+    assert (
+        packaged_manifest["applications"]["zotero"]["update_url"]
+        == "https://zotero-research.invalid/updates.json"
+    )
+
+
 def _valid_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     addon_dir = tmp_path / "addon"
     _make_addon_tree(addon_dir)
@@ -155,15 +191,17 @@ def _valid_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
+        ("manifest_version", 3, "manifest_version"),
         ("version", "0.2.1", "manifest version"),
         ("zotero_id", "", "applications.zotero.id"),
         ("zotero_id", "zotero-research@example.invalid", "applications.zotero.id"),
         ("strict_min_version", "9.9", "strict_min_version"),
         ("strict_max_version", "10.1.*", "strict_max_version"),
+        ("zotero_update_url", "", "update_url"),
     ],
 )
 def test_build_addon_validates_manifest_identity_and_zotero_versions(
-    tmp_path: Path, field: str, value: str, message: str
+    tmp_path: Path, field: str, value: object, message: str
 ) -> None:
     addon_dir, bridge_executable, working_directory, output = _valid_inputs(tmp_path)
     manifest_path = addon_dir / "manifest.json"
@@ -174,6 +212,8 @@ def test_build_addon_validates_manifest_identity_and_zotero_versions(
         manifest["applications"]["zotero"]["strict_min_version"] = value
     elif field == "strict_max_version":
         manifest["applications"]["zotero"]["strict_max_version"] = value
+    elif field == "zotero_update_url":
+        manifest["applications"]["zotero"]["update_url"] = value
     else:
         manifest[field] = value
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -203,8 +243,11 @@ def test_build_addon_requires_exact_zotero_maximum_version(tmp_path: Path) -> No
         )
 
 
-@pytest.mark.parametrize("missing", ["manifest.json", "bootstrap.js", "config.json"])
-def test_build_addon_requires_root_manifest_bootstrap_and_config(
+@pytest.mark.parametrize(
+    "missing",
+    _RUNTIME_FILES,
+)
+def test_build_addon_requires_every_allowlisted_runtime_file(
     tmp_path: Path, missing: str
 ) -> None:
     addon_dir, bridge_executable, working_directory, output = _valid_inputs(tmp_path)
@@ -300,6 +343,43 @@ def test_build_addon_rejects_credentials_in_config_template(tmp_path: Path) -> N
             working_directory=working_directory,
             output=output,
         )
+
+
+def test_build_addon_rejects_unknown_config_fields(tmp_path: Path) -> None:
+    addon_dir, bridge_executable, working_directory, output = _valid_inputs(tmp_path)
+    config_path = addon_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["host"] = "127.0.0.1"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(PackageError, match="unknown config field"):
+        build_addon(
+            addon_dir=addon_dir,
+            bridge_executable=bridge_executable,
+            working_directory=working_directory,
+            output=output,
+        )
+
+
+def test_xpi_includes_locale_directories_for_jar_discovery(tmp_path: Path) -> None:
+    addon_dir, bridge_executable, working_directory, output = _valid_inputs(tmp_path)
+    result = build_addon(
+        addon_dir=addon_dir,
+        bridge_executable=bridge_executable,
+        working_directory=working_directory,
+        output=output,
+    )
+
+    with zipfile.ZipFile(result.xpi_path) as archive:
+        jar_directory_names = [
+            name for name in archive.namelist() if name.endswith("/")
+        ]
+
+    assert set(_DIRECTORY_ENTRIES).issubset(jar_directory_names)
+    assert {name for name in jar_directory_names if name.startswith("locale/")} >= {
+        "locale/en-US/",
+        "locale/zh-CN/",
+    }
 
 
 def test_build_addon_requires_absolute_existing_exe_and_repository(tmp_path: Path) -> None:

@@ -39,7 +39,14 @@ ALLOWED_RUNTIME_FILES = frozenset(
         "locale/zh-CN/zotero-research.ftl",
     }
 )
-REQUIRED_RUNTIME_FILES = frozenset({"manifest.json", "bootstrap.js", "config.json"})
+REQUIRED_RUNTIME_FILES = ALLOWED_RUNTIME_FILES
+_DIRECTORY_ENTRIES = (
+    "content/",
+    "locale/",
+    "locale/en-US/",
+    "locale/zh-CN/",
+)
+_ALLOWED_CONFIG_FIELDS = frozenset({"bridgeExecutable", "workingDirectory"})
 
 _SENSITIVE_SUFFIXES = frozenset(
     {".crt", ".db", ".der", ".jks", ".key", ".pem", ".pfx", ".p12", ".secret", ".sqlite"}
@@ -93,9 +100,11 @@ def build_addon(
 
     source_files = _validate_addon_tree(source_dir)
     manifest = _read_manifest(source_dir / "manifest.json")
-    config = _read_config(source_dir / "config.json")
-    config["bridgeExecutable"] = str(bridge_path)
-    config["workingDirectory"] = str(repository_path)
+    _read_config(source_dir / "config.json")
+    config = {
+        "bridgeExecutable": str(bridge_path),
+        "workingDirectory": str(repository_path),
+    }
     config_bytes = _json_bytes(config)
 
     file_bytes = {
@@ -223,6 +232,8 @@ def _read_json_object(path: Path, description: str) -> dict[str, Any]:
 
 def _read_manifest(path: Path) -> dict[str, Any]:
     manifest = _read_json_object(path, "manifest.json")
+    if manifest.get("manifest_version") != 2:
+        raise PackageError("manifest_version must be 2")
     version = manifest.get("version")
     if version != PACKAGE_VERSION:
         raise PackageError(
@@ -254,12 +265,22 @@ def _read_manifest(path: Path) -> dict[str, Any]:
             "manifest applications.zotero.strict_max_version must be "
             f"{EXPECTED_ZOTERO_MAX_VERSION!r}, got {maximum!r}"
         )
+    update_url = zotero.get("update_url")
+    if not _is_nonempty_text(update_url):
+        raise PackageError(
+            "manifest applications.zotero.update_url must be a non-empty string"
+        )
     return manifest
 
 
 def _read_config(path: Path) -> dict[str, Any]:
     config = _read_json_object(path, "config.json")
     _reject_sensitive_config(config)
+    unknown_fields = sorted(set(config).difference(_ALLOWED_CONFIG_FIELDS))
+    if unknown_fields:
+        raise PackageError(
+            "unknown config field(s) in config.json: " + ", ".join(unknown_fields)
+        )
     return config
 
 
@@ -326,12 +347,16 @@ def _write_xpi_atomically(output: Path, files: dict[str, bytes]) -> None:
     temporary_path = _temporary_path(output)
     try:
         with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_STORED) as archive:
-            for relative_path in sorted(files):
+            for relative_path in sorted((*_DIRECTORY_ENTRIES, *files)):
                 info = zipfile.ZipInfo(relative_path, date_time=_ZIP_TIMESTAMP)
                 info.compress_type = zipfile.ZIP_STORED
                 info.create_system = 0
-                info.external_attr = 0o100644 << 16
-                archive.writestr(info, files[relative_path])
+                if relative_path.endswith("/"):
+                    info.external_attr = (0o40755 << 16) | 0x10
+                    archive.writestr(info, b"")
+                else:
+                    info.external_attr = 0o100644 << 16
+                    archive.writestr(info, files[relative_path])
         os.replace(temporary_path, output)
     finally:
         temporary_path.unlink(missing_ok=True)
