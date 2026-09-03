@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from . import __version__
 from .analysis import AnalysisTask, PaperAnalysis, PaperAnalysisBuilder
+from .citations import CitationAuditor, CitationAuditReport, CitationRequest
 from .model import ModelClient
 from .models import (
     DocumentSensitivity,
@@ -19,6 +20,7 @@ from .models import (
 )
 from .notes import NotePreviewStore, PreviewMismatch
 from .pdf import PdfExtractor
+from .pdf_geometry import PdfQuoteLocator, QuoteLocation
 from .privacy import PrivacyPolicy
 from .reading import ReadingCardBuilder
 from .retrieval import EvidenceRetriever
@@ -43,6 +45,7 @@ class ResearchService:
         local_model: ModelClient | None = None,
         privacy_policy: PrivacyPolicy | None = None,
         note_previews: NotePreviewStore | None = None,
+        citation_auditor: CitationAuditor | None = None,
     ) -> None:
         self._zotero = zotero
         self._pdf_extractor = pdf_extractor or PdfExtractor()
@@ -53,6 +56,7 @@ class ResearchService:
         self._model = model
         self._local_model = local_model or (model if model and model.is_local else None)
         self._note_previews = note_previews or NotePreviewStore()
+        self._citation_auditor = citation_auditor or CitationAuditor()
 
     def close(self) -> None:
         self._zotero.close()
@@ -69,6 +73,9 @@ class ResearchService:
 
     def verify_instance(self, expected_server_id: str) -> None:
         self._zotero.pin_instance(expected_server_id)
+
+    def parser_status(self) -> dict[str, str | None]:
+        return {"fast": "pymupdf", "heavy": self._pdf_extractor.heavy_parser_name}
 
     def content_server_id(self) -> str | None:
         status = self._zotero.health()
@@ -104,12 +111,14 @@ class ResearchService:
         attachment_key: str,
         *,
         allow_heavy_fallback: bool = False,
+        force_heavy: bool = False,
     ) -> PdfExtraction:
         path = self._zotero.get_attachment_path(attachment_key)
         return self._pdf_extractor.extract(
             path,
             attachment_key=attachment_key,
             allow_heavy_fallback=allow_heavy_fallback,
+            force_heavy=force_heavy,
         )
 
     def retrieve_evidence(
@@ -119,10 +128,12 @@ class ResearchService:
         *,
         top_k: int = 5,
         allow_heavy_fallback: bool = False,
+        force_heavy: bool = False,
     ) -> EvidenceResults:
         extraction = self.extract_pdf(
             attachment_key,
             allow_heavy_fallback=allow_heavy_fallback,
+            force_heavy=force_heavy,
         )
         return self._evidence_retriever.retrieve(extraction, query, top_k=top_k)
 
@@ -134,6 +145,7 @@ class ResearchService:
         sensitivity: DocumentSensitivity = "sensitive",
         allow_cloud: bool = False,
         allow_heavy_fallback: bool = False,
+        force_heavy: bool = False,
     ) -> ReadingCard:
         context = self.get_item_context(item_key)
         pdf_attachments = [
@@ -156,6 +168,7 @@ class ResearchService:
         extraction = self.extract_pdf(
             selected_key,
             allow_heavy_fallback=allow_heavy_fallback,
+            force_heavy=force_heavy,
         )
         return ReadingCardBuilder(
             retriever=self._evidence_retriever,
@@ -180,6 +193,7 @@ class ResearchService:
         sensitivity: DocumentSensitivity = "sensitive",
         allow_cloud: bool = False,
         allow_heavy_fallback: bool = False,
+        force_heavy: bool = False,
     ) -> PaperAnalysis:
         context = self.get_item_context(item_key)
         candidates = [
@@ -190,7 +204,9 @@ class ResearchService:
         ]
         if not candidates:
             raise ValueError("This item has no matching local PDF attachment")
-        extraction = self.extract_pdf(candidates[0].key, allow_heavy_fallback=allow_heavy_fallback)
+        extraction = self.extract_pdf(
+            candidates[0].key, allow_heavy_fallback=allow_heavy_fallback, force_heavy=force_heavy
+        )
         return PaperAnalysisBuilder(
             retriever=self._evidence_retriever,
             privacy_policy=self._privacy_policy,
@@ -205,6 +221,15 @@ class ResearchService:
             sensitivity=sensitivity,
             allow_cloud=allow_cloud,
         )
+
+    def locate_quote(self, attachment_key: str, *, page: int, quote: str) -> QuoteLocation:
+        path = self._zotero.get_attachment_path(attachment_key)
+        return PdfQuoteLocator().locate(path, page=page, quote=quote)
+
+    def audit_citations(
+        self, requests: list[CitationRequest], *, allow_network: bool = False
+    ) -> CitationAuditReport:
+        return self._citation_auditor.audit(requests, allow_network=allow_network)
 
     def preview_child_note(
         self,

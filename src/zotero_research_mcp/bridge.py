@@ -14,11 +14,13 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from .analysis import AnalysisTask
+from .citations import CitationRequest
 from .config import Settings, build_service
 from .disclosure import ContentConsentStore
 from .model import ModelResponseError
 from .models import DocumentSensitivity
 from .notes import NotePreviewError
+from .pdf import PdfExtractionError
 from .privacy import PrivacyViolation
 from .service import ResearchService
 from .zotero import LocalWriteAuthorizationRequired, LocalWriteOutcomeUnknown
@@ -45,6 +47,7 @@ class _Reading(_Item):
     sensitivity: DocumentSensitivity = "sensitive"
     allow_cloud: StrictBool = False
     allow_heavy_fallback: StrictBool = False
+    force_heavy: StrictBool = False
 
 
 class _Analysis(_Reading):
@@ -59,6 +62,18 @@ class _Evidence(_Params):
     query: str = Field(min_length=1, max_length=8000)
     top_k: int = Field(default=5, ge=1, le=20)
     allow_heavy_fallback: StrictBool = False
+    force_heavy: StrictBool = False
+
+
+class _Locate(_Params):
+    attachment_key: ItemKey
+    page: int = Field(ge=1, le=100_000)
+    quote: str = Field(min_length=1, max_length=12_000)
+
+
+class _Citations(_Params):
+    requests: list[CitationRequest] = Field(min_length=1, max_length=20)
+    allow_network: StrictBool = False
 
 
 class _PreviewNote(_Params):
@@ -85,6 +100,8 @@ _PARAMETERS: dict[str, type[BaseModel]] = {
     "analyze": _Analysis,
     "reading_card": _Reading,
     "evidence": _Evidence,
+    "locate": _Locate,
+    "audit_citations": _Citations,
     "preview_note": _PreviewNote,
     "authorize_write": _Params,
     "write_note": _WriteNote,
@@ -115,7 +132,11 @@ class BridgeApplication:
         args = parameters.model_dump()
         if method == "health":
             report = self.service.health_check().model_dump(mode="json")
-            return {**report, "models": self.service.model_status()}
+            return {
+                **report,
+                "models": self.service.model_status(),
+                "parsers": self.service.parser_status(),
+            }
         if method == "shutdown":
             return {"stopping": True}
         if not envelope.expected_server_id:
@@ -132,6 +153,13 @@ class BridgeApplication:
             return self.service.generate_reading_card(**args)
         if method == "evidence":
             return self.service.retrieve_evidence(**args)
+        if method == "locate":
+            return self.service.locate_quote(**args)
+        if method == "audit_citations":
+            citation_params = cast(_Citations, parameters)
+            return self.service.audit_citations(
+                citation_params.requests, allow_network=citation_params.allow_network
+            )
         if method == "preview_note":
             return self.service.preview_child_note(**args)
         if method == "authorize_write":
@@ -259,6 +287,13 @@ class _Handler(BaseHTTPRequestHandler):
             except ModelResponseError:
                 self._error(
                     422, "model_response_invalid", "模型结果缺少可靠证据或格式无效，本次未保存。"
+                )
+            except PdfExtractionError:
+                self._error(
+                    422,
+                    "pdf_processing_failed",
+                    "PDF 解析失败。若使用重解析，请检查 MinerU 可执行文件及完整本地模型目录；"
+                    "没有自动上传或下载。",
                 )
             except (ValidationError, ValueError, UnicodeError, RecursionError):
                 self._error(400, "invalid_request", "请求参数无效，或当前文献/选文不满足要求。")

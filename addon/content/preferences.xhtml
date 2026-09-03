@@ -1,0 +1,28 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml" onload="ZoteroResearchPreferences.init()">
+  <groupbox>
+    <html:h2>科研助手 · 本机模型</html:h2>
+    <html:p>本插件不会自动下载模型。先在 Ollama / vLLM 中安装并运行模型，再填写实际模型名称。</html:p>
+    <html:label>本地模型名称（空白时沿用后端 .env）</html:label>
+    <html:input id="zra-local-model" type="text" placeholder="填写 ollama list 中的完整名称" />
+    <html:label>本地 OpenAI 兼容地址（必须是回环地址）</html:label>
+    <html:input id="zra-local-url" type="text" />
+    <html:p>云端模型及 API Key 只在后端目录的 .env 中配置，不会打包进 XPI。公开论文仍需逐次勾选云端同意；敏感内容只送本地模型。</html:p>
+  </groupbox>
+  <groupbox>
+    <html:h2>可选：MinerU 本地重解析</html:h2>
+    <html:label>已下载的完整 pipeline 模型目录</html:label>
+    <html:input id="zra-mineru-model" type="text" />
+    <html:label>MinerU 可执行文件（空白时沿用 .env 或 PATH）</html:label>
+    <html:input id="zra-mineru-executable" type="text" />
+    <html:p>未配置时仍可用快速文本解析；公式、复杂版面和扫描件可在面板中选择本地重解析。重解析失败不会自动转用云端。</html:p>
+  </groupbox>
+  <groupbox>
+    <html:h2>连接</html:h2>
+    <html:p id="zra-backend-path">正在读取本机后端位置…</html:p>
+    <html:p>保存后重新连接才生效。重新连接会清除尚未保存的预览；正在处理时不会中断任务。</html:p>
+    <html:button type="button" onclick="ZoteroResearchPreferences.save()">保存设置</html:button>
+    <html:button type="button" onclick="ZoteroResearchPreferences.reconnect()">重新连接</html:button>
+    <html:p id="zra-settings-status" role="status"></html:p>
+  </groupbox>
+</vbox>

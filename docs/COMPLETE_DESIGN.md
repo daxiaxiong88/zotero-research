@@ -19,7 +19,7 @@
 令牌只存于扩展进程内，不放 URL、日志或 MCP 返回值。每个 HTTP 请求带 Bearer token。
 拒绝非本机 Host、任何浏览器 Origin、未授权请求、超大请求和未知方法。stdin 关闭即结束 bridge。
 
-所有数据来自当前 Zotero 的官方 Local API，URL固定回环23119。桥接请求额外校验
+所有数据来自当前 Zotero 的官方 Local API，默认回环23119；隔离测试 profile 可显式配置其他回环端口。桥接请求额外校验
 `expected_server_id`，防止扩展和后端误接到不同文献库。原生注释只在扩展 runtime 中创建。
 
 ## 本机 RPC 契约

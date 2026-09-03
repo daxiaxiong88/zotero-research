@@ -2,7 +2,7 @@
   "name": "zotero-research-panel",
   "private": true,
   "scripts": {
-    "test:js": "node --test tests-js/panel.test.cjs"
+    "test:js": "node --test tests-js/*.test.cjs"
   },
   "devDependencies": {
     "jsdom": "^26.1.0"

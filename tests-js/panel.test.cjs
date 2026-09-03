@@ -341,7 +341,7 @@ test('高亮先 prepare 并显示预览，未确认前不 commit，确认后只�
   panel.destroy();
 });
 
-test('笔记预览只读显示，保存先授权，确认摘要/令牌后才 write_note', async () => {
+test('笔记预览只读显示，先授权再明确确认内容才 write_note', async () => {
   const adapter = makeAdapter({
     rpc(method, params) {
       this.calls.push({ method, params });
@@ -384,7 +384,7 @@ test('笔记预览只读显示，保存先授权，确认摘要/令牌后才 wri
   assert.match(previewCall.params.content, /证据链：ev-1/);
   assert.match(previewCall.params.content, /物理页码 4/);
   assert.match(previewCall.params.content, /source: pdf/);
-  assert.equal(root.querySelector('[data-testid="note-save"]').textContent, '确认内容并写入笔记');
+  assert.equal(root.querySelector('[data-testid="note-save"]').textContent, '请求 Zotero 写入授权');
 
   root.querySelector('[data-testid="note-save"]').click();
   await settle();
@@ -401,6 +401,32 @@ test('笔记预览只读显示，保存先授权，确认摘要/令牌后才 wri
   assert.equal(adapter.calls.filter((call) => call.method === 'write_note').length, 1);
   assert.equal(adapter.calls.find((call) => call.method === 'write_note').params.confirmed_by_user, true);
   panel.destroy();
+});
+
+test('PDF 异步定位失败在面板内显示而不是未处理的 Promise', async () => {
+  const { dom, panel, root } = setup(makeAdapter({
+    navigate: async () => { throw new Error('合成 PDF 已移动'); },
+  }));
+  panel.setContext(context());
+  panel.setSelection({ attachment_key: 'ATT-1', page: 2, text: 'Synthetic quote' });
+  root.querySelector('[data-testid="selection-page"]').click();
+  await settle();
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /PDF 已移动/);
+  panel.destroy(); dom.window.close();
+});
+
+test('真实 Crossref 状态使用中文且不将无公告当作未撤稿', async () => {
+  const { dom, panel, root } = setup(makeAdapter({
+    rpc: async (method) => method === 'health'
+      ? { status: 'ok', models: { local: null, external: null } }
+      : { results: [{ doi: '10.5555/synthetic', status: 'no_notice_found', issues: [] }], warnings: [] },
+  }));
+  root.querySelector('[data-testid="doi-input"]').value = '10.5555/synthetic';
+  root.querySelector('[data-testid="doi-network-consent"]').checked = true;
+  root.querySelector('[data-testid="doi-submit"]').click();
+  await settle();
+  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /不等于无撤稿/);
+  panel.destroy(); dom.window.close();
 });
 
 test('请求中重复点击只发出一次，并在结束后清除云端开关', async () => {

@@ -49,15 +49,13 @@ class EvidenceRetriever:
         ranked = self._rank(chunks, query_tokens, normalized_query)
         evidence = [
             EvidenceSpan(
-                evidence_id=(
-                    f"{extraction.attachment_key}:p{chunk.page}:c{chunk.index}"
-                ),
+                evidence_id=(f"{extraction.attachment_key}:p{chunk.page}:c{chunk.index}"),
                 page=chunk.page,
                 chunk_index=chunk.index,
                 text=chunk.text,
                 score=round(score, 6),
                 source=(
-                    f"zotero://attachment/{extraction.attachment_key}?page={chunk.page}"
+                    f"zotero://open-pdf/library/items/{extraction.attachment_key}?page={chunk.page}"
                 ),
             )
             for score, chunk in ranked[:top_k]
@@ -81,9 +79,7 @@ class EvidenceRetriever:
             for index, text in enumerate(self._split_text(page.text), start=1):
                 tokens = tuple(_tokenize(text))
                 if tokens:
-                    chunks.append(
-                        _Chunk(page=page.number, index=index, text=text, tokens=tokens)
-                    )
+                    chunks.append(_Chunk(page=page.number, index=index, text=text, tokens=tokens))
         return chunks
 
     def _split_text(self, text: str) -> list[str]:
@@ -120,9 +116,7 @@ class EvidenceRetriever:
     ) -> list[tuple[float, _Chunk]]:
         if not chunks:
             return []
-        document_frequency = Counter(
-            token for chunk in chunks for token in set(chunk.tokens)
-        )
+        document_frequency = Counter(token for chunk in chunks for token in set(chunk.tokens))
         average_length = sum(len(chunk.tokens) for chunk in chunks) / len(chunks)
         query_frequency = Counter(query_tokens)
         ranked: list[tuple[float, _Chunk]] = []
@@ -140,13 +134,7 @@ class EvidenceRetriever:
                 normalization = term_frequency + 1.5 * (
                     0.25 + 0.75 * len(chunk.tokens) / max(average_length, 1.0)
                 )
-                score += (
-                    inverse_frequency
-                    * term_frequency
-                    * 2.5
-                    / normalization
-                    * query_count
-                )
+                score += inverse_frequency * term_frequency * 2.5 / normalization * query_count
             if raw_query.casefold() in chunk.text.casefold():
                 score += 1.5
             if score > 0:

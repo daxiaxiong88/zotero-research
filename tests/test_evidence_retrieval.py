@@ -62,6 +62,6 @@ def test_retrieve_evidence_ranks_relevant_page_and_returns_stable_citations(
     assert len(result.evidence) == 2
     assert result.evidence[0].page == 2
     assert result.evidence[0].evidence_id == "PDFKEY23:p2:c1"
-    assert result.evidence[0].source == "zotero://attachment/PDFKEY23?page=2"
+    assert result.evidence[0].source == "zotero://open-pdf/library/items/PDFKEY23?page=2"
     assert "randomized controlled trial" in result.evidence[0].text.lower()
     assert result.evidence[0].score > result.evidence[1].score

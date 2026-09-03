@@ -73,7 +73,10 @@ def test_preview_child_note_escapes_content_and_binds_exact_digest() -> None:
     assert preview.tags == ["AI review", "zotero-research-mcp"]
     assert set(seen_methods) == {"GET"}
     assert preview.server_id == "instance-a"
-    assert preview.note_text == "AI reading card\n\nFinding: 12% improvement.\n\n<script>alert('x')</script>"
+    assert (
+        preview.note_text
+        == "AI reading card\n\nFinding: 12% improvement.\n\n<script>alert('x')</script>"
+    )
 
 
 def test_write_rejects_missing_confirmation_and_digest_mismatch_before_http_write() -> None:

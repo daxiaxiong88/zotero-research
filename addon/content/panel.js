@@ -443,7 +443,7 @@
       notePreview.appendChild(refs.notePreviewText);
       refs.notePreviewMeta = createElement(document, 'div', { className: 'zrp-preview-meta' }, '');
       notePreview.appendChild(refs.notePreviewMeta);
-      refs.noteSave = addButton(notePreview, 'note-save', '确认内容并写入笔记', 'note-save', 'zrp-button');
+      refs.noteSave = addButton(notePreview, 'note-save', '请求 Zotero 写入授权', 'note-save', 'zrp-button');
       noteSection.appendChild(notePreview);
       var writeConfirmation = createElement(document, 'div', {
         className: 'zrp-write-confirmation zrp-notice',
@@ -454,7 +454,7 @@
       refs.writeConfirmation = writeConfirmation;
       refs.writeSummary = createElement(document, 'pre', { className: 'zrp-confirmation-text' }, '');
       writeConfirmation.appendChild(refs.writeSummary);
-      refs.noteWriteConfirm = addButton(writeConfirmation, 'note-write-confirm', '确认摘要并写入笔记', 'note-write-confirm', 'zrp-button zrp-button-primary');
+      refs.noteWriteConfirm = addButton(writeConfirmation, 'note-write-confirm', '确认内容并写入笔记', 'note-write-confirm', 'zrp-button zrp-button-primary');
       noteSection.appendChild(writeConfirmation);
       refs.noteStatus = createElement(document, 'div', { className: 'zrp-meta' }, '');
       noteSection.appendChild(refs.noteStatus);
@@ -848,7 +848,7 @@
       var result = state.analysis;
       refs.analysisResult.hidden = !result;
       if (!result) return;
-      var resultMode = result.mode || refs.mode.value;
+      var resultMode = result.task || refs.mode.value;
       var locationLabel = result.privacy_anomaly
         ? '隐私异常（拒绝显示模型结论）'
         : result.processing_location === 'local'
@@ -858,7 +858,7 @@
           : '仅证据摘录';
       setText(
         refs.analysisMeta,
-        displayText(result.task || MODE_LABELS[resultMode], '研究结果') + ' · 处理位置：' + locationLabel,
+        displayText(MODE_LABELS[resultMode], '研究结果') + ' · 处理位置：' + locationLabel,
       );
       clearChildren(refs.sectionList);
       var evidenceOnly = result.processing_location === 'none' || result.privacy_anomaly;
@@ -981,6 +981,21 @@
     function citationStatusText(status) {
       var key = displayText(status, 'unknown').trim().toLowerCase();
       var labels = {
+        no_notice_found: '本次未检出更新公告（不等于无撤稿）',
+        identity_mismatch: '返回的 DOI 身份不一致，目标未核实',
+        retraction_signal: '发现撤稿/撤回线索，请核对出版方公告',
+        correction_signal: '发现勘误/更正线索',
+        update_signal: '发现更新线索',
+        title_mismatch: '题目不匹配',
+        year_mismatch: '出版年份不匹配',
+        metadata_mismatch: '书目信息不匹配',
+        timeout: '查询超时，状态未知',
+        connection_error: '连接失败，状态未知',
+        rate_limited: '服务限流，状态未知',
+        malformed_json: '服务 JSON 无效，状态未知',
+        malformed_response: '元数据格式不完整，状态未知',
+        redirect_refused: '已拒绝跳转，状态未知',
+        http_error: '查询失败，状态未知',
         ok: '通过',
         valid: '有效',
         verified: '已核验',
@@ -1026,6 +1041,8 @@
         lines.push('DOI：' + displayText(result.doi, '未知'));
         lines.push('状态：' + citationStatusText(result.status));
         lines.push('问题：' + citationIssues(result));
+        if (result.source_url) lines.push('核验来源：' + displayText(result.source_url));
+        if (result.checked_at) lines.push('核验时间：' + displayText(result.checked_at));
         if (result.details !== undefined) lines.push('详情：' + safeJson(result.details));
       });
       if (Array.isArray(report.warnings) && report.warnings.length) {
@@ -1097,7 +1114,10 @@
         return;
       }
       try {
-        rpcAdapter.navigate(attachmentKey, Number(page));
+        var generation = state.contextGeneration;
+        Promise.resolve(rpcAdapter.navigate(attachmentKey, Number(page))).catch(function failedNavigation(error) {
+          if (contextIsCurrent(generation)) showError(displayText(error && error.message, 'PDF 导航失败'));
+        });
       } catch (error) {
         showError(displayText(error && error.message, 'PDF 导航失败'));
       }
@@ -1373,7 +1393,9 @@
         return;
       }
       try {
-        rpcAdapter.openSettings();
+        Promise.resolve(rpcAdapter.openSettings()).catch(function failedSettings(error) {
+          if (!destroyed) showError(displayText(error && error.message, '打开设置失败'));
+        });
       } catch (error) {
         showError(displayText(error && error.message, '打开设置失败'));
       }

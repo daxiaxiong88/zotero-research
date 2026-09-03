@@ -5,6 +5,8 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from .analysis import AnalysisTask, PaperAnalysis
+from .citations import CitationAuditReport, CitationRequest
 from .config import Settings, build_content_policy, build_service
 from .disclosure import MCPContentPolicy
 from .models import (
@@ -19,6 +21,7 @@ from .models import (
     SearchResults,
     WriteAuthorization,
 )
+from .pdf_geometry import QuoteLocation
 from .service import ResearchService
 
 _READ_ONLY = ToolAnnotations(
@@ -59,6 +62,21 @@ def create_mcp_server(
         ),
         log_level="WARNING",
     )
+
+    def authorize_paper_pdf(item_key: str, attachment_key: str | None, allow_cloud: bool) -> str:
+        disclosure.require(item_key, allow_cloud=allow_cloud, server_id=service.content_server_id)
+        context = service.get_item_context(item_key)
+        candidates = [
+            attachment
+            for attachment in context.attachments
+            if attachment.content_type.casefold() == "application/pdf"
+            and (attachment_key is None or attachment.key == attachment_key)
+        ]
+        if not candidates:
+            raise ValueError("This item has no matching PDF attachment")
+        selected = candidates[0].key
+        disclosure.require(selected, allow_cloud=allow_cloud, server_id=service.content_server_id)
+        return selected
 
     @server.tool(
         description="Check Zotero connectivity and report read/write safety capabilities.",
@@ -109,6 +127,7 @@ def create_mcp_server(
         attachment_key: str,
         allow_heavy_fallback: bool = False,
         allow_cloud: bool = False,
+        force_heavy: bool = False,
     ) -> PdfExtraction:
         disclosure.require(
             attachment_key,
@@ -118,6 +137,7 @@ def create_mcp_server(
         return service.extract_pdf(
             attachment_key,
             allow_heavy_fallback=allow_heavy_fallback,
+            force_heavy=force_heavy,
         )
 
     @server.tool(
@@ -131,6 +151,7 @@ def create_mcp_server(
         top_k: int = 5,
         allow_heavy_fallback: bool = False,
         allow_cloud: bool = False,
+        force_heavy: bool = False,
     ) -> EvidenceResults:
         disclosure.require(
             attachment_key,
@@ -142,6 +163,7 @@ def create_mcp_server(
             query,
             top_k=top_k,
             allow_heavy_fallback=allow_heavy_fallback,
+            force_heavy=force_heavy,
         )
 
     @server.tool(
@@ -158,19 +180,82 @@ def create_mcp_server(
         sensitivity: DocumentSensitivity = "sensitive",
         allow_cloud: bool = False,
         allow_heavy_fallback: bool = False,
+        force_heavy: bool = False,
     ) -> ReadingCard:
-        disclosure.require(
-            item_key,
-            allow_cloud=allow_cloud,
-            server_id=service.content_server_id,
-        )
+        selected = authorize_paper_pdf(item_key, attachment_key, allow_cloud)
         return service.generate_reading_card(
             item_key,
-            attachment_key=attachment_key,
+            attachment_key=selected,
             sensitivity=sensitivity,
             allow_cloud=allow_cloud,
             allow_heavy_fallback=allow_heavy_fallback,
+            force_heavy=force_heavy,
         )
+
+    @server.tool(
+        description=(
+            "Evidence-linked reading, question answering, explanation, selected-text translation "
+            "or simulated peer review. Cloud MCP callers need a local public-paper consent first. "
+            "Sensitive documents must remain in the native local Zotero sidebar."
+        ),
+        annotations=_MODEL_PROCESSING,
+        structured_output=True,
+    )
+    def analyze_paper(
+        item_key: str,
+        attachment_key: str | None = None,
+        mode: AnalysisTask = "reading",
+        question: str = "",
+        selected_text: str = "",
+        selection_page: int | None = None,
+        sensitivity: DocumentSensitivity = "sensitive",
+        allow_cloud: bool = False,
+        allow_heavy_fallback: bool = False,
+        force_heavy: bool = False,
+    ) -> PaperAnalysis:
+        selected = authorize_paper_pdf(item_key, attachment_key, allow_cloud)
+        return service.analyze_paper(
+            item_key,
+            attachment_key=selected,
+            mode=mode,
+            question=question,
+            selected_text=selected_text,
+            selection_page=selection_page,
+            sensitivity=sensitivity,
+            allow_cloud=allow_cloud,
+            allow_heavy_fallback=allow_heavy_fallback,
+            force_heavy=force_heavy,
+        )
+
+    @server.tool(
+        description=(
+            "Locate a unique literal quote on a physical PDF page without writing annotations. "
+            "Ambiguous, scanned or unsupported text is refused. Requires local disclosure consent."
+        ),
+        annotations=_READ_ONLY,
+        structured_output=True,
+    )
+    def locate_quote(
+        attachment_key: str, page: int, quote: str, allow_cloud: bool = False
+    ) -> QuoteLocation:
+        disclosure.require(
+            attachment_key, allow_cloud=allow_cloud, server_id=service.content_server_id
+        )
+        return service.locate_quote(attachment_key, page=page, quote=quote)
+
+    @server.tool(
+        description=(
+            "Check at most 20 DOI/title/year records against public Crossref metadata. "
+            "Requires explicit allow_network=true; sends no PDF body. A missing retraction notice "
+            "does not prove a paper is not retracted."
+        ),
+        annotations=_MODEL_PROCESSING,
+        structured_output=True,
+    )
+    def audit_citations(
+        requests: list[CitationRequest], allow_network: bool = False
+    ) -> CitationAuditReport:
+        return service.audit_citations(requests, allow_network=allow_network)
 
     @server.tool(
         description=(

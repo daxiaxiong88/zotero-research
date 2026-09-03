@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Research 科研助手",
+  "version": "0.2.0",
+  "description": "本机优先的科研阅读、证据定位与确认式笔记/高亮。",
+  "author": "Zotero Research contributors",
+  "icons": { "48": "content/icon.svg", "96": "content/icon.svg" },
+  "applications": {
+    "zotero": {
+      "id": "zotero-research@local.invalid",
+      "strict_min_version": "10.0",
+      "strict_max_version": "10.0.*"
+    }
+  }
+}

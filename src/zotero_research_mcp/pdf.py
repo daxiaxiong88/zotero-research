@@ -30,6 +30,10 @@ class PdfExtractor:
     def __init__(self, *, heavy_parser: HeavyPdfParser | None = None) -> None:
         self._heavy_parser = heavy_parser
 
+    @property
+    def heavy_parser_name(self) -> str | None:
+        return self._heavy_parser.name if self._heavy_parser else None
+
     def extract(
         self,
         path: Path,

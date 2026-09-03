@@ -206,9 +206,22 @@ def _render_safe_note_html(title: str, content: str) -> str:
     paragraphs = re.split(r"\n\s*\n", content)
     rendered_paragraphs = []
     for paragraph in paragraphs:
-        escaped_lines = [html.escape(line, quote=True) for line in paragraph.splitlines()]
+        escaped_lines = [
+            _link_pdf_source(html.escape(line, quote=True)) for line in paragraph.splitlines()
+        ]
         rendered_paragraphs.append(f"<p>{'<br/>'.join(escaped_lines)}</p>")
     return f"<h1>{escaped_title}</h1>{''.join(rendered_paragraphs)}"
+
+
+_PDF_SOURCE = re.compile(
+    r"zotero://open-pdf/library/items/[23456789ABCDEFGHIJKLMNPQRSTUVWXYZ]{8}"
+    r"\?page=[1-9][0-9]{0,5}(?=$|\s|[)\]])"
+)
+
+
+def _link_pdf_source(escaped: str) -> str:
+    # Only our fixed native-PDF URI grammar becomes markup. Other URLs remain text.
+    return _PDF_SOURCE.sub(lambda match: f'<a href="{match[0]}">{match[0]}</a>', escaped)
 
 
 def _normalize_tags(tags: list[str] | None) -> list[str]:

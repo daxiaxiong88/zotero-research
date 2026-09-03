@@ -11,8 +11,10 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .disclosure import ContentConsentStore, MCPContentPolicy
+from .mineru import MinerUParser
 from .model import ModelClient, OpenAICompatibleModelClient
 from .notes import NotePreviewStore
+from .pdf import PdfExtractor
 from .service import ResearchService
 from .zotero import DEFAULT_LOCAL_API_URL, ZoteroLocalClient
 
@@ -34,10 +36,14 @@ class Settings(BaseSettings):
     model_trust: Literal["auto", "local", "external"] = "auto"
     local_model_base_url: str = "http://127.0.0.1:11434/v1"
     local_model_name: str | None = None
+    mineru_model_path: Path | None = None
+    mineru_executable: str = "mineru"
+    mineru_timeout_seconds: float = Field(default=600.0, ge=1, le=1800)
     mcp_client: Literal["cloud", "local"] = "cloud"
     state_directory: Path = Field(
-        default_factory=lambda: Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local")))
-        / "ZoteroResearch"
+        default_factory=lambda: (
+            Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local"))) / "ZoteroResearch"
+        )
     )
     model_timeout_seconds: float = Field(default=120.0, ge=1.0, le=600.0)
     note_preview_ttl_seconds: int = Field(default=600, ge=60, le=3600)
@@ -81,11 +87,18 @@ def build_service(settings: Settings | None = None) -> ResearchService:
         )
     return ResearchService(
         zotero=ZoteroLocalClient(base_url=active.zotero_base_url),
+        pdf_extractor=PdfExtractor(
+            heavy_parser=MinerUParser(
+                model_path=active.mineru_model_path,
+                executable=active.mineru_executable,
+                timeout_seconds=active.mineru_timeout_seconds,
+            )
+            if active.mineru_model_path
+            else None
+        ),
         model=model,
         local_model=local_model,
-        note_previews=NotePreviewStore(
-            ttl=timedelta(seconds=active.note_preview_ttl_seconds)
-        ),
+        note_previews=NotePreviewStore(ttl=timedelta(seconds=active.note_preview_ttl_seconds)),
     )
 
 
