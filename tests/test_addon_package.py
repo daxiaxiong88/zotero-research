@@ -41,8 +41,9 @@ def _make_addon_tree(root: Path) -> None:
         "version": "0.2.0",
         "applications": {
             "zotero": {
-                "id": "zotero-research@example.invalid",
+                "id": "zotero-research@local.invalid",
                 "strict_min_version": "10.0",
+                "strict_max_version": "10.0.*",
             }
         },
     }
@@ -103,11 +104,12 @@ def test_build_addon_injects_local_paths_and_writes_sidecars(tmp_path: Path) -> 
     assert (addon_dir / "config.json").read_bytes() == template_config
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest == {
-        "addon_id": "zotero-research@example.invalid",
+        "addon_id": "zotero-research@local.invalid",
         "files": sorted(_RUNTIME_FILES),
         "format": 1,
         "version": "0.2.0",
         "zotero_min_version": "10.0",
+        "zotero_max_version": "10.0.*",
     }
     assert str(bridge_executable) not in result.manifest_path.read_text(encoding="utf-8")
     assert "workingDirectory" not in result.manifest_path.read_text(encoding="utf-8")
@@ -155,10 +157,12 @@ def _valid_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     [
         ("version", "0.2.1", "manifest version"),
         ("zotero_id", "", "applications.zotero.id"),
-        ("strict_min_version", "9.9", "at least 10.0"),
+        ("zotero_id", "zotero-research@example.invalid", "applications.zotero.id"),
+        ("strict_min_version", "9.9", "strict_min_version"),
+        ("strict_max_version", "10.1.*", "strict_max_version"),
     ],
 )
-def test_build_addon_validates_manifest_identity_and_zotero_minimum(
+def test_build_addon_validates_manifest_identity_and_zotero_versions(
     tmp_path: Path, field: str, value: str, message: str
 ) -> None:
     addon_dir, bridge_executable, working_directory, output = _valid_inputs(tmp_path)
@@ -168,11 +172,29 @@ def test_build_addon_validates_manifest_identity_and_zotero_minimum(
         manifest["applications"]["zotero"]["id"] = value
     elif field == "strict_min_version":
         manifest["applications"]["zotero"]["strict_min_version"] = value
+    elif field == "strict_max_version":
+        manifest["applications"]["zotero"]["strict_max_version"] = value
     else:
         manifest[field] = value
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(PackageError, match=message):
+        build_addon(
+            addon_dir=addon_dir,
+            bridge_executable=bridge_executable,
+            working_directory=working_directory,
+            output=output,
+        )
+
+
+def test_build_addon_requires_exact_zotero_maximum_version(tmp_path: Path) -> None:
+    addon_dir, bridge_executable, working_directory, output = _valid_inputs(tmp_path)
+    manifest_path = addon_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["applications"]["zotero"]["strict_max_version"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(PackageError, match="strict_max_version"):
         build_addon(
             addon_dir=addon_dir,
             bridge_executable=bridge_executable,

@@ -16,6 +16,9 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_VERSION = "0.2.0"
+EXPECTED_ADDON_ID = "zotero-research@local.invalid"
+EXPECTED_ZOTERO_MIN_VERSION = "10.0"
+EXPECTED_ZOTERO_MAX_VERSION = "10.0.*"
 DEFAULT_OUTPUT = REPO_ROOT / "dist" / f"zotero-research-{PACKAGE_VERSION}.xpi"
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
@@ -116,6 +119,7 @@ def build_addon(
         "format": 1,
         "version": manifest["version"],
         "zotero_min_version": _zotero_min_version(manifest),
+        "zotero_max_version": _zotero_max_version(manifest),
     }
     _write_text_atomically(manifest_path, _json_text(inventory))
     return PackageResult(
@@ -233,14 +237,22 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     addon_id = zotero.get("id")
     if not _is_nonempty_text(addon_id):
         raise PackageError("manifest applications.zotero.id must be a non-empty string")
-    minimum = zotero.get("strict_min_version")
-    if not isinstance(minimum, str) or not _is_nonempty_text(minimum):
+    if addon_id != EXPECTED_ADDON_ID:
         raise PackageError(
-            "manifest applications.zotero.strict_min_version must be a version string"
+            "manifest applications.zotero.id must be "
+            f"{EXPECTED_ADDON_ID!r}, got {addon_id!r}"
         )
-    if _version_tuple(minimum) < (10, 0):
+    minimum = zotero.get("strict_min_version")
+    if minimum != EXPECTED_ZOTERO_MIN_VERSION:
         raise PackageError(
-            "manifest applications.zotero.strict_min_version must be at least 10.0"
+            "manifest applications.zotero.strict_min_version must be "
+            f"{EXPECTED_ZOTERO_MIN_VERSION!r}, got {minimum!r}"
+        )
+    maximum = zotero.get("strict_max_version")
+    if maximum != EXPECTED_ZOTERO_MAX_VERSION:
+        raise PackageError(
+            "manifest applications.zotero.strict_max_version must be "
+            f"{EXPECTED_ZOTERO_MAX_VERSION!r}, got {maximum!r}"
         )
     return manifest
 
@@ -275,12 +287,6 @@ def _is_nonempty_text(value: Any) -> bool:
     )
 
 
-def _version_tuple(value: str) -> tuple[int, ...]:
-    if not re.fullmatch(r"\d+(?:\.\d+)*", value.strip()):
-        raise PackageError(f"invalid Zotero minimum version: {value!r}")
-    return tuple(int(part) for part in value.split("."))
-
-
 def _zotero_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     applications = manifest["applications"]
     assert isinstance(applications, dict)
@@ -297,6 +303,12 @@ def _zotero_id(manifest: dict[str, Any]) -> str:
 
 def _zotero_min_version(manifest: dict[str, Any]) -> str:
     value = _zotero_manifest(manifest)["strict_min_version"]
+    assert isinstance(value, str)
+    return value
+
+
+def _zotero_max_version(manifest: dict[str, Any]) -> str:
+    value = _zotero_manifest(manifest)["strict_max_version"]
     assert isinstance(value, str)
     return value
 

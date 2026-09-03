@@ -30,12 +30,17 @@ python scripts/build_addon.py `
   "version": "0.2.0",
   "applications": {
     "zotero": {
-      "id": "your-addon-id",
-      "strict_min_version": "10.0"
+      "id": "zotero-research@local.invalid",
+      "strict_min_version": "10.0",
+      "strict_max_version": "10.0.*"
     }
   }
 }
 ```
+
+打包器会精确校验 addon id、扩展版本和 Zotero 版本范围：id 必须为
+`zotero-research@local.invalid`，扩展版本必须为 `0.2.0`，Zotero 版本必须为
+`10.0` 至 `10.0.*`。不符合时构建失败。
 
 其他允许打包的运行时文件是：
 
