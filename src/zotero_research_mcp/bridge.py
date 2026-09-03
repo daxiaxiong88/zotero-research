@@ -17,13 +17,19 @@ from .analysis import AnalysisTask
 from .citations import CitationRequest
 from .config import Settings, build_service
 from .disclosure import ContentConsentStore
+from .mineru import MinerUParserError
 from .model import ModelResponseError
 from .models import DocumentSensitivity
 from .notes import NotePreviewError
 from .pdf import PdfExtractionError
 from .privacy import PrivacyViolation
 from .service import ResearchService
-from .zotero import LocalWriteAuthorizationRequired, LocalWriteOutcomeUnknown
+from .zotero import (
+    LocalWriteAuthorizationRequired,
+    LocalWriteFailed,
+    LocalWriteOutcomeUnknown,
+    LocalWriteUnavailable,
+)
 
 ItemKey = Annotated[str, Field(pattern=r"^[23456789ABCDEFGHIJKLMNPQRSTUVWXYZ]{8}$")]
 
@@ -90,6 +96,7 @@ class _WriteNote(_Params):
 
 
 class _Grant(_Item):
+    attachment_key: ItemKey
     confirmed_public: StrictBool = False
     include_notes: StrictBool = False
 
@@ -172,10 +179,22 @@ class BridgeApplication:
             if not args["confirmed_public"]:
                 raise PrivacyViolation("请在 Zotero 本地明确确认论文公开并允许云端读取。")
             context = self.service.get_item_context(args["item_key"])
+            selected = next(
+                (
+                    entry
+                    for entry in context.attachments
+                    if entry.key == args["attachment_key"]
+                    and entry.parent_item == args["item_key"]
+                    and entry.content_type.casefold() == "application/pdf"
+                ),
+                None,
+            )
+            if selected is None:
+                raise PrivacyViolation("只可授权当前论文的指定 PDF 附件。")
             return self.consents.grant_public(
                 server_id=envelope.expected_server_id,
-                parent_item_key=context.item.key,
-                attachment_keys=[entry.key for entry in context.attachments],
+                parent_item_key=args["item_key"],
+                attachment_keys=[selected.key],
                 confirmed_public=True,
                 include_notes=args["include_notes"],
             )
@@ -280,6 +299,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(
                     409, "write_outcome_unknown", "写入结果不确定。请先检查 Zotero，不要重复提交。"
                 )
+            except LocalWriteUnavailable:
+                self._error(
+                    409, "local_write_unavailable", "当前 Zotero 不支持本地写入，只能预览。"
+                )
+            except LocalWriteFailed:
+                self._error(422, "local_write_failed", "Zotero 拒绝了本次笔记写入，未自动重试。")
             except LocalWriteAuthorizationRequired:
                 self._error(403, "write_authorization_required", "请在 Zotero 中重新授权这次写入。")
             except NotePreviewError:
@@ -294,6 +319,12 @@ class _Handler(BaseHTTPRequestHandler):
                     "pdf_processing_failed",
                     "PDF 解析失败。若使用重解析，请检查 MinerU 可执行文件及完整本地模型目录；"
                     "没有自动上传或下载。",
+                )
+            except MinerUParserError:
+                self._error(
+                    422,
+                    "mineru_processing_failed",
+                    "本地 MinerU 解析失败，请检查本机解析器和模型配置。",
                 )
             except (ValidationError, ValueError, UnicodeError, RecursionError):
                 self._error(400, "invalid_request", "请求参数无效，或当前文献/选文不满足要求。")

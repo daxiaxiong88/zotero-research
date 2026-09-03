@@ -39,7 +39,6 @@ class Settings(BaseSettings):
     mineru_model_path: Path | None = None
     mineru_executable: str = "mineru"
     mineru_timeout_seconds: float = Field(default=600.0, ge=1, le=1800)
-    mcp_client: Literal["cloud", "local"] = "cloud"
     state_directory: Path = Field(
         default_factory=lambda: (
             Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local"))) / "ZoteroResearch"
@@ -104,6 +103,5 @@ def build_service(settings: Settings | None = None) -> ResearchService:
 
 def build_content_policy(settings: Settings) -> MCPContentPolicy:
     return MCPContentPolicy(
-        local_client=settings.mcp_client == "local",
         consents=ContentConsentStore(settings.state_directory / "content-consents"),
     )

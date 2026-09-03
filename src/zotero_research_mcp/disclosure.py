@@ -48,9 +48,7 @@ class ContentConsentStore:
     with the same OS user's filesystem privileges. No document text is stored.
     """
 
-    def __init__(
-        self, directory: Path, *, clock: Callable[[], datetime] | None = None
-    ) -> None:
+    def __init__(self, directory: Path, *, clock: Callable[[], datetime] | None = None) -> None:
         self.directory = directory
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -127,10 +125,7 @@ class ContentConsentStore:
 class MCPContentPolicy:
     """Default-deny content output to cloud-backed MCP clients such as Codex."""
 
-    def __init__(
-        self, *, local_client: bool = False, consents: ContentConsentStore | None = None
-    ) -> None:
-        self.local_client = local_client
+    def __init__(self, *, consents: ContentConsentStore | None = None) -> None:
         self._consents = consents
 
     def require(
@@ -141,8 +136,6 @@ class MCPContentPolicy:
         server_id: Callable[[], str | None],
         notes: bool = False,
     ) -> None:
-        if self.local_client:
-            return
         if allow_cloud and self._consents is not None:
             instance = server_id()
             if instance and self._consents.allows(subject_key, server_id=instance, notes=notes):
