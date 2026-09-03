@@ -77,16 +77,7 @@ class MinerUParser:
             output_directory = Path(temporary_directory)
             config_path = output_directory / "mineru.json"
             _write_local_config(config_path, model_path)
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "MINERU_MODEL_SOURCE": "local",
-                    "MINERU_TOOLS_CONFIG_JSON": str(config_path),
-                    "HF_HUB_OFFLINE": "1",
-                    "TRANSFORMERS_OFFLINE": "1",
-                    "HF_DATASETS_OFFLINE": "1",
-                }
-            )
+            environment = _offline_environment(config_path)
             command = [
                 self._executable,
                 "-p",
@@ -136,6 +127,64 @@ def _source_page_count(path: Path) -> int:
         ) from exc
 
 
+_REMOTE_ROUTE_ENVIRONMENT = {
+    "HF_ENDPOINT",
+    "HF_HUB_ENDPOINT",
+    "MODELSCOPE_ENDPOINT",
+    "MODELSCOPE_API_BASE",
+    "OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+    "AZURE_OPENAI_ENDPOINT",
+    "DASHSCOPE_BASE_URL",
+}
+_REMOTE_CREDENTIAL_ENVIRONMENT = {
+    "AZURE_OPENAI_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "HF_API_TOKEN",
+    "HF_TOKEN",
+    "HUGGINGFACE_HUB_TOKEN",
+    "MODELSCOPE_API_TOKEN",
+    "OPENAI_API_KEY",
+}
+
+
+def _offline_environment(config_path: Path) -> dict[str, str]:
+    """Keep runtime basics while removing inherited network-routing settings."""
+
+    environment: dict[str, str] = {}
+    for key, value in os.environ.items():
+        normalized_key = key.upper()
+        if normalized_key.startswith("MINERU_"):
+            # This adapter supplies the complete local configuration below;
+            # no inherited MinerU flag may redirect parsing or override it.
+            continue
+        if normalized_key.endswith("_PROXY") or normalized_key in {
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "FTP_PROXY",
+            "NO_PROXY",
+        }:
+            continue
+        if normalized_key in _REMOTE_ROUTE_ENVIRONMENT:
+            continue
+        if normalized_key in _REMOTE_CREDENTIAL_ENVIRONMENT:
+            continue
+        environment[key] = value
+
+    environment.update(
+        {
+            "MINERU_MODEL_SOURCE": "local",
+            "MINERU_TOOLS_CONFIG_JSON": str(config_path),
+            "HF_HUB_OFFLINE": "1",
+            "HF_HUB_DISABLE_TELEMETRY": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_DATASETS_OFFLINE": "1",
+        }
+    )
+    return environment
+
+
 def _write_local_config(path: Path, model_path: Path) -> None:
     payload = {
         "model-source": "local",
@@ -156,10 +205,12 @@ def _run_mineru(
             check=False,
             cwd=Path(command[command.index("-o") + 1]),
             env=environment,
-            capture_output=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             text=True,
             timeout=timeout_seconds,
             shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except FileNotFoundError as exc:
         raise MinerUParserError(f"MinerU CLI executable was not found: {command[0]}") from exc
@@ -171,12 +222,9 @@ def _run_mineru(
         raise MinerUParserError(f"Unable to execute local MinerU CLI: {exc}") from exc
 
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        if len(detail) > 1000:
-            detail = detail[-1000:]
-        suffix = f" Details: {detail}" if detail else ""
         raise MinerUParserError(
-            f"Local MinerU CLI failed with exit code {completed.returncode}.{suffix}"
+            "Local MinerU CLI failed with exit code "
+            f"{completed.returncode}; inspect the local MinerU installation and model path."
         )
     return completed
 

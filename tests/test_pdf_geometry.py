@@ -14,7 +14,7 @@ def _save_two_line_pdf(path: Path, *, crop: bool = False, rotation: int = 0) -> 
     page.insert_text((72, 100), "First line for exact geometry.", fontsize=11)
     page.insert_text((72, 120), "Second line contains a unique quote.", fontsize=11)
     if crop:
-        page.set_cropbox(fitz.Rect(50, 50, 550, 750))
+        page.set_cropbox(fitz.Rect(50, 30, 550, 700))
     if rotation:
         page.set_rotation(rotation)
     document.save(path)
@@ -42,7 +42,25 @@ def test_locator_returns_unique_multiline_native_pdf_rects(tmp_path: Path) -> No
     assert location.sort_index == "00000|000000|00088"
 
 
-def test_locator_uses_crop_box_and_ignores_page_rotation(tmp_path: Path) -> None:
+def test_locator_uses_asymmetric_crop_box_for_native_coordinates(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "asymmetric-crop.pdf"
+    _save_two_line_pdf(pdf_path, crop=True)
+
+    location = PdfQuoteLocator().locate(
+        pdf_path,
+        page=1,
+        quote="First line for exact geometry.",
+    )
+
+    assert location.status == "exact"
+    assert location.rects[0][0] == pytest.approx(72.0)
+    assert location.rects[0][1] == pytest.approx(696.711, abs=0.02)
+    assert location.rects[0][3] == pytest.approx(711.825, abs=0.02)
+
+
+def test_locator_uses_unrotated_transform_for_asymmetric_crop_and_rotation(
+    tmp_path: Path,
+) -> None:
     pdf_path = tmp_path / "cropped-rotated.pdf"
     _save_two_line_pdf(pdf_path, crop=True, rotation=90)
 
@@ -55,9 +73,31 @@ def test_locator_uses_crop_box_and_ignores_page_rotation(tmp_path: Path) -> None
     assert location.status == "exact"
     assert location.rects[0][0] == pytest.approx(72.0)
     # The y coordinate is in bottom-left PDF user space, not PyMuPDF's
-    # top-left extraction space, and the page rotation does not swap it.
+    # top-left extraction space.  Both crop margins are asymmetric, and the
+    # page rotation does not swap the unrotated PDF coordinates.
     assert location.rects[0][1] == pytest.approx(696.711, abs=0.02)
     assert location.rects[0][3] == pytest.approx(711.825, abs=0.02)
+
+
+def test_locator_supports_nonzero_media_box_origin(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "nonzero-media-box.pdf"
+    document = fitz.open()
+    page = document.new_page(width=600, height=800)
+    page.set_mediabox(fitz.Rect(100, 200, 700, 1000))
+    page.insert_text((72, 100), "Nonzero media box coordinate.", fontsize=11)
+    document.save(pdf_path)
+    document.close()
+
+    location = PdfQuoteLocator().locate(
+        pdf_path,
+        page=1,
+        quote="Nonzero media box coordinate.",
+    )
+
+    assert location.status == "exact"
+    assert location.rects[0][0] == pytest.approx(172.0)
+    assert location.rects[0][1] == pytest.approx(896.711, abs=0.02)
+    assert location.rects[0][3] == pytest.approx(911.825, abs=0.02)
 
 
 def test_locator_refuses_duplicate_exact_matches(tmp_path: Path) -> None:

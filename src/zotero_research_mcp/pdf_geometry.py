@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from contextlib import suppress
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -58,6 +59,14 @@ class _Match:
     start_word: int
     end_word: int
     start_char: int
+
+
+@dataclass(frozen=True)
+class _PageGeometry:
+    """The inverse of PyMuPDF's unrotated PDF-to-page transformation."""
+
+    pdf_from_page: pymupdf.Matrix
+    visible_bounds: pymupdf.Rect
 
 
 class PdfQuoteLocator:
@@ -165,14 +174,14 @@ class PdfQuoteLocator:
 
                 match = matches[0]
                 selected = words[match.start_word : match.end_word]
-                crop_box = _crop_box(pdf_page)
-                if crop_box is None:
+                geometry = _page_geometry(pdf_page)
+                if geometry is None:
                     return self._result(
                         status="ambiguous",
                         page=page,
                         text=quote,
                         page_label=page_label,
-                        reason="PDF page crop box is unavailable or invalid",
+                        reason="PDF page transformation is unavailable or invalid",
                     )
                 if not _is_visual_sequence_reliable(selected):
                     return self._result(
@@ -183,8 +192,8 @@ class PdfQuoteLocator:
                         reason="matched words do not form one reliable visual text sequence",
                     )
 
-                rects = _rects_in_pdf_space(selected, crop_box)
-                if not rects or not _rects_are_reliable(rects, crop_box):
+                rects = _rects_in_pdf_space(selected, geometry.pdf_from_page)
+                if not rects or not _rects_are_reliable(rects, geometry.visible_bounds):
                     return self._result(
                         status="ambiguous",
                         page=page,
@@ -197,7 +206,7 @@ class PdfQuoteLocator:
                     page_index=page - 1,
                     offset=match.start_char,
                     rects=rects,
-                    page_top=float(crop_box.y1),
+                    page_top=float(geometry.visible_bounds.y1),
                 )
                 return QuoteLocation(
                     status="exact",
@@ -330,17 +339,54 @@ def _word_index_at(starts: list[int], position: int) -> int | None:
     return None
 
 
-def _crop_box(page: pymupdf.Page) -> pymupdf.Rect | None:
+def _page_geometry(page: pymupdf.Page) -> _PageGeometry | None:
+    """Read an unrotated PDF transform without persisting a page mutation.
+
+    PyMuPDF exposes extracted word rectangles in its top-left page space.  Its
+    ``transformation_matrix`` is the authoritative PDF-user-space transform,
+    but a page rotation changes the matrix exposed by the binding.  Reading it
+    briefly with rotation zeroed gives the inverse needed for Zotero's native
+    unrotated rectangles.  The page is restored in ``finally`` and the caller
+    never saves this in-memory document.
+    """
+
+    original_rotation = 0
     try:
-        crop_box = page.cropbox
-        values = (float(crop_box.x0), float(crop_box.y0), float(crop_box.x1), float(crop_box.y1))
-    except (AttributeError, TypeError, ValueError):
+        original_rotation = int(page.rotation)
+        if original_rotation:
+            page.set_rotation(0)  # type: ignore[no-untyped-call]
+        transformation = pymupdf.Matrix(page.transformation_matrix)  # type: ignore[no-untyped-call]
+        inverse = ~transformation
+        page_rect = pymupdf.Rect(page.rect)  # type: ignore[no-untyped-call]
+        visible_bounds = _transform_rect(page_rect, inverse)
+        if visible_bounds is None:
+            return None
+        return _PageGeometry(pdf_from_page=inverse, visible_bounds=visible_bounds)
+    except (AttributeError, TypeError, ValueError, RuntimeError):
         return None
-    if not all(math.isfinite(value) for value in values):
+    finally:
+        if original_rotation:
+            with suppress(AttributeError, RuntimeError, ValueError):
+                page.set_rotation(original_rotation)  # type: ignore[no-untyped-call]
+
+
+def _transform_rect(rect: pymupdf.Rect, matrix: pymupdf.Matrix) -> pymupdf.Rect | None:
+    points = [
+        pymupdf.Point(rect.x0, rect.y0) * matrix,  # type: ignore[no-untyped-call]
+        pymupdf.Point(rect.x0, rect.y1) * matrix,  # type: ignore[no-untyped-call]
+        pymupdf.Point(rect.x1, rect.y0) * matrix,  # type: ignore[no-untyped-call]
+        pymupdf.Point(rect.x1, rect.y1) * matrix,  # type: ignore[no-untyped-call]
+    ]
+    coordinates = [coordinate for point in points for coordinate in (point.x, point.y)]
+    if not all(math.isfinite(value) for value in coordinates):
         return None
-    if values[2] <= values[0] or values[3] <= values[1]:
+    x_values = [point.x for point in points]
+    y_values = [point.y for point in points]
+    x0, x1 = min(x_values), max(x_values)
+    y0, y1 = min(y_values), max(y_values)
+    if x1 <= x0 or y1 <= y0:
         return None
-    return pymupdf.Rect(*values)  # type: ignore[no-untyped-call]
+    return pymupdf.Rect(x0, y0, x1, y1)  # type: ignore[no-untyped-call]
 
 
 def _page_label(page: pymupdf.Page, physical_page: int) -> str:
@@ -380,7 +426,7 @@ def _is_visual_sequence_reliable(words: list[_Word]) -> bool:
     return True
 
 
-def _rects_in_pdf_space(words: list[_Word], crop_box: pymupdf.Rect) -> list[list[float]]:
+def _rects_in_pdf_space(words: list[_Word], pdf_from_page: pymupdf.Matrix) -> list[list[float]]:
     grouped: list[tuple[tuple[int, int], list[_Word]]] = []
     for word in words:
         line_key = (word.block_number, word.line_number)
@@ -395,27 +441,33 @@ def _rects_in_pdf_space(words: list[_Word], crop_box: pymupdf.Rect) -> list[list
         y0 = min(word.y0 for word in line_words)
         x1 = max(word.x1 for word in line_words)
         y1 = max(word.y1 for word in line_words)
+        transformed = _transform_rect(
+            pymupdf.Rect(x0, y0, x1, y1),  # type: ignore[no-untyped-call]
+            pdf_from_page,
+        )
+        if transformed is None:
+            return []
         rects.append(
             [
-                float(crop_box.x0 + x0),
-                float(crop_box.y1 - y1),
-                float(crop_box.x0 + x1),
-                float(crop_box.y1 - y0),
+                float(transformed.x0),
+                float(transformed.y0),
+                float(transformed.x1),
+                float(transformed.y1),
             ]
         )
     return rects
 
 
-def _rects_are_reliable(rects: list[list[float]], crop_box: pymupdf.Rect) -> bool:
+def _rects_are_reliable(rects: list[list[float]], visible_bounds: pymupdf.Rect) -> bool:
     for rect in rects:
         if len(rect) != 4 or not all(math.isfinite(value) for value in rect):
             return False
         x0, y0, x1, y1 = rect
         if x1 <= x0 or y1 <= y0:
             return False
-        if x0 < crop_box.x0 - 1e-3 or x1 > crop_box.x1 + 1e-3:
+        if x0 < visible_bounds.x0 - 1e-3 or x1 > visible_bounds.x1 + 1e-3:
             return False
-        if y0 < crop_box.y0 - 1e-3 or y1 > crop_box.y1 + 1e-3:
+        if y0 < visible_bounds.y0 - 1e-3 or y1 > visible_bounds.y1 + 1e-3:
             return False
     return True
 
