@@ -36,14 +36,18 @@ class PdfExtractor:
         *,
         attachment_key: str,
         allow_heavy_fallback: bool = False,
+        force_heavy: bool = False,
     ) -> PdfExtraction:
+        if force_heavy and not allow_heavy_fallback:
+            raise ValueError("force_heavy=True requires allow_heavy_fallback=True")
+
         resolved_path = path.resolve()
         if not resolved_path.is_file():
             raise PdfExtractionError(f"PDF attachment does not exist: {resolved_path.name}")
 
         fast_pages = self._extract_with_pymupdf(resolved_path)
         fast_quality = assess_pdf_quality(fast_pages)
-        if not fast_quality.needs_heavy_parser:
+        if not force_heavy and not fast_quality.needs_heavy_parser:
             return PdfExtraction(
                 attachment_key=attachment_key,
                 file_name=resolved_path.name,
@@ -53,6 +57,11 @@ class PdfExtractor:
                 pages=fast_pages,
                 quality=fast_quality,
                 fallback_used=False,
+            )
+
+        if force_heavy and self._heavy_parser is None:
+            raise PdfExtractionError(
+                "force_heavy=True requires a configured local heavy PDF parser."
             )
 
         if allow_heavy_fallback and self._heavy_parser is not None:
@@ -87,6 +96,10 @@ class PdfExtractor:
     def _extract_with_pymupdf(path: Path) -> list[PdfPage]:
         try:
             with pymupdf.open(path) as document:  # type: ignore[no-untyped-call]
+                if not document.is_pdf:
+                    raise PdfExtractionError(
+                        "Attachment is not a PDF (PyMuPDF detected another document format)."
+                    )
                 if document.needs_pass:
                     raise PdfExtractionError("Encrypted PDF requires a password.")
                 return [

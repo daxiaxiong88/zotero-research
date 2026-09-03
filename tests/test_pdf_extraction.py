@@ -4,9 +4,10 @@ from pathlib import Path
 
 import httpx
 import pymupdf as fitz
+import pytest
 
 from zotero_research_mcp.models import PdfPage
-from zotero_research_mcp.pdf import PdfExtractor
+from zotero_research_mcp.pdf import PdfExtractionError, PdfExtractor
 from zotero_research_mcp.service import ResearchService
 from zotero_research_mcp.zotero import ZoteroLocalClient
 
@@ -108,3 +109,61 @@ def test_explicit_fallback_uses_configured_local_heavy_parser(tmp_path: Path) ->
     assert result.route == "heavy_fallback"
     assert result.fallback_used is True
     assert "Recovered OCR text" in result.pages[0].text
+
+
+def test_force_heavy_requires_opt_in_and_runs_for_selectable_text(tmp_path: Path) -> None:
+    class StubLocalHeavyParser:
+        name = "mineru-local-stub"
+        is_local = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def extract_pages(self, path: Path) -> list[PdfPage]:
+            self.calls += 1
+            return [PdfPage(number=1, text="Formula-aware heavy extraction.")]
+
+    pdf_path = tmp_path / "selectable.pdf"
+    _save_text_pdf(pdf_path)
+    parser = StubLocalHeavyParser()
+    extractor = PdfExtractor(heavy_parser=parser)
+
+    with pytest.raises(ValueError, match="allow_heavy_fallback"):
+        extractor.extract(pdf_path, attachment_key="PDFKEY23", force_heavy=True)
+
+    result = extractor.extract(
+        pdf_path,
+        attachment_key="PDFKEY23",
+        allow_heavy_fallback=True,
+        force_heavy=True,
+    )
+
+    assert parser.calls == 1
+    assert result.route == "heavy_fallback"
+    assert result.fallback_used is True
+    assert result.pages[0].text == "Formula-aware heavy extraction."
+
+
+def test_force_heavy_without_a_parser_fails_explicitly(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "selectable.pdf"
+    _save_text_pdf(pdf_path)
+
+    with pytest.raises(PdfExtractionError, match="configured local heavy PDF parser"):
+        PdfExtractor().extract(
+            pdf_path,
+            attachment_key="PDFKEY23",
+            allow_heavy_fallback=True,
+            force_heavy=True,
+        )
+
+
+def test_extractor_rejects_non_pdf_format_recognized_by_pymupdf(tmp_path: Path) -> None:
+    svg_path = tmp_path / "looks-like-attachment.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+        "<text x=\"10\" y=\"20\">not a PDF</text></svg>",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PdfExtractionError, match="not a PDF"):
+        PdfExtractor().extract(svg_path, attachment_key="PDFKEY24")
