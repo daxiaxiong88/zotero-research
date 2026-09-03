@@ -1,15 +1,15 @@
 # Zotero Research 0.2：Zotero 10 中文使用指南
 
-本文面向手动安装和使用 Zotero Research 的用户。它描述的是仓库内已经实现的 Zotero 原生侧边栏、私有本机 bridge 和 stdio MCP 边界；不负责 Zotero runtime/bootstrap 或 HTTP 服务的开发集成。
+本文面向安装和使用 Zotero Research 的用户，涵盖原生侧边栏、本机服务、模型配置和 Codex MCP。当前这台机器的后端环境与 XPI 已准备好，可从“安装”开始；重建环境和重新打包仅供维护时使用。
 
-## 先了解三个边界
+## 先了解四个边界
 
 1. **原生面板和 Codex 是两条入口。** Zotero 右侧“科研助手”面板通过本机 127.0.0.1 bridge 调用服务，敏感全文留在这条本地路径内，不经过 Codex。Codex 通过 stdio MCP 调用 12 个工具，MCP 响应会进入调用客户端上下文。
-2. **MCP 正文默认拒绝。** PDF 正文、证据片段和 notes 等 MCP 内容，必须先由 Zotero 本地面板发出与当前论文/当前附件匹配的授权，然后调用方再显式设置 allow_cloud=true。Codex/MCP 不能自行铸造这项授权。书目和附件元数据仍可能进入调用客户端上下文。
+2. **MCP 正文默认拒绝。** PDF 正文、证据片段和 notes 等 MCP 内容，必须先由 Zotero 本地面板发出与当前论文/当前附件匹配的授权，然后调用方再显式设置 allow_cloud=true。MCP 不提供自授工具，禁止绕过本地确认。书目和附件元数据仍可能进入调用客户端上下文。
 3. **“本地”不是物理离线承诺。** 本项目只把请求发往回环地址；如果用户自行运行的回环模型服务主动转发到云端，项目无法保证物理离线。同一操作系统用户的其他程序也可能拥有相同文件/进程权限，授权不是硬沙箱。
 4. **公开论文不等于问题公开。** 面板发送“本次问题、选文和检索证据”到云端前，每次都必须明确勾选。论文公开不会自动公开用户问题；Codex 的论文授权只覆盖当前选中的 PDF，不包含同条目下未选中的附件。已有 notes 另有独立公开确认，默认不选。
 
-当前真实 Zotero 10 运行验收以主线程记录为准；本文不宣称已经装入主 profile，也不宣称与不可访问的 Feishu Pro 逐项等同。
+已用合成文献在 Zotero 10.0.1 隔离配置中验收原生桥接、证据、笔记预览及原生高亮。主 profile 未安装；真实模型和完整手动点击仍待验收。完整范围见 [验收记录](VALIDATION_ZOTERO10.md)，不宣称与不可访问的 Feishu Pro 逐项等同。
 
 ## 1. 安装前准备
 
@@ -20,7 +20,7 @@
 - 本仓库目录 D:\Research\ChatGPT，并使用专用环境 .venv-zotero10。不要切换到或修改旧的 .venv。
 - Zotero 个人库中的已下载本地 PDF。当前原生扩展只接受个人库、可编辑且本机文件系统中的 PDF；组库、网络共享路径或未下载附件会被拒绝。
 
-在 Zotero“设置 → 高级”打开“允许此计算机上的其他应用程序与 Zotero 通信”。服务只使用 Zotero 官方 Local API，不扫描数据目录，不使用 zotero.sqlite。
+在 Zotero“设置 → 高级”打开“允许此计算机上的其他应用程序与 Zotero 通信”。后端检索和笔记使用官方 Local API，扩展高亮使用原生 JavaScript API；不扫描数据目录，不使用 zotero.sqlite。
 
 ### 准备专用 Python 环境
 
@@ -35,7 +35,7 @@ uv sync --dev
 复制配置模板并编辑副本：
 
 ~~~powershell
-Copy-Item '.env.example' '.env'
+if (-not (Test-Path -LiteralPath '.env')) { Copy-Item -LiteralPath '.env.example' -Destination '.env' }
 notepad '.env'
 ~~~
 
@@ -69,7 +69,7 @@ https://zotero-research.invalid/updates.json
 Set-Location 'D:\Research\ChatGPT'
 $env:UV_PROJECT_ENVIRONMENT = 'D:\Research\ChatGPT\.venv-zotero10'
 & '.\.venv-zotero10\Scripts\python.exe' 'scripts\build_addon.py' `
-  --bridge-executable 'C:\absolute\path\zotero-research-bridge.exe' `
+  --bridge-executable 'D:\Research\ChatGPT\.venv-zotero10\Scripts\zotero-research-bridge.exe' `
   --working-directory 'D:\Research\ChatGPT'
 ~~~
 
@@ -89,14 +89,14 @@ $env:UV_PROJECT_ENVIRONMENT = 'D:\Research\ChatGPT\.venv-zotero10'
 
 ### 本地模型
 
-设置页的控件名称来自 addon/content/preferences.xhtml：
+在“科研助手”的设置页填写以下字段：
 
 | 控件 | 作用 |
 | --- | --- |
-| zra-local-model | 本地模型名称；留空时沿用后端 .env 的 ZRM_LOCAL_MODEL_NAME。只填写实际已经安装并运行的名称。 |
-| zra-local-url | 本地 OpenAI 兼容地址。必须是没有用户名、密码、查询参数或片段的回环 HTTP(S) 地址，例如 http://127.0.0.1:11434/v1。即使暂时没有模型，保存设置时也要填写一个合法地址。 |
-| zra-mineru-model | 已下载的完整 MinerU pipeline 模型目录；不填则不启用重解析。 |
-| zra-mineru-executable | MinerU 可执行文件；留空时沿用 .env 或 PATH 中的 mineru。 |
+| 本地模型名称 | 留空时沿用后端 .env 的 ZRM_LOCAL_MODEL_NAME。只填写实际已经安装并运行的名称。 |
+| 本地 OpenAI 兼容地址 | 必须是没有用户名、密码、查询参数或片段的回环 HTTP(S) 地址，例如 http://127.0.0.1:11434/v1。即使暂时没有模型，保存设置时也要填写一个合法地址。 |
+| 已下载的完整 pipeline 模型目录 | 完整 MinerU pipeline 模型目录；空白时沿用 .env，两处均未配置时不启用重解析。 |
+| MinerU 可执行文件 | 留空时沿用 .env 或 PATH 中的 mineru。 |
 | 保存设置 | 写入 Zotero 偏好项；名称分别是 researchAssistant.localModelName、localModelBaseURL、mineruModelPath、mineruExecutable。 |
 | 重新连接 | 保存后在没有正在处理的任务时重新启动 bridge。重新连接会清除尚未保存的预览；任务进行中不会被中断，忙碌时稍后重试。 |
 
@@ -140,7 +140,7 @@ ZRM_MODEL_TRUST=external
 ZRM_MODEL_API_KEY=只填本机密钥，不要提交
 ~~~
 
-上面的云端示例只是字段占位，不能直接运行，也没有给出推荐厂商或型号。若使用外部服务，ZRM_MODEL_TRUST 应明确为 external；auto、local、external 是代码允许的三个值。ZRM_MODEL_API_KEY 只出现在本机 .env 或进程环境中。
+上面的云端示例只是字段占位，不能直接运行，也没有给出推荐厂商或型号。ZRM_MODEL_TRUST=auto 会按地址判定，external 显式指定外部处理；不能把远程地址伪装为 local。ZRM_MODEL_API_KEY 只出现在本机 .env 或进程环境中。
 
 MCP 的正文/证据/notes 披露没有可供 Codex 自行打开的“local 免授权”配置。无论调用方如何运行，云端 MCP 内容都必须同时满足：
 
@@ -280,18 +280,20 @@ DOI 核验是另一条、与云端模型和论文读取授权分离的公网操�
 
 ## 8. 在 Codex 中注册 MCP
 
-如果需要让 Codex 调用 MCP，在 Codex 配置中加入与当前机器路径匹配的条目。下面只使用 .venv-zotero10，不要复制旧 .venv 路径：
+本机 C:\Users\xzh21\.codex\config.toml 中的 Zotero 服务已切换到新环境。其他机器可加入下面的配置，但不要重复创建同名区块；已有配置只改相应字段。路径和超时字段依据 [OpenAI 官方 MCP 配置文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)。
 
 ~~~toml
 [mcp_servers.zotero_research]
 command = 'D:\Research\ChatGPT\.venv-zotero10\Scripts\zotero-research-mcp.exe'
 cwd = 'D:\Research\ChatGPT'
 startup_timeout_sec = 15
-tool_timeout_sec = 180
+tool_timeout_sec = 2460
 default_tools_approval_mode = "writes"
 ~~~
 
 注册或修改后，在 Codex MCP 设置中刷新/重启服务器。该配置启动的是 stdio MCP，不是 Zotero 原生 bridge；XPI 启动的 bridge 由扩展管理，不需要把随机端口写进 Codex 配置。
+
+2460 秒是等待上限，不是固定耗时：它容纳代码允许的 MinerU 最长 1800 秒、模型最长 600 秒及通信余量。普通请求完成后立即返回。已有任务可能仍缓存旧工具列表；刷新服务或重新打开任务后，应看到 12 个工具。请勿为了重装依赖强行覆盖仍在运行的旧 .venv 程序。
 
 ### 实际注册的 12 个 MCP 工具
 
@@ -321,14 +323,14 @@ MCP 工具没有删除、批量修改、任意磁盘路径读取或直接 SQLite
 - 搜索结果、条目标题/作者/DOI 等元数据仍可能交给调用客户端；这不等于已经允许正文。
 - PDF 正文、证据和 notes 默认拒绝。公开论文必须先在 Zotero 面板本地取得当前选中 attachment_key 的短期回执，并在本次工具调用显式 allow_cloud=true。
 - 已发表公开 PDF 的回执只覆盖用户当时选中的那一份附件；同一条目下的私密草稿、补充附件或其他 PDF 不会被顺带授权。
-- Codex 不能通过 shell、任意文件读取或工具参数给自己铸造回执。敏感材料请在 Zotero 原生面板处理。
+- 禁止 Codex 通过 shell、任意文件读取或工具参数伪造回执；这是一项操作规则，不是同一用户文件权限下不可绕过的系统沙箱。敏感材料请在 Zotero 原生面板处理。
 - notes 默认不包含在 grant_cloud_access 的授权中；若用户明确确认 notes 也已公开，可在原生面板独立勾选后将 include_notes 设为 true。
 
 ## 9. 可用能力矩阵
 
 | 入口/场景 | 允许的数据 | 用户同意 | 模型/网络 | 写入 | 不能做什么 |
 | --- | --- | --- | --- | --- | --- |
-| Zotero 原生面板 · 敏感 | 当前个人库 PDF 的选文、页码证据和分析所需片段 | 默认本地；云端复选框禁用 | 本地模型若已配置；无模型时仅证据摘录 | 高亮/笔记需先预览、原生授权和确认 | 不经过 Codex；不保证用户回环服务不会自行转发云端 |
+| Zotero 原生面板 · 敏感 | 当前个人库 PDF 的选文、页码证据和分析所需片段 | 默认本地；云端复选框禁用 | 本地模型若已配置；无模型时仅证据摘录 | 高亮需预览确认；笔记另需原生写入授权 | 不经过 Codex；不保证用户回环服务不会自行转发云端 |
 | Zotero 原生面板 · 公开 | 当前问题、选文、检索证据可按本次选择发送 | 每次分析明确勾选，切换文献/请求结束清除 | 外部模型仅在服务报告 external 且本次同意时显示 | 同上 | 论文公开不会公开问题或 notes |
 | Codex MCP · 默认 | 书目、附件元数据、搜索结果 | 正文/证据/notes 默认拒绝；无免授权模式 | 只能看到策略允许的内容 | preview_child_note 只是预览 | 不能自授正文、不能读任意路径 |
 | Codex MCP · 当前公开 PDF | 当前 attachment_key 的 PDF/证据 | Zotero 面板本地 10 分钟回执 + 每次 allow_cloud=true | 进入 Codex 调用上下文 | 不因读取授权获得写权限 | 不覆盖同条目其他附件；notes 需独立确认 |

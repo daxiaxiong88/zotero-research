@@ -3,6 +3,13 @@
 This file records the implementation boundary approved in the conversation that created this
 repository.
 
+The Zotero 10 / 0.2 continuation is specified in [COMPLETE_DESIGN.md](COMPLETE_DESIGN.md).
+It adds the native sidebar/highlights and three MCP tools (12 total), removes any MCP local-client
+disclosure bypass, permits explicit alternate loopback ports for isolated tests, and makes an
+opted-in, required heavy parse fail explicitly when its local dependencies are missing. The older
+default-off heavy-parser recommendation remains valid. The deferred list below is historical,
+not the current delivery status; see [VALIDATION_ZOTERO10.md](VALIDATION_ZOTERO10.md).
+
 ## Goal
 
 Deliver a runnable, safety-first MCP server that lets a local agent search a Zotero library, read

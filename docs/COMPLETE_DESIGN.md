@@ -6,7 +6,7 @@
 - 证据展示 PDF 物理页码与原文，点击可定位；原生高亮只使用已核实坐标并经用户确认。
 - 笔记在 Zotero 中预览、授权和保存，摘要/令牌保护不变，不直接操作数据库。
 - 敏感内容只在本机界面和回环模型之间流转；MCP 返回正文须本地公开论文授权与调用方显式同意。
-- 本地 MinerU 真正执行按需重解析；未装依赖/模型时明确报错，不隐式上传或下载。
+- 本地 MinerU 执行按需重解析；默认不启用，仅返回质量建议。当用户允许且实际需要重解析，或强制重解析时，缺少依赖/模型必须明确报错，不隐式上传或下载。
 - DOI核验使用公开元数据，外网查询必须由用户允许，未知撤稿状态不能被表述为无撤稿。
 
 ## 两个入口，共用应用服务
@@ -40,7 +40,7 @@ JSON：`{"method":"方法","params":{...},"expected_server_id":"当前Zotero实�
 | preview_note | parent_item_key, title, content, tags? | NotePreview |
 | authorize_write | {} | WriteAuthorization（不含key） |
 | write_note | preview_token, expected_digest, confirmed_by_user=true | NoteWriteResult |
-| grant_cloud_access | item_key, confirmed_public=true, include_notes=false | PublicContentGrant（10分钟，到期失效） |
+| grant_cloud_access | item_key, attachment_key（必填且为当前条目的 PDF）, confirmed_public=true, include_notes=false | PublicContentGrant（只含当前 PDF；笔记独立选择；10分钟） |
 | revoke_cloud_access | item_key | {revoked:true} |
 | audit_citations | requests:[{doi,title?,year?}], allow_network=false | CitationAuditReport |
 | shutdown | {} | {stopping:true} |
