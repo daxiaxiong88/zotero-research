@@ -14,10 +14,14 @@ from zotero_research_mcp.zotero import (
 )
 
 
-def _parent_responses(request: httpx.Request) -> httpx.Response | None:
+def _parent_responses(
+    request: httpx.Request, *, server_id: str | None = None
+) -> httpx.Response | None:
+    headers = {"Zotero-Server-ID": server_id} if server_id is not None else {}
     if request.method == "GET" and request.url.path == "/api/users/0/items/PARENT23":
         return httpx.Response(
             200,
+            headers=headers,
             json={
                 "key": "PARENT23",
                 "version": 8,
@@ -31,7 +35,7 @@ def _parent_responses(request: httpx.Request) -> httpx.Response | None:
             },
         )
     if request.method == "GET" and request.url.path == "/api/users/0/items/PARENT23/children":
-        return httpx.Response(200, json=[])
+        return httpx.Response(200, headers=headers, json=[])
     return None
 
 
@@ -49,7 +53,7 @@ def test_preview_child_note_escapes_content_and_binds_exact_digest() -> None:
                     "Zotero-Server-ID": "instance-a",
                 },
             )
-        response = _parent_responses(request)
+        response = _parent_responses(request, server_id="instance-a")
         if response is not None:
             return response
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
@@ -92,7 +96,7 @@ def test_write_rejects_missing_confirmation_and_digest_mismatch_before_http_writ
                     "Zotero-Server-ID": "instance-a",
                 },
             )
-        response = _parent_responses(request)
+        response = _parent_responses(request, server_id="instance-a")
         if response is not None:
             return response
         if request.method == "POST":
@@ -165,7 +169,7 @@ def test_zotero_10_authorizes_and_creates_exact_preview_once() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal authorize_calls, item_write_calls, posted_note
-        response = _parent_responses(request)
+        response = _parent_responses(request, server_id="server-abc")
         if response is not None:
             return response
         if request.method == "GET" and request.url.path == "/api/":
@@ -181,7 +185,11 @@ def test_zotero_10_authorizes_and_creates_exact_preview_once() -> None:
             authorize_calls += 1
             assert request.headers["Zotero-Server-ID"] == "server-abc"
             assert json.loads(request.content) == {"appName": "Zotero Research MCP"}
-            return httpx.Response(200, json={"key": "K" * 32, "remember": False})
+            return httpx.Response(
+                200,
+                headers={"Zotero-Server-ID": "server-abc"},
+                json={"key": "K" * 32, "remember": False},
+            )
         if request.method == "POST" and request.url.path == "/api/users/0/items":
             item_write_calls += 1
             assert request.headers["Zotero-Server-ID"] == "server-abc"
@@ -192,6 +200,7 @@ def test_zotero_10_authorizes_and_creates_exact_preview_once() -> None:
             posted_note = payload[0]
             return httpx.Response(
                 200,
+                headers={"Zotero-Server-ID": "server-abc"},
                 json={
                     "successful": {
                         "0": {
@@ -254,7 +263,7 @@ def test_ambiguous_write_timeout_consumes_preview_to_prevent_replay() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal authorization_calls, item_write_calls
-        response = _parent_responses(request)
+        response = _parent_responses(request, server_id="server-abc")
         if response is not None:
             return response
         if request.method == "GET" and request.url.path == "/api/":
@@ -268,7 +277,11 @@ def test_ambiguous_write_timeout_consumes_preview_to_prevent_replay() -> None:
             )
         if request.method == "POST" and request.url.path == "/api/local/authorize":
             authorization_calls += 1
-            return httpx.Response(200, json={"key": "K" * 32, "remember": False})
+            return httpx.Response(
+                200,
+                headers={"Zotero-Server-ID": "server-abc"},
+                json={"key": "K" * 32, "remember": False},
+            )
         if request.method == "POST" and request.url.path == "/api/users/0/items":
             item_write_calls += 1
             raise httpx.ReadTimeout("response was lost", request=request)

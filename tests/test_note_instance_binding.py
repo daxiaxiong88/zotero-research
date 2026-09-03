@@ -25,21 +25,28 @@ def test_preview_cannot_be_written_to_another_library_even_after_reauthorization
                 },
             )
         if request.url.path == "/api/local/authorize":
-            return httpx.Response(200, json={"key": "k" * 32, "remember": True})
+            return httpx.Response(
+                200,
+                headers={"Zotero-Server-ID": instance},
+                json={"key": "k" * 32, "remember": True},
+            )
         if request.url.path == "/api/users/0/items/PARENT23":
             return httpx.Response(
                 200,
+                headers={"Zotero-Server-ID": instance},
                 json={
                     "key": "PARENT23",
                     "data": {"itemType": "journalArticle", "title": "Synthetic paper"},
                 },
             )
         if request.url.path.endswith("/children"):
-            return httpx.Response(200, json=[])
+            return httpx.Response(200, headers={"Zotero-Server-ID": instance}, json=[])
         if request.method == "POST" and request.url.path == "/api/users/0/items":
             writes.append(request.content)
             return httpx.Response(
-                200, json={"successful": {"0": {"key": "NOTEAB23", "version": 1}}, "failed": {}}
+                200,
+                headers={"Zotero-Server-ID": instance},
+                json={"successful": {"0": {"key": "NOTEAB23", "version": 1}}, "failed": {}},
             )
         raise AssertionError("Unexpected HTTP operation")
 

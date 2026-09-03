@@ -49,6 +49,10 @@ class LocalWriteOutcomeUnknown(RuntimeError):
     """A write may have reached Zotero, so replaying it is unsafe."""
 
 
+class ZoteroInstanceMismatch(ValueError):
+    """The response came from a different or unidentified Zotero instance."""
+
+
 @dataclass(frozen=True, slots=True)
 class CreatedItem:
     key: str
@@ -71,7 +75,7 @@ class ZoteroLocalClient:
             base_url=normalized_url,
             headers={
                 "Zotero-API-Version": "3",
-                "User-Agent": "zotero-research-mcp/0.1.0",
+                "User-Agent": "zotero-research-mcp/0.2.0",
             },
             timeout=timeout,
             transport=transport,
@@ -96,6 +100,22 @@ class ZoteroLocalClient:
     def _read_headers(self) -> dict[str, str]:
         instance = self._pinned_server_id.get()
         return {"Zotero-Server-ID": instance} if instance else {}
+
+    def _check_response_instance(
+        self,
+        response: httpx.Response,
+        *,
+        expected_server_id: str | None = None,
+    ) -> None:
+        if response.status_code == 412:
+            raise ZoteroInstanceMismatch(
+                "Zotero instance mismatch; reconnect from the correct local sidebar"
+            )
+        expected = expected_server_id or self._pinned_server_id.get()
+        if expected is not None and response.headers.get("Zotero-Server-ID") != expected:
+            raise ZoteroInstanceMismatch(
+                "Zotero instance mismatch; reconnect from the correct local sidebar"
+            )
 
     def health(self) -> ZoteroStatus:
         try:
@@ -135,6 +155,7 @@ class ZoteroLocalClient:
             headers=self._read_headers(),
             params={"q": query, "limit": limit, "format": "json"},
         )
+        self._check_response_instance(response)
         response.raise_for_status()
         payload = _require_json_list(response)
         items = [_parse_item_summary(raw) for raw in payload]
@@ -144,12 +165,14 @@ class ZoteroLocalClient:
     def get_item_context(self, item_key: str) -> ItemContext:
         _validate_item_key(item_key)
         item_response = self._client.get(f"users/0/items/{item_key}", headers=self._read_headers())
+        self._check_response_instance(item_response)
         item_response.raise_for_status()
         raw_item = _require_json_object(item_response)
 
         children_response = self._client.get(
             f"users/0/items/{item_key}/children", headers=self._read_headers()
         )
+        self._check_response_instance(children_response)
         children_response.raise_for_status()
         raw_children = _require_json_list(children_response)
 
@@ -194,6 +217,7 @@ class ZoteroLocalClient:
             f"users/0/items/{attachment_key}/file/view/url",
             headers={**self._read_headers(), "Accept": "text/plain"},
         )
+        self._check_response_instance(response)
         response.raise_for_status()
         location = response.text.strip()
         if not location:
@@ -238,6 +262,7 @@ class ZoteroLocalClient:
             json={"appName": app_name},
             timeout=120.0,
         )
+        self._check_response_instance(response, expected_server_id=status.server_id)
         if response.status_code == 403:
             return WriteAuthorization(
                 authorized=False,
@@ -305,6 +330,13 @@ class ZoteroLocalClient:
                     json=[dict(payload)],
                 )
             except httpx.HTTPError as exc:
+                raise LocalWriteOutcomeUnknown(
+                    "The Zotero write outcome is unknown; regenerate a preview after checking "
+                    "the library."
+                ) from exc
+            try:
+                self._check_response_instance(response, expected_server_id=status.server_id)
+            except ZoteroInstanceMismatch as exc:
                 raise LocalWriteOutcomeUnknown(
                     "The Zotero write outcome is unknown; regenerate a preview after checking "
                     "the library."
