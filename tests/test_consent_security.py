@@ -20,6 +20,7 @@ from zotero_research_mcp.disclosure import (
     PublicContentGrant,
 )
 from zotero_research_mcp.mineru import MinerUParserError
+from zotero_research_mcp.model import ModelResponseError
 from zotero_research_mcp.models import AttachmentSummary, ItemContext, ItemSummary
 from zotero_research_mcp.privacy import PrivacyViolation
 from zotero_research_mcp.server import create_mcp_server
@@ -163,6 +164,29 @@ def test_bridge_grant_rejects_missing_attachment_key(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("attachment_key", "expected_exception"),
+    [("not-an-item-key", ValidationError), ("MISSING2", PrivacyViolation)],
+)
+def test_bridge_grant_rejects_invalid_or_unknown_attachment_key(
+    tmp_path: Path, attachment_key: str, expected_exception: type[Exception]
+) -> None:
+    app = BridgeApplication(_GrantService(), ContentConsentStore(tmp_path / "grants"))
+
+    with pytest.raises(expected_exception):
+        app.dispatch(
+            {
+                "method": "grant_cloud_access",
+                "expected_server_id": SERVER_ID,
+                "params": {
+                    "item_key": PARENT_KEY,
+                    "attachment_key": attachment_key,
+                    "confirmed_public": True,
+                },
+            }
+        )
+
+
 def test_zrm_local_environment_cannot_bypass_mcp_content(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -285,6 +309,38 @@ def test_mcp_pdf_failures_are_fixed_and_do_not_echo_details(
     message = str(exc_info.value)
     assert failure_message not in message
     assert safe_message in message
+
+
+def test_mcp_model_response_error_does_not_echo_details(tmp_path: Path) -> None:
+    store = ContentConsentStore(tmp_path / "grants")
+    store.grant_public(
+        server_id=SERVER_ID,
+        parent_item_key=PARENT_KEY,
+        attachment_keys=[PUBLIC_PDF],
+        confirmed_public=True,
+    )
+    leak = "LEAK/path/secret.pdf unknown evidence ID FULL-TEXT"
+    server = create_mcp_server(
+        service=_FailingMcpService(ModelResponseError(leak)),  # type: ignore[arg-type]
+        content_policy=MCPContentPolicy(consents=store),
+    )
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(
+            server.call_tool(
+                "generate_reading_card",
+                {
+                    "item_key": PARENT_KEY,
+                    "attachment_key": PUBLIC_PDF,
+                    "sensitivity": "public",
+                    "allow_cloud": True,
+                },
+            )
+        )
+
+    message = str(exc_info.value)
+    assert leak not in message
+    assert "模型结果缺少可靠证据或格式无效，未返回内容" in message
 
 
 class _FailingBridgeService:

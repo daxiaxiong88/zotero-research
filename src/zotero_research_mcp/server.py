@@ -59,8 +59,8 @@ def _safe_content_call(operation: Callable[[], _T]) -> _T:
         return operation()
     except PrivacyViolation:
         raise
-    except ModelResponseError:
-        raise
+    except ModelResponseError as exc:
+        raise ValueError("模型结果缺少可靠证据或格式无效，未返回内容。") from exc
     except httpx.HTTPError as exc:
         raise ValueError("Zotero 或模型连接失败，请检查本机配置。") from exc
     except (OSError, RuntimeError) as exc:
