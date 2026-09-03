@@ -120,6 +120,31 @@ def test_audit_matches_metadata_and_reports_no_notice_without_clean_status() -> 
     assert any("does not establish" in issue for issue in result.issues)
 
 
+def test_different_crossref_doi_is_identity_mismatch_not_target_existence() -> None:
+    transport, calls = _transport(
+        work_response=httpx.Response(
+            200,
+            json={"message": _work_message(DOI="10.5555/other.2020")},
+        )
+    )
+    result = (
+        CitationAuditor(transport=transport)
+        .audit(
+            [CitationRequest(doi=TARGET_DOI)],
+            allow_network=True,
+        )
+        .results[0]
+    )
+
+    assert len(calls) == 1
+    assert result.status == "identity_mismatch"
+    assert result.doi_exists is None
+    assert result.title_match is None
+    assert result.year_match is None
+    assert result.crossref_doi == "10.5555/other.2020"
+    assert any("unreliable" in issue for issue in result.issues)
+
+
 def test_title_and_year_mismatches_are_explicit() -> None:
     transport, _calls = _transport(
         work_response=httpx.Response(
@@ -226,6 +251,118 @@ def test_inverse_updates_query_finds_typed_correction() -> None:
     assert result.status == "correction_signal"
     assert result.updates[0].doi == "10.5555/correction.2021"
     assert result.updates[0].target_doi == TARGET_DOI
+
+
+def test_malformed_inverse_item_forces_unknown_without_generic_update() -> None:
+    transport, _calls = _transport(
+        updates_response=httpx.Response(
+            200,
+            json={
+                "message": {
+                    "total-results": 1,
+                    "items": [
+                        {
+                            "DOI": "10.5555/broken.2021",
+                            "update-to": "not-a-list",
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    result = (
+        CitationAuditor(transport=transport)
+        .audit(
+            [CitationRequest(doi=TARGET_DOI)],
+            allow_network=True,
+        )
+        .results[0]
+    )
+
+    assert result.status == "unknown"
+    assert result.updates == []
+    assert any("malformed update-to" in issue for issue in result.issues)
+
+
+def test_explicit_inverse_retraction_survives_another_malformed_relation() -> None:
+    transport, _calls = _transport(
+        updates_response=httpx.Response(
+            200,
+            json={
+                "message": {
+                    "total-results": 1,
+                    "items": [
+                        {
+                            "DOI": "10.5555/retraction.2021",
+                            "update-to": [
+                                {
+                                    "DOI": TARGET_DOI,
+                                    "type": "retraction",
+                                },
+                                "malformed",
+                            ],
+                        }
+                    ],
+                }
+            },
+        )
+    )
+    result = (
+        CitationAuditor(transport=transport)
+        .audit(
+            [CitationRequest(doi=TARGET_DOI)],
+            allow_network=True,
+        )
+        .results[0]
+    )
+
+    assert result.status == "retraction_signal"
+    assert result.updates[0].type == "retraction"
+    assert any("non-object entry" in issue for issue in result.issues)
+
+
+def test_created_date_is_not_used_as_publication_year() -> None:
+    message = _work_message()
+    message.pop("published")
+    message["created"] = {"date-parts": [[2020, 1, 2]]}
+    transport, _calls = _transport(work_response=httpx.Response(200, json={"message": message}))
+    result = (
+        CitationAuditor(transport=transport)
+        .audit(
+            [CitationRequest(doi=TARGET_DOI, year=2020)],
+            allow_network=True,
+        )
+        .results[0]
+    )
+
+    assert result.crossref_year is None
+    assert result.year_match is None
+    assert any("registration dates" in issue for issue in result.issues)
+    assert any("publication year" in issue for issue in result.issues)
+
+
+def test_doi_is_encoded_as_one_path_segment_without_traversal() -> None:
+    traversal_doi = "10.5555/a/../b"
+    transport, calls = _transport(
+        work_response=httpx.Response(
+            200,
+            json={"message": _work_message(DOI=traversal_doi)},
+        )
+    )
+    result = (
+        CitationAuditor(transport=transport)
+        .audit(
+            [CitationRequest(doi=traversal_doi)],
+            allow_network=True,
+        )
+        .results[0]
+    )
+
+    assert result.doi == traversal_doi
+    raw_path = calls[0].url.raw_path.decode("ascii")
+    assert raw_path == "/v1/works/10.5555%2Fa%2F..%2Fb"
+    assert "/../" not in raw_path
+    assert calls[0].url.path.startswith("/v1/works/")
 
 
 @pytest.mark.parametrize(

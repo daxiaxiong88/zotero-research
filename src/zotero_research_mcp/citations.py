@@ -23,8 +23,8 @@ MAX_CITATIONS = 20
 MAX_DOI_LENGTH = 255
 """Maximum normalized DOI length accepted by this boundary."""
 
-_CROSSREF_BASE_URL = "https://api.crossref.org/v1"
 _CROSSREF_HOST = "api.crossref.org"
+_CROSSREF_BASE_URL = f"https://{_CROSSREF_HOST}/v1"
 _CROSSREF_WORKS_URL = f"{_CROSSREF_BASE_URL}/works"
 _DEFAULT_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 _DOI_PATTERN = re.compile(
@@ -50,6 +50,7 @@ CitationStatus = Literal[
     "malformed_response",
     "redirect_refused",
     "http_error",
+    "identity_mismatch",
     "retraction_signal",
     "correction_signal",
     "update_signal",
@@ -293,10 +294,35 @@ class CitationAuditor:
         if crossref_doi is None:
             issues.append("Crossref response did not contain a valid DOI.")
         elif crossref_doi != request.doi:
-            issues.append("Crossref returned metadata for a different DOI.")
+            issues.append(
+                "Crossref returned metadata for a different DOI; the requested target "
+                "identity was not verified and this result is unreliable."
+            )
+            return CitationAuditResult(
+                request=request,
+                doi=request.doi,
+                status="identity_mismatch",
+                doi_exists=None,
+                title_match=None,
+                year_match=None,
+                crossref_doi=crossref_doi,
+                crossref_title=_first_title(message.get("title")),
+                crossref_year=_publication_year(message),
+                landing_url=_optional_url(message.get("URL")),
+                source_doi=request.doi,
+                source_url=work_url,
+                sources=sources,
+                checked_at=checked_at,
+                issues=issues,
+            )
 
         crossref_title = _first_title(message.get("title"))
         crossref_year = _publication_year(message)
+        if crossref_year is None:
+            issues.append(
+                "Crossref metadata has no publication year; DOI registration dates are "
+                "not used as publication dates."
+            )
         title_match = _match_title(request.title, crossref_title, issues)
         year_match = _match_year(request.year, crossref_year, issues)
         landing_url = _optional_url(message.get("URL"))
@@ -309,6 +335,7 @@ class CitationAuditor:
         issues.extend(direct_update_issues)
         updates = direct_updates
         secondary_failed = False
+        inverse_relation_malformed = False
 
         updates_url = _updates_query_url(request.doi)
         sources.append(CitationSource(kind="updates_query", doi=request.doi, url=updates_url))
@@ -321,6 +348,7 @@ class CitationAuditor:
             )
             updates = _merge_updates(updates, inverse_updates)
             issues.extend(inverse_issues)
+            inverse_relation_malformed = bool(inverse_issues)
         else:
             secondary_failed = True
             issues.append(
@@ -336,7 +364,7 @@ class CitationAuditor:
                 title_match=title_match,
                 year_match=year_match,
                 secondary_failed=secondary_failed,
-                relation_malformed=bool(direct_update_issues),
+                relation_malformed=bool(direct_update_issues) or inverse_relation_malformed,
             )
         if status == "no_notice_found":
             issues.append(
@@ -375,6 +403,7 @@ _ERROR_STATUSES: frozenset[CitationStatus] = frozenset(
         "malformed_response",
         "redirect_refused",
         "http_error",
+        "identity_mismatch",
     }
 )
 
@@ -382,7 +411,7 @@ _ERROR_STATUSES: frozenset[CitationStatus] = frozenset(
 def _work_url(doi: str) -> str:
     # Crossref's single-work route does not support ``select``; keep the
     # complete metadata response and select fields only on the list query.
-    return f"{_CROSSREF_WORKS_URL}/{quote(doi, safe='/')}"
+    return f"{_CROSSREF_WORKS_URL}/{quote(doi, safe='')}"
 
 
 def _updates_query_url(doi: str) -> str:
@@ -560,12 +589,16 @@ def _parse_inverse_updates(
             issues.append("Crossref updates query contains a non-object item.")
             continue
         item_doi = _safe_normalize(raw_item.get("DOI"))
+        item_malformed = item_doi is None
+        if item_malformed:
+            issues.append("Crossref inverse item has no valid DOI.")
         raw_relations = raw_item.get("update-to")
         typed_relation_found = False
         if isinstance(raw_relations, list):
             for raw_relation in raw_relations:
                 if not isinstance(raw_relation, Mapping):
                     issues.append("Crossref update-to metadata contains a non-object entry.")
+                    item_malformed = True
                     continue
                 relation_target = _safe_normalize(raw_relation.get("DOI"))
                 if relation_target is not None and relation_target != target_doi:
@@ -582,8 +615,9 @@ def _parse_inverse_updates(
                 )
         elif raw_relations is not None:
             issues.append("Crossref inverse item has malformed update-to metadata.")
+            item_malformed = True
 
-        if not typed_relation_found:
+        if not typed_relation_found and not item_malformed:
             # The official ``updates:<doi>`` filter itself says this item is an
             # update of the target.  Keep that clue even if the item omitted
             # its typed update-to assertion.
@@ -664,12 +698,12 @@ def _status_for(
 ) -> CitationStatus:
     if any(_is_retraction(update.type) for update in updates):
         return "retraction_signal"
+    if secondary_failed or relation_malformed:
+        return "unknown"
     if any(_is_correction(update.type) for update in updates):
         return "correction_signal"
     if updates:
         return "update_signal"
-    if secondary_failed or relation_malformed:
-        return "unknown"
     if title_match is False and year_match is False:
         return "metadata_mismatch"
     if title_match is False:
@@ -737,7 +771,7 @@ def _first_title(raw_title: Any) -> str | None:
 
 
 def _publication_year(message: Mapping[str, Any]) -> int | None:
-    for key in ("published", "published-print", "published-online", "issued", "created"):
+    for key in ("published", "published-print", "published-online", "issued"):
         year = _year_from_date(message.get(key))
         if year is not None:
             return year

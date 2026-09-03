@@ -43,9 +43,10 @@ report = auditor.audit(
 - `update_signal`：发现其他有类型或由 `updates:<doi>` 筛选证明的更新线索。
 - `title_mismatch`、`year_mismatch`、`metadata_mismatch`：提供的已知书目信息与 Crossref 元数据不匹配。
 - `unknown`：元数据更新关系不完整，或反向更新查询失败；结果不能当作验证通过。
+- `identity_mismatch`：Crossref 单条响应的 DOI 与请求目标不同；目标存在性未知，题目/年份结果不作目标核验结论。
 - `not_found`、`timeout`、`connection_error`、`rate_limited`、`malformed_json`、`malformed_response`、`redirect_refused`、`http_error`：相应的边界失败。
 
-题目比较使用 Unicode NFKC、大小写折叠、标点/空白归一化后的精确比较，不进行模糊匹配。年份优先读取 Crossref `published`，再读取 `published-print`、`published-online`、`issued` 和 `created` 的年份；这些比较仅在请求提供题目/年份时进行。
+题目比较使用 Unicode NFKC、大小写折叠、标点/空白归一化后的精确比较，不进行模糊匹配。年份优先读取 Crossref `published`，再读取 `published-print`、`published-online` 和 `issued`；不会用 DOI `created` 注册日期冒充出版年。这些比较仅在请求提供题目/年份时进行。
 
 ## Crossref 依据
 
