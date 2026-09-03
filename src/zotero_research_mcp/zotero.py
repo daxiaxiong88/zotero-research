@@ -500,7 +500,11 @@ def _validate_local_api_base_url(base_url: str) -> None:
             is_loopback = False
     if parsed.scheme.casefold() != "http" or not is_loopback:
         raise ValueError("Zotero Local API URL must use HTTP on a loopback address")
-    if parsed.port != 23119:
-        raise ValueError("Zotero Local API URL must use port 23119")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Zotero Local API URL must use an explicit valid local port") from exc
+    if port is None or not 1 <= port <= 65535:
+        raise ValueError("Zotero Local API URL must use an explicit valid local port")
     if parsed.path.rstrip("/") != "/api":
         raise ValueError("Zotero Local API URL must end with /api/")

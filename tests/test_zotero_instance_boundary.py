@@ -44,6 +44,16 @@ def _children_response(server_id: str | None, *, body: object | None = None) -> 
     return httpx.Response(200, headers=headers, json=[] if body is None else body)
 
 
+def test_explicit_loopback_api_port_is_allowed() -> None:
+    client = ZoteroLocalClient(base_url="http://127.0.0.1:23120/api/")
+    client.close()
+
+
+def test_remote_api_host_is_rejected_even_on_explicit_port() -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        ZoteroLocalClient(base_url="http://example.test:23120/api/")
+
+
 def test_pinned_item_response_missing_id_is_rejected_before_body() -> None:
     calls: list[str] = []
 

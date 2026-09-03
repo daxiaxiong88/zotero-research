@@ -7,11 +7,11 @@ from zotero_research_mcp.service import ResearchService
 from zotero_research_mcp.zotero import ZoteroLocalClient
 
 
-def test_local_api_client_rejects_non_loopback_or_wrong_port() -> None:
+def test_local_api_client_rejects_non_loopback_or_invalid_port() -> None:
     with pytest.raises(ValueError, match="loopback"):
         ZoteroLocalClient(base_url="https://example.test/api/")
-    with pytest.raises(ValueError, match="23119"):
-        ZoteroLocalClient(base_url="http://127.0.0.1:8080/api/")
+    with pytest.raises(ValueError, match="explicit valid local port"):
+        ZoteroLocalClient(base_url="http://127.0.0.1:0/api/")
 
 
 def test_health_check_reports_zotero_9_as_read_only() -> None:
