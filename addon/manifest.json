@@ -8,6 +8,7 @@
   "applications": {
     "zotero": {
       "id": "zotero-research@local.invalid",
+      "update_url": "https://zotero-research.invalid/updates.json",
       "strict_min_version": "10.0",
       "strict_max_version": "10.0.*"
     }

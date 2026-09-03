@@ -441,6 +441,13 @@
       refs.notePreview = notePreview;
       refs.notePreviewText = createElement(document, 'pre', { className: 'zrp-note-text' }, '');
       notePreview.appendChild(refs.notePreviewText);
+      var noteSource = createElement(document, 'details', { className: 'zrp-note-source' });
+      noteSource.appendChild(createElement(document, 'summary', {}, '查看实际写入的 HTML 源码'));
+      refs.noteHTMLSource = createElement(document, 'pre', {
+        className: 'zrp-note-text', 'data-testid': 'note-html-source',
+      }, '');
+      noteSource.appendChild(refs.noteHTMLSource);
+      notePreview.appendChild(noteSource);
       refs.notePreviewMeta = createElement(document, 'div', { className: 'zrp-preview-meta' }, '');
       notePreview.appendChild(refs.notePreviewMeta);
       refs.noteSave = addButton(notePreview, 'note-save', '请求 Zotero 写入授权', 'note-save', 'zrp-button');
@@ -489,7 +496,12 @@
       refs.codexConsent = addCheck(
         cloudSection,
         'codex-consent',
-        '我明确允许 Codex 读取这篇公开论文 10 分钟（不自动包含 notes）',
+        '我确认当前 PDF 已公开，允许 Codex 读取 10 分钟（不包含其他附件）',
+      );
+      refs.codexNotesConsent = addCheck(
+        cloudSection,
+        'codex-notes-consent',
+        '另外允许读取本条目的已有笔记；我确认其中内容也已公开（默认不选）',
       );
       addButton(cloudSection, 'grant-codex', '授权 10 分钟', 'grant-codex', 'zrp-button');
       refs.revokeCodex = addButton(cloudSection, 'revoke-codex', '撤销当前文献读取授权', 'revoke-codex', 'zrp-button zrp-button-danger');
@@ -583,7 +595,10 @@
               renderPrivacy();
             }
             if (config.clearDoiConsent) refs.doiConsent.checked = false;
-            if (config.clearCodexConsent) refs.codexConsent.checked = false;
+            if (config.clearCodexConsent) {
+              refs.codexConsent.checked = false;
+              refs.codexNotesConsent.checked = false;
+            }
             setText(refs.requestStatus, '');
             renderControls();
           }
@@ -678,6 +693,7 @@
 
     function renderControls() {
       var hasContext = Boolean(state.context);
+      var hasPDF = hasContext && Boolean(state.context.attachment_key);
       var analysisBusy = isAnalysisBusy();
       var questionRequired = refs.mode.value === 'question' && !refs.question.value.trim();
       refs.analysisSubmit.disabled = !hasContext || analysisBusy || questionRequired || !modelModeAllowed();
@@ -688,14 +704,15 @@
       refs.revokeCodex.hidden = false;
       refs.revokeCodex.disabled = !hasContext || state.inFlight.has('revokeCloud');
       var grantBusy = state.inFlight.has('grantCloud');
-      var grantReady = hasContext && refs.codexConsent.checked && !grantBusy && !state.cloudGrant;
+      var grantReady = hasPDF && refs.codexConsent.checked && !grantBusy && !state.cloudGrant;
       var grantButton = root.querySelector('[data-testid="grant-codex"]');
       if (grantButton) {
         grantButton.disabled = !grantReady;
         grantButton.hidden = Boolean(state.cloudGrant);
       }
       refs.noteTitle.disabled = !hasContext;
-      refs.codexConsent.disabled = !hasContext || state.inFlight.has('grantCloud') || state.inFlight.has('revokeCloud');
+      refs.codexConsent.disabled = !hasPDF || Boolean(state.cloudGrant) || state.inFlight.has('grantCloud') || state.inFlight.has('revokeCloud');
+      refs.codexNotesConsent.disabled = refs.codexConsent.disabled;
       refs.doiInput.disabled = state.inFlight.has('doiAudit');
       refs.doiConsent.disabled = state.inFlight.has('doiAudit');
       var doiButton = root.querySelector('[data-testid="doi-submit"]');
@@ -921,7 +938,11 @@
       refs.writeConfirmation.hidden = !(state.writeAuthorization && state.writeAuthorization.authorized);
       if (preview) {
         setText(refs.notePreviewText, preview.note_text || preview.note_html);
+        setText(refs.noteHTMLSource, preview.note_html);
         setText(refs.notePreviewMeta, '校验码：' + displayText(preview.digest, '未知') + ' · ' + formatExpiry(preview.expires_at));
+      } else {
+        setText(refs.notePreviewText, '');
+        setText(refs.noteHTMLSource, '');
       }
       if (state.writeAuthorization && state.writeAuthorization.authorized && preview) {
         setText(
@@ -944,7 +965,8 @@
         return;
       }
       state.cloudStatusMessage = '';
-      setText(refs.cloudStatus, '已授权读取公开论文至 ' + displayText(state.cloudGrant.expires_at, '未知时间') + '（不包含 notes）');
+      setText(refs.cloudStatus, '已授权读取当前公开 PDF 至 ' + displayText(state.cloudGrant.expires_at, '未知时间')
+        + (state.cloudGrant.include_notes ? '（包含已明确授权的笔记；不包含其他附件）' : '（不包含 notes 或其他附件）'));
       renderControls();
     }
 
@@ -1331,17 +1353,20 @@
     }
 
     function runGrantCloud() {
-      if (destroyed || !state.context || !refs.codexConsent.checked || state.cloudGrant || state.inFlight.has('grantCloud')) return;
+      if (destroyed || !state.context || !state.context.attachment_key || !refs.codexConsent.checked || state.cloudGrant || state.inFlight.has('grantCloud')) return;
       var generation = state.contextGeneration;
       var itemKey = state.context.item_key;
+      var attachmentKey = state.context.attachment_key;
+      var includeNotes = refs.codexNotesConsent.checked;
       return runRequest(
         'grantCloud',
         generation,
         function grant() {
           return rpc('grant_cloud_access', {
             item_key: itemKey,
+            attachment_key: attachmentKey,
             confirmed_public: true,
-            include_notes: false,
+            include_notes: includeNotes,
           });
         },
         function acceptGrant(result) {
@@ -1485,6 +1510,7 @@
       refs.sensitivityPublic.checked = false;
       refs.allowCloud.checked = false;
       refs.codexConsent.checked = false;
+      refs.codexNotesConsent.checked = false;
       refs.doiConsent.checked = false;
       if (state.context) setInputValue(refs.noteTitle, displayText(state.context.title, '科研文献') + ' — 阅读笔记');
       else setInputValue(refs.noteTitle, '');

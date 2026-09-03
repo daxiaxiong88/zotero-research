@@ -63,9 +63,9 @@ class PdfExtractor:
                 fallback_used=False,
             )
 
-        if force_heavy and self._heavy_parser is None:
+        if allow_heavy_fallback and self._heavy_parser is None:
             raise PdfExtractionError(
-                "force_heavy=True requires a configured local heavy PDF parser."
+                "This PDF needs a configured local heavy PDF parser; configure MinerU first."
             )
 
         if allow_heavy_fallback and self._heavy_parser is not None:

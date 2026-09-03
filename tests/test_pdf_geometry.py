@@ -131,3 +131,27 @@ def test_locator_distinguishes_not_found_from_unsupported_page(tmp_path: Path) -
     assert not_found.status == "not_found"
     assert unsupported.status == "unsupported"
     assert unsupported.rects == []
+
+
+def test_locator_read_failure_does_not_disclose_path_or_exception_body(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "private-fixture.pdf"
+    pdf_path.write_bytes(b"synthetic corrupt document")
+    result = PdfQuoteLocator().locate(pdf_path, page=1, quote="Known quote")
+    assert result.status == "unsupported"
+    assert str(tmp_path) not in result.model_dump_json()
+    assert tmp_path.name not in result.reason
+    assert "private-fixture.pdf" not in result.reason
+
+
+def test_locator_path_failure_does_not_disclose_exception_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(_path: Path) -> Path:
+        raise OSError(r"SECRET C:\private\unpublished.pdf")
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "resolve", unavailable)
+        result = PdfQuoteLocator().locate(tmp_path / "paper.pdf", page=1, quote="Known quote")
+    assert result.status == "unsupported"
+    assert "SECRET" not in result.model_dump_json()
+    assert "private" not in result.model_dump_json()

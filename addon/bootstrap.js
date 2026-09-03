@@ -293,7 +293,7 @@ function zraCreateAddon(data) {
 
   return {
     async start() {
-      config = JSON.parse(await Zotero.File.getContentsAsync(data.rootURI + 'config.json'));
+      config = JSON.parse(await Zotero.File.getResourceAsync(data.rootURI + 'config.json'));
       makeControllers();
       for (const win of Zotero.getMainWindows()) this.addWindow(win);
       sectionID = Zotero.ItemPaneManager.registerSection({

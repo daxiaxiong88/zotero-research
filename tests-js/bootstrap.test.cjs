@@ -8,7 +8,10 @@ function runtime(windows = []) {
   const events = [];
   const registrations = {};
   const Zotero = {
-    File: { getContentsAsync: async () => JSON.stringify({ bridgeExecutable: 'D:\\test\\bridge.exe', workingDirectory: 'D:\\test' }) },
+    File: {
+      getContentsAsync: async () => assert.fail('Packaged jar resources require getResourceAsync, not the deprecated XHR-returning file API'),
+      getResourceAsync: async () => JSON.stringify({ bridgeExecutable: 'D:\\test\\bridge.exe', workingDirectory: 'D:\\test' }),
+    },
     getMainWindows: () => windows,
     Prefs: { get: () => '' },
     Libraries: { userLibraryID: 1 },
@@ -24,7 +27,7 @@ function runtime(windows = []) {
     },
     Reader: {
       registerEventListener: (name, fn) => { registrations.selection = fn; events.push(['listen', name]); },
-      unregisterEventListener: (name, fn) => { assert.equal(fn, registrations.selection); events.push(['unlisten', name]); },
+      unregisterEventListener: (name, fn) => { if (registrations.selection) assert.equal(fn, registrations.selection); events.push(['unlisten', name]); },
     },
   };
   const sandbox = { Zotero, setTimeout, clearTimeout, console, TextEncoder };

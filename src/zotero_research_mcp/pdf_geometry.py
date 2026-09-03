@@ -93,12 +93,12 @@ class PdfQuoteLocator:
 
         try:
             resolved_path = path.expanduser().resolve()
-        except (AttributeError, OSError, RuntimeError) as exc:
+        except (AttributeError, OSError, RuntimeError):
             return self._result(
                 status="unsupported",
                 page=result_page,
                 text=quote,
-                reason=f"unable to resolve PDF path: {exc}",
+                reason="unable to resolve the local PDF attachment path",
             )
 
         if not resolved_path.is_file():
@@ -217,12 +217,12 @@ class PdfQuoteLocator:
                     sort_index=sort_index,
                     reason="",
                 )
-        except (OSError, RuntimeError, ValueError, pymupdf.FileDataError) as exc:
+        except (OSError, RuntimeError, ValueError, pymupdf.FileDataError):
             return self._result(
                 status="unsupported",
                 page=result_page,
                 text=quote,
-                reason=f"unable to read PDF text geometry: {exc}",
+                reason="unable to read PDF text geometry; check that the PDF is readable",
             )
 
     @staticmethod

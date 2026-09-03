@@ -119,7 +119,8 @@
           response = await adapter.request(active.url + '/rpc', {
             headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + active.token },
             body: { method, params, expected_server_id: expected },
-            timeout: method === 'authorize_write' ? 150000 : (params.allow_heavy_fallback ? 900000 : 660000),
+            // Cover the configurable upper bounds: MinerU 1800s + model 600s + IPC margin.
+            timeout: method === 'authorize_write' ? 150000 : (params.allow_heavy_fallback ? 2460000 : 660000),
           });
         } catch (_) {
           if (method === 'write_note') {

@@ -379,7 +379,9 @@ test('笔记预览只读显示，先授权再明确确认内容才 write_note', 
   assert.equal(root.querySelectorAll('script').length, 0);
   assert.match(root.querySelector('[data-testid="note-preview"]').textContent, /Safe note/);
   assert.match(root.querySelector('[data-testid="note-preview"]').textContent, /<script>/);
-  assert.doesNotMatch(root.querySelector('[data-testid="note-preview"]').textContent, /<p>/);
+  assert.equal(root.querySelector('[data-testid="note-html-source"]')?.textContent,
+    '<p><strong>Unsafe?</strong><script>window.__xss = true</script></p>');
+  assert.equal(root.querySelector('[data-testid="note-html-source"]').closest('details').open, false);
   const previewCall = adapter.calls.find((call) => call.method === 'preview_note');
   assert.match(previewCall.params.content, /证据链：ev-1/);
   assert.match(previewCall.params.content, /物理页码 4/);
@@ -481,7 +483,7 @@ test('切换文献会清空结果/预览/授权，旧异步结果不会污染新
   panel.destroy();
 });
 
-test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤销', async () => {
+test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤销', async (t) => {
   const adapter = makeAdapter({
     rpc(method, params) {
       this.calls.push({ method, params });
@@ -496,6 +498,7 @@ test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤�
     },
   });
   const { root, panel } = setup(adapter);
+  t.after(() => panel.destroy());
   panel.setContext(context());
 
   root.querySelector('[data-testid="doi-input"]').value = '10.1000/test';
@@ -516,6 +519,7 @@ test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤�
   await settle();
   const grant = adapter.calls.find((call) => call.method === 'grant_cloud_access');
   assert.equal(grant.params.item_key, 'ITEM-1');
+  assert.equal(grant.params.attachment_key, 'ATT-1');
   assert.equal(grant.params.confirmed_public, true);
   assert.equal(grant.params.include_notes, false);
   assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, true);
@@ -525,6 +529,47 @@ test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤�
   await settle();
   assert.equal(adapter.calls.filter((call) => call.method === 'revoke_cloud_access').length, 1);
   assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, false);
+  panel.destroy();
+});
+
+test('Codex 授权仅针对当前 PDF，既有笔记必须另行勾选且切换后清空', async (t) => {
+  const adapter = makeAdapter({
+    rpc(method, params) {
+      this.calls.push({method, params});
+      if (method === 'health') return Promise.resolve({status: 'ok', models: {}});
+      if (method === 'grant_cloud_access') return Promise.resolve({
+        parent_item_key: params.item_key, attachment_keys: [params.attachment_key],
+        include_notes: params.include_notes, expires_at: '2099-01-01T00:00:00Z',
+      });
+      return Promise.resolve({});
+    },
+  });
+  const {root, panel} = setup(adapter);
+  t.after(() => panel.destroy());
+  panel.setContext(context({attachment_key: null}));
+  assert.equal(root.querySelector('[data-testid="grant-codex"]').disabled, true);
+  root.querySelector('[data-testid="codex-consent"]').checked = true;
+  root.querySelector('[data-testid="grant-codex"]').dispatchEvent(new root.ownerDocument.defaultView.Event('click', {bubbles:true}));
+  await settle();
+  assert.equal(adapter.calls.filter(c=>c.method === 'grant_cloud_access').length, 0);
+
+  panel.setContext(context({attachment_key: 'PUBLIC23'}));
+  const notes = root.querySelector('[data-testid="codex-notes-consent"]');
+  assert.ok(notes);
+  assert.equal(notes.checked, false);
+  notes.click();
+  root.querySelector('[data-testid="codex-consent"]').click();
+  root.querySelector('[data-testid="grant-codex"]').click();
+  await settle();
+  const grant = adapter.calls.find(c=>c.method === 'grant_cloud_access');
+  assert.equal(grant.params.attachment_key, 'PUBLIC23');
+  assert.equal(grant.params.include_notes, true);
+  assert.equal(notes.checked, false);
+  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /包含已明确授权的笔记/);
+  panel.setContext(context({attachment_key:'DRAFTX23'}));
+  assert.equal(root.querySelector('[data-testid="codex-consent"]').checked, false);
+  assert.equal(notes.checked, false);
+  assert.equal(root.querySelector('[data-testid="grant-codex"]').disabled, true);
   panel.destroy();
 });
 

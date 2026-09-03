@@ -74,6 +74,13 @@ def test_blank_pdf_recommends_heavy_parser_without_automatic_fallback(tmp_path: 
     assert result.fallback_used is False
 
 
+def test_requested_heavy_fallback_reports_missing_parser_when_needed(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "scan.pdf"
+    _save_blank_pdf(pdf_path)
+    with pytest.raises(PdfExtractionError, match="configured local heavy PDF parser"):
+        PdfExtractor().extract(pdf_path, attachment_key="PDFKEY23", allow_heavy_fallback=True)
+
+
 def test_explicit_fallback_uses_configured_local_heavy_parser(tmp_path: Path) -> None:
     class StubLocalHeavyParser:
         name = "mineru-local-stub"

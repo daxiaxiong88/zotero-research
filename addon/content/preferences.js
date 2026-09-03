@@ -10,7 +10,7 @@ var ZoteroResearchPreferences = {
     }
     try {
       const uri = await Zotero.Plugins.resolveURI('zotero-research@local.invalid', 'config.json');
-      const config = JSON.parse(await Zotero.File.getContentsAsync(uri));
+      const config = JSON.parse(await Zotero.File.getResourceAsync(uri));
       document.getElementById('zra-backend-path').textContent = '后端目录：' + config.workingDirectory;
     } catch (_) {
       document.getElementById('zra-backend-path').textContent = '请检查 XPI 是否由本机打包脚本生成。';

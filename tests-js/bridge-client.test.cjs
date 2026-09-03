@@ -51,6 +51,15 @@ test('invalid startup URLs or tokens are rejected before transmitting any reques
   }
 });
 
+test('heavy parsing RPC accommodates configured parser and model limits without changing write authorization timeout', async () => {
+  const h = harness();
+  await h.client.rpc('analyze', { allow_heavy_fallback: true });
+  await h.client.rpc('authorize_write', {});
+  assert.ok(h.requests[0].timeout >= (1800 + 600 + 60) * 1000);
+  assert.equal(h.requests[1].timeout, 150000);
+  await h.client.close();
+});
+
 test('closing during child startup stops it and sends no request', async () => {
   let completeLaunch;
   let stops = 0;

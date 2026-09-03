@@ -1,0 +1,13 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Research Synthetic Fixture — TEST ONLY",
+  "version": "0.1.0",
+  "applications": {
+    "zotero": {
+      "id": "zotero-research-smoke@local.invalid",
+      "update_url": "https://zotero-research.invalid/fixture-updates.json",
+      "strict_min_version": "10.0",
+      "strict_max_version": "10.0.*"
+    }
+  }
+}

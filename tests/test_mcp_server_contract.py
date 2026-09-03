@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+from pathlib import Path
 
 import httpx
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -16,9 +19,7 @@ def test_mcp_exposes_only_scoped_zotero_research_tools() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"Tool registration must not call Zotero: {request.url}")
 
-    service = ResearchService(
-        zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    )
+    service = ResearchService(zotero=ZoteroLocalClient(transport=httpx.MockTransport(handler)))
     server = create_mcp_server(service=service)
 
     tools = asyncio.run(server.list_tools())
@@ -50,20 +51,30 @@ def test_mcp_exposes_only_scoped_zotero_research_tools() -> None:
     assert by_name["search_items"]["annotations"]["readOnlyHint"] is True
     assert by_name["generate_reading_card"]["annotations"]["readOnlyHint"] is False
     assert by_name["write_child_note"]["annotations"]["readOnlyHint"] is False
-    assert all(
-        tool["annotations"]["destructiveHint"] is False for tool in by_name.values()
-    )
+    assert all(tool["annotations"]["destructiveHint"] is False for tool in by_name.values())
     assert "delete" not in by_name
 
 
-def test_stdio_entrypoint_completes_mcp_handshake() -> None:
+@pytest.mark.parametrize("entrypoint", ["python-module", "installed-script"])
+def test_stdio_entrypoint_completes_mcp_handshake(tmp_path: Path, entrypoint: str) -> None:
     async def exercise_server() -> set[str]:
+        executable = Path(sys.executable).with_name(
+            "zotero-research-mcp.exe" if os.name == "nt" else "zotero-research-mcp"
+        )
+        if entrypoint == "installed-script":
+            assert executable.is_file(), (
+                "Install the project scripts before running integration tests"
+            )
         parameters = StdioServerParameters(
-            command=sys.executable,
+            command=str(executable) if entrypoint == "installed-script" else sys.executable,
             args=[
                 "-c",
                 "from zotero_research_mcp.server import main; main()",
-            ],
+            ]
+            if entrypoint == "python-module"
+            else [],
+            cwd=str(tmp_path),  # Never load the operator's .env or real paper configuration.
+            env={"ZRM_STATE_DIRECTORY": str(tmp_path / "state")},
         )
         async with (
             stdio_client(parameters) as (reader, writer),
@@ -78,3 +89,4 @@ def test_stdio_entrypoint_completes_mcp_handshake() -> None:
     assert "health_check" in names
     assert "generate_reading_card" in names
     assert "write_child_note" in names
+    assert len(names) == 12
