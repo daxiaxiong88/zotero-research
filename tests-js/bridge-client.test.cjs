@@ -67,3 +67,63 @@ test('closing during child startup stops it and sends no request', async () => {
   await closing;
   assert.equal(stops, 1);
 });
+
+test('close cancels an unresolved handshake immediately without HTTP or unhandled rejection', async () => {
+  const token = 'b'.repeat(43);
+  const requests = [];
+  let completeLaunch;
+  let readStarted;
+  let rejectRead;
+  let stops = 0;
+  const unhandled = [];
+  const onUnhandled = (reason) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+
+  const client = createBridgeClient({
+    serverID: () => 'library-a',
+    launch: () => new Promise((resolve) => { completeLaunch = resolve; }),
+    request: async (...args) => { requests.push(args); },
+  });
+  const pending = client.rpc('health', {});
+  await Promise.resolve();
+
+  const child = {
+    read: async () => {
+      readStarted();
+      return new Promise((_, reject) => { rejectRead = reject; });
+    },
+    stop: async () => {
+      stops += 1;
+      rejectRead(new Error(token));
+    },
+  };
+  const handshakeReadStarted = new Promise((resolve) => { readStarted = resolve; });
+  completeLaunch(child);
+  await handshakeReadStarted;
+
+  try {
+    const closing = client.close();
+    assert.equal(stops, 1);
+    await assert.rejects(pending, (error) => {
+      assert.equal(String(error).includes(token), false);
+      return true;
+    });
+    let deadline;
+    try {
+      await Promise.race([
+        closing,
+        new Promise((_, reject) => {
+          deadline = setTimeout(() => reject(new Error('close remained pending')), 250);
+        }),
+      ]);
+    } finally {
+      clearTimeout(deadline);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+
+  assert.equal(requests.length, 0);
+  assert.equal(unhandled.length, 0);
+});

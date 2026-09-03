@@ -5,11 +5,48 @@
   function createBridgeClient(adapter) {
     let connection = null;
     let starting = null;
+    let startingChild = null;
+    let startingCancellation = null;
+    let closing = null;
     let closed = false;
     const schedule = adapter.setTimeout || setTimeout;
     const cancel = adapter.clearTimeout || clearTimeout;
+    const stopPromises = new Map();
 
-    async function readHandshake(child) {
+    function makeCancellation() {
+      let cancelled = false;
+      let rejectCancellation;
+      const promise = new Promise((_, reject) => { rejectCancellation = reject; });
+      // The cancellation promise can be rejected after its race has settled.
+      promise.catch(() => {});
+      return {
+        promise,
+        isCancelled: () => cancelled,
+        cancel: () => {
+          if (cancelled) return;
+          cancelled = true;
+          rejectCancellation(new Error('连接已关闭。'));
+        },
+      };
+    }
+
+    function stopChild(child) {
+      const existing = stopPromises.get(child);
+      if (existing) return existing;
+      let stopped;
+      try {
+        // Request termination synchronously so close() never waits for an
+        // uncancellable stdout read before asking the child to stop.
+        stopped = child.stop();
+      } catch (_) {
+        stopped = undefined;
+      }
+      const promise = Promise.resolve(stopped).catch(() => {});
+      stopPromises.set(child, promise);
+      return promise;
+    }
+
+    async function readHandshake(child, cancellation) {
       let timeout;
       try {
         return await Promise.race([
@@ -17,6 +54,7 @@
             let buffer = '';
             while (!buffer.includes('\n')) {
               const chunk = await child.read();
+              if (cancellation.isCancelled()) throw new Error('连接已关闭。');
               if (!chunk) throw new Error('启动信息不完整。');
               buffer += chunk;
               if (buffer.length > 4096) throw new Error('启动信息过大。');
@@ -32,9 +70,10 @@
           new Promise((_, reject) => {
             timeout = schedule(() => reject(new Error('启动超时。')), 15000);
           }),
+          cancellation.promise,
         ]);
       } finally {
-        cancel(timeout);
+        if (timeout !== undefined) cancel(timeout);
       }
     }
 
@@ -42,19 +81,24 @@
       if (closed) throw new Error('科研助手连接已关闭。');
       if (connection) return connection;
       if (!starting) {
+        const cancellation = makeCancellation();
+        startingCancellation = cancellation;
         starting = (async () => {
           let child;
           try {
             child = await adapter.launch();
+            startingChild = child;
             if (closed) throw new Error('连接已关闭。');
-            const info = await readHandshake(child);
+            const info = await readHandshake(child, cancellation);
             if (closed) throw new Error('连接已关闭。');
             connection = { child, ...info };
             return connection;
           } catch (_) {
-            if (child) await child.stop().catch(() => {});
+            if (child) await stopChild(child);
             throw new Error('本机科研服务未能安全启动。请在设置中检查后端路径和模型配置。');
           } finally {
+            if (startingChild === child) startingChild = null;
+            if (startingCancellation === cancellation) startingCancellation = null;
             starting = null;
           }
         })();
@@ -97,11 +141,18 @@
       },
 
       async close() {
-        closed = true;
-        if (starting) await starting.catch(() => {});
-        const active = connection;
-        connection = null;
-        if (active) await active.child.stop().catch(() => {});
+        if (!closing) {
+          closing = (async () => {
+            closed = true;
+            if (startingCancellation) startingCancellation.cancel();
+            const child = startingChild || (connection && connection.child);
+            const stopping = child ? stopChild(child) : Promise.resolve();
+            if (starting) await starting.catch(() => {});
+            await stopping;
+            connection = null;
+          })();
+        }
+        return closing;
       },
     };
   }
