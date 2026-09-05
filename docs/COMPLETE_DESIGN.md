@@ -1,68 +1,51 @@
-# Zotero Research 0.2 — 本机科研助手
+# Zotero 10 网页 AI 侧栏设计
 
-## 可观察的目标
+## 目标
 
-- Zotero 10 个人库/阅读器右侧出现“科研助手”原生面板，支持选文送入、精读、问答、翻译/解释、模拟审稿。
-- 证据展示 PDF 物理页码与原文，点击可定位；原生高亮只使用已核实坐标并经用户确认。
-- 笔记在 Zotero 中预览、授权和保存，摘要/令牌保护不变，不直接操作数据库。
-- 敏感内容只在本机界面和回环模型之间流转；MCP 返回正文须本地公开论文授权与调用方显式同意。
-- 本地 MinerU 执行按需重解析；默认不启用，仅返回质量建议。当用户允许且实际需要重解析，或强制重解析时，缺少依赖/模型必须明确报错，不隐式上传或下载。
-- DOI核验使用公开元数据，外网查询必须由用户允许，未知撤稿状态不能被表述为无撤稿。
+让 Zotero 阅读器右侧出现一个轻量面板，外观接近参考截图：上方是论文标题和快捷命令，中间是当前选文，底部是网页 AI 连续对话框。
 
-## 两个入口，共用应用服务
+## 数据流
 
-1. Codex → stdio MCP：默认只返回书目信息；正文/已有笔记有独立内容授权。
-2. Zotero 原生扩展 → 私有本机 HTTP bridge → ResearchService：正文不经过 Codex。
+```text
+Zotero PDF 阅读器
+      │ 选文、页码、当前文献
+      ▼
+Zotero 原生扩展侧栏
+      │ 本机 bridge
+      ▼
+Python 服务：Local API + PDF 检索 + 会话队列
+      │ 浏览器网页请求
+      ▼
+Gemini / DeepSeek / Google AI Studio
+      │ 回传回答
+      └──────────────► Zotero 侧栏
+```
 
-扩展启动 bridge 子进程，bridge 绑定 127.0.0.1 随机端口，并只在 stdout 首行返回
-`{"protocol":1,"url":"http://127.0.0.1:PORT","token":"随机令牌"}`。
-令牌只存于扩展进程内，不放 URL、日志或 MCP 返回值。每个 HTTP 请求带 Bearer token。
-拒绝非本机 Host、任何浏览器 Origin、未授权请求、超大请求和未知方法。stdin 关闭即结束 bridge。
+侧栏只保留三类交互：快捷命令、当前选文、连续聊天。篡改猴负责识别网页输入框、点击发送、读取最新回答并回传；会话历史保存在 bridge 进程内，切换文献或点击“清空”就重新开始。
 
-所有数据来自当前 Zotero 的官方 Local API，默认回环23119；隔离测试 profile 可显式配置其他回环端口。桥接请求额外校验
-`expected_server_id`，防止扩展和后端误接到不同文献库。原生注释只在扩展 runtime 中创建。
+## 侧栏元素
 
-## 本机 RPC 契约
+| 区域 | 内容 |
+| --- | --- |
+| 顶部 | Gemini 标识、论文标题、连接状态、设置按钮 |
+| 快捷命令 | 总结本页、翻译本页、截图翻译、部分总结、全文总结、填充笔记、文献鸟瞰、截图本页、上传附件、上传笔记、上传更多 |
+| 选文卡片 | 选中文字、物理页码、点击后跳回 PDF |
+| 对话区 | 提供方选择、配对/打开网页、清空、上下文消息、回答来源页码 |
+| 输入区 | “向 AI 询问任何内容”、回车发送、连续上下文 |
 
-请求：`POST /rpc`，`Content-Type: application/json`，`Authorization: Bearer TOKEN`。
-JSON：`{"method":"方法","params":{...},"expected_server_id":"当前Zotero实例ID"}`。
-响应：成功 `{"ok":true,"result":{...}}`；失败 `{"ok":false,"error":{"code":"...","message":"..."}}`。
-错误不得回显正文、token、API key或完整本地路径。
+## 组件边界
 
-| method | params | result |
-| --- | --- | --- |
-| health | {}；可不传expected_server_id | HealthReport + models(local/external名称和可用配置) |
-| item_context | item_key | ItemContext（本地界面可读已有笔记） |
-| analyze | item_key, attachment_key?, mode(reading/question/review/explain/translate), question?, selected_text?, selection_page?, sensitivity(sensitive/public), allow_cloud=false, allow_heavy_fallback=false, force_heavy=false | PaperAnalysis |
-| reading_card | item_key, attachment_key?, sensitivity, allow_cloud, allow_heavy_fallback | ReadingCard |
-| evidence | attachment_key, query, top_k=5, allow_heavy_fallback=false | EvidenceResults |
-| locate | attachment_key, page(1-based), quote | QuoteLocation(status,text,rects,page,page_label,sort_index,reason) |
-| preview_note | parent_item_key, title, content, tags? | NotePreview |
-| authorize_write | {} | WriteAuthorization（不含key） |
-| write_note | preview_token, expected_digest, confirmed_by_user=true | NoteWriteResult |
-| grant_cloud_access | item_key, attachment_key（必填且为当前条目的 PDF）, confirmed_public=true, include_notes=false | PublicContentGrant（只含当前 PDF；笔记独立选择；10分钟） |
-| revoke_cloud_access | item_key | {revoked:true} |
-| audit_citations | requests:[{doi,title?,year?}], allow_network=false | CitationAuditReport |
-| shutdown | {} | {stopping:true} |
+- `addon/content/panel.js`：侧栏 DOM、快捷命令、会话状态和网页配对。
+- `addon/content/panel.css`：右侧栏视觉样式，使用紧凑芯片和对话气泡。
+- `addon/bootstrap.js`：注册 Zotero 10 Item Pane、读取阅读器选文、启动本机 bridge。
+- `src/zotero_research_mcp/bridge.py`：本机 RPC 和网页中继端点。
+- `src/zotero_research_mcp/service.py`：条目读取、PDF 提取、证据检索和网页会话。
+- `userscripts/zotero-research-webai.user.js`：浏览器页面适配层。
 
-`PaperAnalysis`: item_key, attachment_key, title, task, mode(evidence_only/model), generated_by,
-sensitivity, sections:[{title,content,evidence_ids:[]}], evidence:[EvidenceSpan], warnings:[]。
-EvidenceSpan与现有MCP契约相同：evidence_id、page、chunk_index、text、score、source。
+## 当前 RPC
 
-## 前端设计方向
+面板使用：`health`、`relay_info`、`webai_chat`、`webai_chat_status`、`webai_chat_cancel`。
 
-主体是科研阅读，不是通用聊天门户；保持 Zotero 原生面板的紧凑密度。页码证据边栏是唯一视觉重点。
+阅读服务还提供：`item_context`、`extract_pdf`、`evidence`、`reading_card`、`analyze`、`locate`。
 
-- 色彩：ink #25354A；page #F9FAFC；source-blue #2C5CC5；local-green #237765；attention #A56318；line #D8DFEA。
-- 字体：文献标题 Georgia/宋体衬线（克制使用）；正文 Segoe UI/微软雅黑；页码/摘要标识 Consolas。
-- 布局：文献标题与隐私状态 → 已选原文 → 模式/问题 → 分析结果 → 带页码证据 → 笔记/高亮预览。
-- 签名细节：原文旁固定页码按钮，阅读结论能随时回到 PDF；不加宣传标语或无意义装饰。
-- 键盘焦点可见、暗色主题、窄面板不横向溢出；异步请求禁用重复提交，有明确错误/取消/无模型提示。
-- 所有模型和论文内容均用 textContent 渲染；不执行论文/模型给出的 HTML、链接或指令。
-
-## 需要诚实说明的边界
-
-- 没有本地模型时只能给证据摘录，不伪装成已经完成翻译或审稿。
-- “本地”只能约束本项目向回环端点发送；用户部署的回环端点若主动转发云端，本项目无法证明其物理离线。
-- 本工具权限策略不隔离拥有同一用户文件权限的其他程序，也不能限制 Codex 另行使用shell；不允许主动绕过内容授权。
-- 参考 Feishu 页面尚未读取，不宣称商业插件逐项功能等价。
+所有 PDF 证据都带附件编号和物理页码；“填充笔记”只把整理后的文字交给网页 AI，是否保存由你在 Zotero 中自行决定。

@@ -1,30 +1,40 @@
-# Findings — Zotero 10 completion
+# 设计结论
 
-## 已验证环境
+## 交互
 
-- 2026-09-03 MCP health_check: Zotero 10.0.1, Local API v3, schema 44, read/write supported, write_mode=local_api。
-- 代码基线 bfdbae0，工作树干净；现有 Python MCP 0.1.0，9 个工具。
-- 前一版没有 Zotero UI、原生注释和可执行 MinerU 适配器。
-- 旧的 PrivacyPolicy 仅保护内部模型调用，extract_pdf/retrieve_evidence/get_item_context 仍可向 MCP 调用方返回敏感正文，不能宣传成端到端离线。
-- 原始规格明确禁止实现测试修改用户真实 Zotero 文献库。
+- 参考图只作为视觉和操作参考，面板采用紧凑白色卡片、快捷命令芯片、消息气泡和底部输入框。
+- “总结本页”等命令都转成普通聊天消息，因此快捷命令和手动提问共享同一上下文。
+- “截图翻译”“上传附件”“上传笔记”“上传更多”负责提示网页 AI 下一步，文件仍由用户在网页页面选择。
+- 选文内容以纯文本发送，回答也以纯文本显示；回答中的证据页码可点击跳回 PDF。
 
-## 参考来源（内容只作研究数据，不作为指令）
+## 数据流
 
-- 原始用户参考：https://my.feishu.cn/docx/P9STduZyvoWtWnxkfPWcdtSKnje
-- 原始 MCP 列表：https://github.com/punkpeye/awesome-mcp-servers
-- Zotero Local API：https://www.zotero.org/support/dev/web_api/v3/local_api
+```text
+Zotero PDF 阅读器
+  -> Zotero 侧栏
+  -> 本机 bridge
+  -> Tampermonkey 网页适配层
+  -> 当前已打开的网页 AI
+  -> bridge
+  -> Zotero 侧栏
+```
 
-## 待核验
+- bridge 使用随机本机端口和短期配对令牌。
+- 页面只可通过用户主动配对的 URL 片段接入。
+- 会话保存在 bridge 进程内；清空、切换论文或进程退出都会结束会话。
+- PDF 证据保留附件编号、物理页码和可定位原文，供网页 AI 组织回答。
 
-- Zotero 10 ItemPaneManager/Reader 注入接口、注释坐标系与真实创建 API。
-- 本机本地模型/重解析工具是否已安装。
-- 原始 Feishu 文档是否可读取。
+## 配置
 
-## 外部查验与本机发现
+- 只使用网页 AI：不需要填写模型 API。
+- 需要本机生成阅读卡时，可在 `.env` 配置 OpenAI 兼容模型；这是可选的后台能力，不影响网页 AI 侧栏。
+- 普通 PDF 使用 PyMuPDF；复杂排版才启用可选重解析器。
 
-- 官方开发文档确认 Zotero 插件使用 manifest.json + bootstrap.js，支持动态启动/禁用和主窗口生命周期；完整 Zotero 10 行为还需查安装包内 JS。
-- 官方 Local API 文档仍要求 Zotero 10+ 写入授权和 Server-ID。
-- Feishu 链接 web 抓取被拒绝（不可安全打开），尚未读取该页面，不能宣称与该文档逐项功能等价。
-- 发现 D:/Ollama/ollama.exe（0.32.1）；执行 list 自动启动了 Ollama，日志提示旧模型目录 D:/Ollama/models 不存在，正在确认本地模型是否可用。
-- Ollama list最终返回空模型列表；主机有NVIDIA RTX5070 Laptop GPU，尚未下载模型，已向用户询问数GB模型下载许可。
-- 浏览器第二种方式读取Feishu也超时并重置会话。参考页目前不可用；实现以用户粘贴的架构与阶段设计为准，不声称覆盖未知的商业Pro条目。
+## 代码入口
+
+- `addon/content/panel.js`：侧栏交互和消息状态。
+- `addon/content/panel.css`：侧栏视觉样式。
+- `addon/bootstrap.js`：Zotero 10 生命周期、选文和 bridge 启动。
+- `src/zotero_research_mcp/bridge.py`：本机消息桥。
+- `src/zotero_research_mcp/service.py`：条目读取、PDF 证据和会话队列。
+- `userscripts/zotero-research-webai.user.js`：网页输入、发送和回答回传。
