@@ -1,4 +1,7 @@
-pref("extensions.zotero.researchAssistant.localModelName", "");
-pref("extensions.zotero.researchAssistant.localModelBaseURL", "http://127.0.0.1:11434/v1");
-pref("extensions.zotero.researchAssistant.mineruModelPath", "");
-pref("extensions.zotero.researchAssistant.mineruExecutable", "");
+/* Optional direct-API settings. The API key lives only in local Zotero prefs
+ * (stored in the local profile); it never enters the relay endpoint or web AI. */
+pref("extensions.zotero.researchAssistant.apiProtocol", "auto");
+pref("extensions.zotero.researchAssistant.apiBaseUrl", "");
+pref("extensions.zotero.researchAssistant.apiModel", "");
+pref("extensions.zotero.researchAssistant.apiKey", "");
+pref("extensions.zotero.researchAssistant.uiFontSize", "m");

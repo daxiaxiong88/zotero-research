@@ -4,7 +4,15 @@
 
   const KEY = /^[23456789ABCDEFGHIJKLMNPQRSTUVWXYZ]{8}$/;
   const SORT = /^\d{5}\|\d{6}\|\d{5}$/;
-  const LIFETIME = 10 * 60 * 1000;
+  // Shared limits: bootstrap.js reads these through ZoteroResearchNative.LIMITS.
+  const LIMITS = Object.freeze({
+    lifetimeMs: 10 * 60 * 1000,
+    maxStoredSelections: 16,
+    maxPendingPreviews: 64,
+    maxTextLength: 12000,
+    maxPageNumber: 100000,
+  });
+  const HIGHLIGHT_COLOR = '#ffd400';
   const clone = (value) => JSON.parse(JSON.stringify(value));
 
   function validatePosition(value, page) {
@@ -33,9 +41,9 @@
 
   function validateAttachment(attachment, key) {
     if (!attachment || attachment.key !== key || !KEY.test(key)
-      || !attachment.isPDF || !attachment.isPersonal || !attachment.editable
+      || !attachment.isPDF || !attachment.editable
       || !attachment.id || !attachment.libraryID || !attachment.stamp) {
-      throw new Error('只支持个人文献库中可编辑、已保存的本地 PDF 附件。');
+      throw new Error('只支持可编辑、已保存的本地 PDF 附件。');
     }
     return attachment;
   }
@@ -64,8 +72,9 @@
         clean();
         const source = clone(annotation);
         const page = source?.position?.pageIndex + 1;
-        if (!Number.isInteger(page) || page < 1 || page > 100000
-          || typeof source.text !== 'string' || !source.text.trim() || source.text.length > 12000) {
+        if (!Number.isInteger(page) || page < 1 || page > LIMITS.maxPageNumber
+          || typeof source.text !== 'string' || !source.text.trim()
+          || source.text.length > LIMITS.maxTextLength) {
           throw new Error('请在 PDF 阅读器中选择不超过 12000 字的原文。');
         }
         const attachment = validateAttachment(await adapter.attachment(attachmentKey), attachmentKey);
@@ -76,10 +85,10 @@
           position, page_label: String(source.pageLabel || page), sort_index: sortIndex,
         };
         ensureAlive();
-        if (selections.size >= 16) selections.delete(selections.keys().next().value);
+        if (selections.size >= LIMITS.maxStoredSelections) selections.delete(selections.keys().next().value);
         selections.set(attachmentKey, {
           selection: clone(selection), identity: identity(attachment),
-          server: adapter.serverID(), expires: now() + LIFETIME,
+          server: adapter.serverID(), expires: now() + LIMITS.lifetimeMs,
         });
         return clone(selection);
       },
@@ -87,11 +96,11 @@
       async prepare({ attachment_key: key, page, quote }) {
         ensureAlive();
         clean();
-        if (!KEY.test(key) || !Number.isInteger(page) || page < 1 || page > 100000
-          || typeof quote !== 'string' || !quote.trim() || quote.length > 12000) {
+        if (!KEY.test(key) || !Number.isInteger(page) || page < 1 || page > LIMITS.maxPageNumber
+          || typeof quote !== 'string' || !quote.trim() || quote.length > LIMITS.maxTextLength) {
           throw new Error('请选择有效的附件、物理页码和原文。');
         }
-        if (pending.size >= 64) throw new Error('待确认预览过多，请稍后重试。');
+        if (pending.size >= LIMITS.maxPendingPreviews) throw new Error('待确认预览过多，请稍后重试。');
         const server = adapter.serverID();
         if (!server) throw new Error('当前文献库尚未连接。');
         const attachment = validateAttachment(await adapter.attachment(key), key);
@@ -115,11 +124,11 @@
         }
         const data = {
           key: adapter.annotationKey(), type: 'highlight', authorName: '',
-          text: quote, comment: '', color: '#ffd400', pageLabel,
+          text: quote, comment: '', color: HIGHLIGHT_COLOR, pageLabel,
           sortIndex, position, isExternal: false, tags: [],
         };
         if (!KEY.test(data.key)) throw new Error('注释标识生成失败。');
-        const expires = now() + LIFETIME;
+        const expires = now() + LIMITS.lifetimeMs;
         const token = adapter.token();
         const digest = await adapter.digest(JSON.stringify({ server, identity: identity(attachment), data, expires }));
         const preview = {
@@ -167,7 +176,7 @@
     };
   }
 
-  const api = { createHighlightController };
+  const api = { createHighlightController, LIMITS, HIGHLIGHT_COLOR };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ZoteroResearchNative = api;
 })(globalThis);

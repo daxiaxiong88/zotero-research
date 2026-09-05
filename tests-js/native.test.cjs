@@ -16,7 +16,7 @@ function harness() {
     serverID: () => server,
     attachment: async (key) => ({
       key, id: 22, libraryID: 1, parentKey: 'PARENT23', editable: true,
-      isPDF: true, isPersonal: true, stamp,
+      isPDF: true, stamp,
     }),
     locate: async (args) => {
       lookups.push(args);

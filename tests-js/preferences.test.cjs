@@ -6,66 +6,110 @@ const vm = require('node:vm');
 
 function preferences() {
   const fields = new Map();
-  const changes = [];
   const events = [];
-  const configURI = 'jar:file:///synthetic-addon.xpi!/config.json';
+  const listeners = new Map();
+  let fragmentRoot = null;
+  const getElementById = (id) => {
+    if (id === 'zra-preferences-root') return fragmentRoot;
+    if (!fields.has(id)) {
+      fields.set(id, {
+        value: '',
+        textContent: id === 'zra-backend-path' ? '初始占位' : '',
+      });
+    }
+    return fields.get(id);
+  };
+  const document = {
+    getElementById,
+    addEventListener: (type, listener) => {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(listener);
+    },
+    removeEventListener: (type, listener) => listeners.get(type)?.delete(listener),
+    dispatchLoad: (target) => {
+      for (const listener of listeners.get('load') || []) listener({ target });
+    },
+  };
   const context = vm.createContext({
-    URL,
-    document: { getElementById: (id) => {
-      if (!fields.has(id)) fields.set(id, { value: '', textContent: '' });
-      return fields.get(id);
-    } },
+    document,
+    setTimeout,
+    clearTimeout,
     Zotero: {
       Prefs: {
-        get: (name) => name.endsWith('localModelBaseURL') ? 'http://127.0.0.1:11434/v1' : '',
-        set: (name, value) => changes.push([name, value]),
-      },
-      Plugins: { resolveURI: async (id, resource) => {
-        assert.equal(id, 'zotero-research@local.invalid');
-        assert.equal(resource, 'config.json');
-        return configURI;
-      } },
-      File: {
-        getContentsAsync: async () => ({ responseText: '{}' }), // Zotero 10 returns an XHR for a URI.
-        getResourceAsync: async (uri) => {
-          assert.equal(uri, configURI);
-          return JSON.stringify({ workingDirectory: 'D:\\Synthetic Research' });
-        },
+        values: new Map([
+          ['researchAssistant.apiProtocol', 'auto'],
+          ['researchAssistant.apiBaseUrl', ''],
+          ['researchAssistant.apiModel', ''],
+          ['researchAssistant.apiKey', ''],
+        ]),
+        get(name) { return this.values.get(name) || ''; },
+        set(name, value) { this.values.set(name, value); },
       },
     },
     Services: { obs: { notifyObservers: (...args) => events.push(args) } },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../addon/content/preferences.js'), 'utf8'), context);
-  return { api: context.ZoteroResearchPreferences, fields, changes, events };
+  return {
+    api: context.ZoteroResearchPreferences,
+    context: context,
+    fields,
+    events,
+    mountFragment() {
+      fragmentRoot = { id: 'zra-preferences-root' };
+      getElementById('zra-backend-path');
+      getElementById('zra-reconnect');
+      getElementById('zra-settings-status');
+      getElementById('zra-api-status');
+      document.dispatchLoad(fragmentRoot);
+    },
+  };
 }
 
-test('settings load the backend directory from a packaged Zotero 10 jar resource', async () => {
+test('Zotero 10 preference fragments initialize after the framework-dispatched load event', () => {
   const h = preferences();
-  await h.api.init();
-  assert.equal(h.fields.get('zra-backend-path').textContent, '后端目录：D:\\Synthetic Research');
-  assert.equal(h.fields.get('zra-local-url').value, 'http://127.0.0.1:11434/v1');
-  assert.deepEqual(h.changes, []);
+  h.mountFragment();
+  assert.match(h.fields.get('zra-backend-path').textContent, /23119/);
+  assert.match(h.fields.get('zra-backend-path').textContent, /允许其他应用/);
 });
 
-test('settings reject external or credential-bearing model URLs without persisting any fields', async () => {
+test('reconnect button refreshes the sidebar through the lifecycle observer', () => {
   const h = preferences();
-  await h.api.init();
-  for (const address of ['https://cloud.example/v1', 'http://user:secret@127.0.0.1/v1', 'http://127.0.0.1/v1?token=secret']) {
-    h.fields.get('zra-local-url').value = address;
-    h.api.save();
-    assert.match(h.fields.get('zra-settings-status').textContent, /回环/);
-    assert.deepEqual(h.changes, []);
-  }
-});
-
-test('settings save only local model names and paths and reconnect via the lifecycle observer', async () => {
-  const h = preferences();
-  await h.api.init();
-  h.fields.get('zra-local-model').value = ' synthetic-local-model ';
-  h.api.save();
-  assert.equal(h.changes.length, 4);
-  assert.ok(h.changes.some(([name, value]) => name === 'researchAssistant.localModelName' && value === 'synthetic-local-model'));
-  assert.ok(h.changes.every(([name]) => !/key|token|secret/i.test(name)));
+  h.mountFragment();
   h.api.reconnect();
   assert.deepEqual(h.events, [[null, 'zotero-research:reconnect']]);
+  assert.match(h.fields.get('zra-settings-status').textContent, /已刷新/);
+});
+
+test('no credential-bearing fields beyond the optional API key', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'addon', 'content', 'preferences.js'),
+    'utf8',
+  );
+  // The direct-API key is a deliberate, user-entered local preference.
+  assert.match(source, /apiProtocol|apiBaseUrl|apiModel|apiKey/);
+  assert.doesNotMatch(source, /secret/i);
+  assert.doesNotMatch(source, /sk-[A-Za-z0-9]{8,}/, 'no hardcoded API keys');
+  const xhtml = fs.readFileSync(
+    path.join(__dirname, '..', 'addon', 'content', 'preferences.xhtml'),
+    'utf8',
+  );
+  assert.ok(xhtml.includes('API 直连'), 'API 直连配置区存在');
+  assert.ok(!xhtml.includes('本地模型'), '本地模型字段已随网页 AI 架构移除');
+});
+
+test('save persists API fields into Zotero preferences', () => {
+  const h = preferences();
+  h.mountFragment();
+  const api = h.api;
+  api.field('zra-api-protocol').value = 'anthropic';
+  api.field('zra-api-base').value = 'https://api.example.com/anthropic';
+  api.field('zra-api-model').value = 'test-model';
+  api.field('zra-api-key').value = 'sk-test';
+  api.save();
+  const values = h.context.Zotero.Prefs.values;
+  assert.equal(values.get('researchAssistant.apiProtocol'), 'anthropic');
+  assert.equal(values.get('researchAssistant.apiBaseUrl'), 'https://api.example.com/anthropic');
+  assert.equal(values.get('researchAssistant.apiModel'), 'test-model');
+  assert.equal(values.get('researchAssistant.apiKey'), 'sk-test');
+  assert.match(api.field('zra-api-status').textContent, /已保存/);
 });

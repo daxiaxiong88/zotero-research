@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import tempfile
 import zipfile
 from collections.abc import Sequence
@@ -15,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_VERSION = "0.2.0"
+PACKAGE_VERSION = "0.4.6"
 EXPECTED_ADDON_ID = "zotero-research@local.invalid"
 EXPECTED_ZOTERO_MIN_VERSION = "10.0"
 EXPECTED_ZOTERO_MAX_VERSION = "10.0.*"
@@ -26,10 +25,10 @@ ALLOWED_RUNTIME_FILES = frozenset(
     {
         "manifest.json",
         "bootstrap.js",
-        "config.json",
         "prefs.js",
         "content/native.js",
-        "content/bridge-client.js",
+        "content/relay.js",
+        "content/markdown.js",
         "content/panel.js",
         "content/panel.css",
         "content/icon.svg",
@@ -46,8 +45,6 @@ _DIRECTORY_ENTRIES = (
     "locale/en-US/",
     "locale/zh-CN/",
 )
-_ALLOWED_CONFIG_FIELDS = frozenset({"bridgeExecutable", "workingDirectory"})
-
 _SENSITIVE_SUFFIXES = frozenset(
     {".crt", ".db", ".der", ".jks", ".key", ".pem", ".pfx", ".p12", ".secret", ".sqlite"}
 )
@@ -82,37 +79,23 @@ class PackageResult:
 def build_addon(
     *,
     addon_dir: Path | str | None = None,
-    bridge_executable: Path | str,
-    working_directory: Path | str,
     output: Path | str | None = None,
 ) -> PackageResult:
-    """Validate, rewrite the safe runtime config, and build one XPI."""
+    """Validate the addon tree and build one deterministic XPI."""
 
     source_input = Path(addon_dir or REPO_ROOT / "addon").expanduser()
     if source_input.is_symlink():
         raise PackageError("addon directory must not be a symlink")
     source_dir = _resolve_directory(source_input, "addon directory")
-    bridge_path = _resolve_bridge_executable(bridge_executable)
-    repository_path = _resolve_directory(working_directory, "working directory")
     output_path = _resolve_output(output or DEFAULT_OUTPUT)
     if _is_relative_to(output_path, source_dir):
         raise PackageError("output must not be inside addon directory")
 
     source_files = _validate_addon_tree(source_dir)
     manifest = _read_manifest(source_dir / "manifest.json")
-    _read_config(source_dir / "config.json")
-    config = {
-        "bridgeExecutable": str(bridge_path),
-        "workingDirectory": str(repository_path),
-    }
-    config_bytes = _json_bytes(config)
 
     file_bytes = {
-        relative_path: (
-            config_bytes
-            if relative_path == "config.json"
-            else (source_dir / Path(relative_path)).read_bytes()
-        )
+        relative_path: (source_dir / Path(relative_path)).read_bytes()
         for relative_path in source_files
     }
     _write_xpi_atomically(output_path, file_bytes)
@@ -148,21 +131,6 @@ def _resolve_directory(value: Path | str, description: str) -> Path:
         raise PackageError(f"{description} does not exist: {path}") from exc
     if not resolved.is_dir():
         raise PackageError(f"{description} is not a directory: {resolved}")
-    return resolved
-
-
-def _resolve_bridge_executable(value: Path | str) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        raise PackageError(f"bridge executable must be an absolute local .exe path: {path}")
-    if path.suffix.lower() != ".exe":
-        raise PackageError(f"bridge executable must have an .exe suffix: {path}")
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise PackageError(f"bridge executable does not exist: {path}") from exc
-    if not resolved.is_file():
-        raise PackageError(f"bridge executable is not a file: {resolved}")
     return resolved
 
 
@@ -273,35 +241,6 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     return manifest
 
 
-def _read_config(path: Path) -> dict[str, Any]:
-    config = _read_json_object(path, "config.json")
-    _reject_sensitive_config(config)
-    unknown_fields = sorted(set(config).difference(_ALLOWED_CONFIG_FIELDS))
-    if unknown_fields:
-        raise PackageError(
-            "unknown config field(s) in config.json: " + ", ".join(unknown_fields)
-        )
-    return config
-
-
-def _reject_sensitive_config(value: Any, path: str = "config.json") -> None:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if not isinstance(key, str):
-                raise PackageError(f"config.json contains a non-string key at {path}")
-            normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
-            if any(part in normalized_key for part in _SENSITIVE_CONFIG_KEY_PARTS):
-                raise PackageError(f"sensitive config key is not allowed: {path}.{key}")
-            _reject_sensitive_config(nested, f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, nested in enumerate(value):
-            _reject_sensitive_config(nested, f"{path}[{index}]")
-    elif isinstance(value, str) and (
-        value.startswith(_SECRET_VALUE_PREFIXES) or "BEGIN PRIVATE KEY" in value
-    ):
-        raise PackageError(f"secret-looking config value is not allowed: {path}")
-
-
 def _is_nonempty_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip()) and not any(
         character in value for character in "\r\n\x00"
@@ -389,22 +328,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="addon source directory (default: repo/addon)",
     )
     parser.add_argument(
-        "--bridge-executable",
-        type=Path,
-        required=True,
-        help="absolute local bridge .exe path",
-    )
-    parser.add_argument(
-        "--working-directory",
-        type=Path,
-        required=True,
-        help="absolute local repository directory",
-    )
-    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="XPI output path (default: dist/zotero-research-0.2.0.xpi)",
+        help="XPI output path (default: dist/zotero-research-0.4.6.xpi)",
     )
     return parser
 
@@ -415,8 +342,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = build_addon(
             addon_dir=arguments.addon_dir,
-            bridge_executable=arguments.bridge_executable,
-            working_directory=arguments.working_directory,
             output=arguments.output,
         )
     except PackageError as exc:

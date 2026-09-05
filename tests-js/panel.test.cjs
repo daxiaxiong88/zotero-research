@@ -8,63 +8,71 @@ const PANEL_SOURCE = fs.readFileSync(
   path.join(__dirname, '..', 'addon', 'content', 'panel.js'),
   'utf8',
 );
+const RELAY_SOURCE = fs.readFileSync(
+  path.join(__dirname, '..', 'addon', 'content', 'relay.js'),
+  'utf8',
+);
 
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
+function makeRelayHarness() {
+  const listeners = [];
+  let queueResult = null;
+  const relay = {
+    calls: [],
+    enqueueTask(request) {
+      this.calls.push({ method: 'enqueueTask', request });
+      if (queueResult instanceof Error) throw queueResult;
+      return queueResult || 'task-1';
+    },
+    subscribe(listener) {
+      listeners.push(listener);
+      return () => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      };
+    },
+    state() {
+      return this.connected
+        ? { connected: true, ai: 'Gemini', url: 'https://gemini.google.com/' }
+        : { connected: false };
+    },
+    emit(event) {
+      for (const listener of [...listeners]) listener(event);
+    },
+  };
+  return { relay, listeners, setQueueResult: (value) => { queueResult = value; } };
 }
 
-function makeAdapter(overrides = {}) {
-  const calls = [];
-  const adapter = {
-    calls,
-    rpc(method, params) {
-      calls.push({ method, params });
-      if (method === 'health') {
-        return Promise.resolve({
-          status: 'ok',
-          zotero: { reachable: true, version: '10.0', write_supported: true },
-          models: { local: 'Local model', external: null },
-        });
-      }
-      return Promise.resolve({});
+function makeAdapter(relayHarness, overrides = {}) {
+  return {
+    navigate(key, page) {
+      this.navigateCalls = this.navigateCalls || [];
+      this.navigateCalls.push([key, page]);
+      return Promise.resolve();
     },
-    navigate(...args) {
-      calls.push({ method: 'navigate', args });
+    relay: relayHarness.relay,
+    retrieveEvidence(attachmentKey, query, topK) {
+      this.evidenceCalls = this.evidenceCalls || [];
+      this.evidenceCalls.push([attachmentKey, query, topK]);
+      return Promise.resolve([
+        { evidence_id: 'p3:c1', page: 3, chunk_index: 1, text: 'Measured improvement.', score: 1 },
+      ]);
     },
-    prepareHighlight(payload) {
-      calls.push({ method: 'prepareHighlight', params: payload });
-      return Promise.resolve({
-        token: 'highlight-token',
-        digest: 'highlight-digest',
-        text: payload.quote,
-        page: payload.page,
-        color: '#f3c969',
-        expires_at: '2099-01-01T00:00:00Z',
-      });
-    },
-    commitHighlight(preview) {
-      calls.push({ method: 'commitHighlight', params: preview });
-      return Promise.resolve({ status: 'created' });
-    },
-    openSettings() {
-      calls.push({ method: 'openSettings' });
+    openSettings() {},
+    copyText() {},
+    openExternal(url) {
+      this.openedUrls = this.openedUrls || [];
+      this.openedUrls.push(url);
     },
     ...overrides,
   };
-  return adapter;
 }
 
-function setup(adapter = makeAdapter()) {
+function setup(adapter) {
   const dom = new JSDOM('<!doctype html><body></body>', {
     runScripts: 'outside-only',
     pretendToBeVisual: true,
   });
+  dom.window.eval(RELAY_SOURCE);
   dom.window.eval(PANEL_SOURCE);
   const panel = dom.window.ZoteroResearchPanel.mount(dom.window.document.body, adapter);
   const root = dom.window.document.querySelector('[data-zrp-root]');
@@ -72,551 +80,383 @@ function setup(adapter = makeAdapter()) {
   return { dom, panel, root, adapter };
 }
 
-function setupXml(adapterA = makeAdapter(), adapterB = makeAdapter()) {
-  const dom = new JSDOM(
-    '<window xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"><box id="left"/><box id="right"/></window>',
-    {
-      contentType: 'application/xml',
-      runScripts: 'outside-only',
-      pretendToBeVisual: true,
-    },
-  );
-  dom.window.eval(PANEL_SOURCE);
-  const left = dom.window.document.getElementById('left');
-  const right = dom.window.document.getElementById('right');
-  const panelA = dom.window.ZoteroResearchPanel.mount(left, adapterA);
-  const panelB = dom.window.ZoteroResearchPanel.mount(right, adapterB);
-  const rootA = left.querySelector('[data-zrp-root]');
-  const rootB = right.querySelector('[data-zrp-root]');
-  assert.ok(rootA, 'XML mount should create the first panel root');
-  assert.ok(rootB, 'XML mount should create the second panel root');
-  return { dom, left, right, panelA, panelB, rootA, rootB, adapterA, adapterB };
-}
-
 async function settle() {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function context(overrides = {}) {
-  return {
-    item_key: 'ITEM-1',
-    title: 'A paper title',
-    attachment_key: 'ATT-1',
-    library_id: 7,
-    ...overrides,
-  };
-}
+const CONTEXT = {
+  item_key: 'ITEM-1',
+  title: 'A paper title',
+  attachment_key: 'ATT-1',
+  library_id: 7,
+};
 
-function selection(overrides = {}) {
-  return {
-    attachment_key: 'ATT-1',
-    text: 'Selected sentence from the paper.',
-    page: 4,
-    page_label: '4',
-    sort_index: 2,
-    ...overrides,
-  };
-}
-
-function analysis(overrides = {}) {
-  return {
-    item_key: 'ITEM-1',
-    attachment_key: 'ATT-1',
-    title: 'A paper title',
-    task: 'Reading analysis',
-    mode: 'evidence_only',
-    generated_by: 'local-evidence',
-    sensitivity: 'sensitive',
-    processing_location: 'local',
-    sections: [
-      { title: 'Key finding', content: 'Model conclusion', evidence_ids: ['ev-1'] },
-    ],
-    evidence: [
-      {
-        evidence_id: 'ev-1',
-        page: 4,
-        chunk_index: 1,
-        text: 'Exact source excerpt.',
-        score: 0.9,
-        source: 'pdf',
-      },
-    ],
-    warnings: [],
-    ...overrides,
-  };
-}
-
-test('无文献时禁用分析，并显示隐私/健康状态', async () => {
-  const { root, adapter, panel } = setup();
+test('未连接网页时状态提示安装油猴脚本；连接后显示提供方', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
   await settle();
-
-  assert.equal(root.querySelector('[data-testid="analysis-submit"]').disabled, true);
-  assert.match(root.querySelector('[data-testid="paper-status"]').textContent, /未选择文献/);
-  assert.match(root.querySelector('[data-testid="health-status"]').textContent, /已连接/);
-  assert.ok(root.querySelector('[data-testid="sensitivity-sensitive"]').checked);
-  assert.equal(adapter.calls.filter((call) => call.method === 'health').length, 1);
+  assert.match(root.querySelector('[data-testid="health-status"]').textContent, /等待网页连接/);
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /未连接网页/);
+  harness.relay.connected = true;
+  harness.relay.emit({ type: 'session', connected: true, ai: 'Gemini' });
+  assert.match(root.querySelector('[data-testid="health-status"]').textContent, /Gemini 已连接/);
   panel.destroy();
 });
 
-test('设置文献与选文会显示快照，并默认保持本地敏感模式', async () => {
-  const { root, panel } = setup();
-  panel.setContext(context());
-  panel.setSelection(selection());
+test('发送消息组装证据提示并入队；流式进度与完成都会渲染', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="webai-chat-input"]').value = '实验结果是什么？';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
   await settle();
 
-  assert.equal(root.querySelector('[data-testid="paper-title"]').textContent, 'A paper title');
-  assert.match(root.querySelector('[data-testid="selection-snapshot"]').textContent, /Selected sentence/);
-  assert.equal(root.querySelector('[data-testid="selection-page"]').textContent, '第 4 页');
-  assert.ok(root.querySelector('[data-testid="sensitivity-sensitive"]').checked);
-  assert.equal(root.querySelector('[data-testid="allow-cloud"]').checked, false);
-  assert.equal(root.querySelector('[data-testid="allow-cloud"]').disabled, true);
-  panel.destroy();
-});
+  const call = harness.relay.calls.at(-1);
+  assert.equal(call.request.meta.provider, 'gemini');
+  assert.match(call.request.messages[0].text, /A paper title/);
+  assert.match(call.request.messages[0].text, /（第3页）Measured improvement\./);
+  assert.match(call.request.messages[0].text, /本轮问题：实验结果是什么？/);
+  assert.equal(root.querySelector('[data-testid="webai-chat-message-1"]').textContent.includes('正在生成'), true);
 
-test('XUL/XML 宿主使用 XHTML namespace，控件可交互且各实例 radio 不互相取消', async () => {
-  const { dom, panelA, panelB, rootA, rootB, adapterA } = setupXml();
-  const xhtml = 'http://www.w3.org/1999/xhtml';
-  panelA.setContext(context({ item_key: 'ITEM-A', title: 'XML paper A' }));
-  panelB.setContext(context({ item_key: 'ITEM-B', title: 'XML paper B' }));
-
-  assert.equal(rootA.namespaceURI, xhtml);
-  for (const control of rootA.querySelectorAll('input, button, select, textarea')) {
-    assert.equal(control.namespaceURI, xhtml, `${control.localName} should be XHTML`);
-  }
-  const firstRadio = rootA.querySelector('[data-testid="sensitivity-sensitive"]');
-  const secondRadio = rootB.querySelector('[data-testid="sensitivity-sensitive"]');
-  assert.notEqual(firstRadio.name, secondRadio.name);
-  rootA.querySelector('[data-testid="sensitivity-public"]').click();
-  assert.equal(rootA.querySelector('[data-testid="sensitivity-public"]').checked, true);
-  assert.equal(secondRadio.checked, true);
-
-  panelA.focusQuestion();
-  assert.equal(dom.window.document.activeElement, rootA.querySelector('[data-testid="question"]'));
-  rootA.querySelector('[data-testid="analysis-submit"]').click();
-  await settle();
-  assert.equal(adapterA.calls.filter((call) => call.method === 'analyze').length, 1);
-  panelA.destroy();
-  panelB.destroy();
-});
-
-test('无模型时只允许证据摘录，翻译/模拟审稿不伪称完成', async () => {
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') {
-        return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: { local: null, external: null } });
-      }
-      if (method === 'analyze') return Promise.resolve(analysis({ processing_location: 'none', sections: [] }));
-      return Promise.resolve({});
-    },
-  });
-  const { root, panel } = setup(adapter);
-  panel.setContext(context());
-  await settle();
-  root.querySelector('[data-testid="mode"]').value = 'translate';
-  root.querySelector('[data-testid="mode"]').dispatchEvent(new root.ownerDocument.defaultView.Event('change', { bubbles: true }));
-  assert.equal(root.querySelector('[data-testid="analysis-submit"]').disabled, true);
-  assert.match(root.querySelector('[data-testid="no-model-notice"]').textContent, /不会伪称完成/);
-  assert.equal(adapter.calls.filter((call) => call.method === 'analyze').length, 0);
-  panel.destroy();
-});
-
-test('未经同意的 external processing_location 触发隐私异常，拒绝模型结论且不声称已降级', async () => {
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: { local: null, external: 'Cloud model' } });
-      if (method === 'analyze') return Promise.resolve(analysis({
-        processing_location: 'external',
-        sections: [{ title: 'Model conclusion', content: 'Do not show this', evidence_ids: ['ev-1'] }],
-      }));
-      return Promise.resolve({});
-    },
-  });
-  const { root, panel } = setup(adapter);
-  panel.setContext(context());
-  await settle();
-  root.querySelector('[data-testid="analysis-submit"]').click();
-  await settle();
-
-  assert.match(root.querySelector('[data-testid="analysis-notice"]').textContent, /隐私异常/);
-  assert.match(root.querySelector('[data-testid="analysis-notice"]').textContent, /未经本次明确同意的云端处理/);
-  assert.doesNotMatch(root.querySelector('[data-testid="analysis-notice"]').textContent, /降级/);
-  assert.doesNotMatch(root.querySelector('[data-testid="analysis-result"]').textContent, /Model conclusion/);
-  assert.equal(root.querySelectorAll('.zrp-analysis-section').length, 0);
-  assert.match(root.querySelector('[data-testid="analysis-meta"]')?.textContent || root.querySelector('[data-testid="analysis-result"]').textContent, /隐私异常/);
-  panel.destroy();
-});
-
-test('正常分析展示 sections/evidence，页码按钮导航到 PDF', async () => {
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') {
-        return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: { local: [], external: [] } });
-      }
-      if (method === 'analyze') return Promise.resolve(analysis());
-      return Promise.resolve({});
-    },
-  });
-  const { root, panel } = setup(adapter);
-  panel.setContext(context());
-  root.querySelector('[data-testid="mode"]').value = 'question';
-  root.querySelector('[data-testid="question"]').value = 'What matters?';
-  root.querySelector('[data-testid="analysis-submit"]').click();
-  await settle();
-
-  const analyzeCall = adapter.calls.find((call) => call.method === 'analyze');
-  assert.ok(analyzeCall);
-  assert.equal(analyzeCall.params.mode, 'question');
-  assert.equal(analyzeCall.params.sensitivity, 'sensitive');
-  assert.equal(analyzeCall.params.allow_cloud, false);
-  assert.equal(root.querySelector('[data-testid="analysis-result"]').hidden, false);
-  assert.match(root.querySelector('[data-testid="analysis-result"]').textContent, /Model conclusion/);
-  assert.match(root.querySelector('[data-testid="evidence-ev-1"]').textContent, /Exact source excerpt/);
-
-  root.querySelector('[data-testid="evidence-page-ev-1"]').click();
-  assert.deepEqual(
-    adapter.calls.find((call) => call.method === 'navigate').args,
-    ['ATT-1', 4],
+  harness.relay.emit({ type: 'progress', id: 'task-1', text: '部分回答' });
+  assert.equal(
+    root.querySelectorAll('[data-testid="webai-chat-message-1"] .zrp-message-content')[0].textContent,
+    '部分回答',
   );
+  harness.relay.emit({ type: 'answer', id: 'task-1', text: '完整回答', done: true });
+  const final = root.querySelectorAll('[data-testid="webai-chat-message-1"] .zrp-message-content')[0];
+  assert.equal(final.textContent, '完整回答');
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /已发送到网页 AI|等待回复|已连接/);
   panel.destroy();
 });
 
-test('模型或论文内容按纯文本渲染，不执行 XSS', async () => {
-  const malicious = '<img src=x onerror="window.__xss = true">';
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-      if (method === 'analyze') return Promise.resolve(analysis({
-        sections: [{ title: malicious, content: malicious, evidence_ids: ['ev-1'] }],
-        evidence: [{ ...analysis().evidence[0], text: malicious }],
-      }));
-      return Promise.resolve({});
-    },
-  });
-  const { dom, root, panel } = setup(adapter);
-  panel.setContext(context());
-  root.querySelector('[data-testid="analysis-submit"]').click();
+test('入队失败时回滚占位消息并显示错误', async () => {
+  const harness = makeRelayHarness();
+  harness.setQueueResult(new Error('待处理任务过多'));
+  const { root, panel } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
   await settle();
-
-  assert.equal(dom.window.__xss, undefined);
-  assert.equal(root.querySelectorAll('img').length, 0);
-  assert.match(root.querySelector('[data-testid="analysis-result"]').textContent, /<img src=x/);
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /待处理任务过多/);
+  assert.equal(root.querySelectorAll('.zrp-message').length, 0);
   panel.destroy();
 });
 
-test('高亮先 prepare 并显示预览，未确认前不 commit，确认后只提交一次', async () => {
-  const { root, panel, adapter } = setup();
-  panel.setContext(context());
-  panel.setSelection(selection());
-  const evidence = analysis().evidence[0];
-  panel.setSelection(selection({ text: evidence.text, page: evidence.page }));
-  root.querySelector('[data-testid="analysis-result"]').hidden = false;
-  root.querySelector('[data-testid="analysis-result"]');
-  // 公共 UI 行为：先生成一份分析结果，再点击该证据的高亮按钮。
-  adapter.rpc = function (method, params) {
-    this.calls.push({ method, params });
-    if (method === 'analyze') return Promise.resolve(analysis());
-    if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-    return Promise.resolve({});
-  };
-  root.querySelector('[data-testid="analysis-submit"]').click();
-  await settle();
-  root.querySelector('[data-testid="highlight-ev-1"]').click();
+test('快捷命令直接发送；部分总结没有选文时提示先选文', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
   await settle();
 
-  assert.equal(adapter.calls.filter((call) => call.method === 'prepareHighlight').length, 1);
-  assert.equal(adapter.calls.filter((call) => call.method === 'commitHighlight').length, 0);
-  assert.match(root.querySelector('[data-testid="highlight-preview"]').textContent, /Exact source excerpt/);
-  assert.match(root.querySelector('[data-testid="highlight-preview"]').textContent, /第 4 页/);
-  assert.match(root.querySelector('[data-testid="highlight-preview"]').textContent, /#f3c969/);
+  root.querySelector('[data-testid="quick-partial-summary"]').click();
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /先在 PDF 中选中/);
 
-  root.querySelector('[data-testid="highlight-commit"]').click();
-  root.querySelector('[data-testid="highlight-commit"]').click();
+  root.querySelector('[data-testid="quick-summary-page"]').click();
   await settle();
-  assert.equal(adapter.calls.filter((call) => call.method === 'commitHighlight').length, 1);
+  assert.equal(harness.relay.calls.length, 1);
+  assert.match(harness.relay.calls[0].request.messages[0].text, /请总结当前 PDF 页面/);
   panel.destroy();
 });
 
-test('笔记预览只读显示，先授权再明确确认内容才 write_note', async () => {
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-      if (method === 'analyze') return Promise.resolve(analysis());
-      if (method === 'preview_note') {
-        return Promise.resolve({
-          preview_token: 'note-token',
-          digest: 'note-digest',
-          parent_item_key: 'ITEM-1',
-          title: 'Safe note',
-          note_text: 'Safe note\nKey finding\n<script>window.__xss = true</script>',
-          note_html: '<p><strong>Unsafe?</strong><script>window.__xss = true</script></p>',
-          tags: ['research'],
-          expires_at: '2099-01-01T00:00:00Z',
-          requires_user_confirmation: true,
-        });
-      }
-      if (method === 'authorize_write') return Promise.resolve({ authorized: true, remembered: false, detail: 'Authorized' });
-      if (method === 'write_note') return Promise.resolve({ status: 'created', item_key: 'NOTE-1', digest: 'note-digest' });
-      return Promise.resolve({});
-    },
-  });
-  const { dom, root, panel } = setup(adapter);
-  panel.setContext(context());
-  root.querySelector('[data-testid="analysis-submit"]').click();
+test('回答中的证据卡片按纯文本渲染并提供页码跳转', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel, adapter } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
   await settle();
-  root.querySelector('[data-testid="note-preview-submit"]').click();
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
   await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', text: '<img src=x onerror=window.__xss=1>', done: true });
+  await settle();
+  const content = root.querySelectorAll('.zrp-message-content')[1];
+  assert.equal(content.textContent, '<img src=x onerror=window.__xss=1>');
+  assert.equal(content.querySelector('img'), null);
 
-  assert.equal(adapter.calls.filter((call) => call.method === 'preview_note').length, 1);
-  assert.equal(adapter.calls.filter((call) => call.method === 'authorize_write').length, 0);
-  assert.equal(adapter.calls.filter((call) => call.method === 'write_note').length, 0);
-  assert.equal(dom.window.__xss, undefined);
-  assert.equal(root.querySelectorAll('script').length, 0);
-  assert.match(root.querySelector('[data-testid="note-preview"]').textContent, /Safe note/);
-  assert.match(root.querySelector('[data-testid="note-preview"]').textContent, /<script>/);
-  assert.equal(root.querySelector('[data-testid="note-html-source"]')?.textContent,
-    '<p><strong>Unsafe?</strong><script>window.__xss = true</script></p>');
-  assert.equal(root.querySelector('[data-testid="note-html-source"]').closest('details').open, false);
-  const previewCall = adapter.calls.find((call) => call.method === 'preview_note');
-  assert.match(previewCall.params.content, /证据链：ev-1/);
-  assert.match(previewCall.params.content, /物理页码 4/);
-  assert.match(previewCall.params.content, /source: pdf/);
-  assert.equal(root.querySelector('[data-testid="note-save"]').textContent, '请求 Zotero 写入授权');
-
-  root.querySelector('[data-testid="note-save"]').click();
-  await settle();
-  assert.equal(adapter.calls.filter((call) => call.method === 'authorize_write').length, 1);
-  assert.equal(adapter.calls.filter((call) => call.method === 'write_note').length, 0);
-  assert.match(root.querySelector('[data-testid="write-confirmation"]').textContent, /note-digest/);
-  assert.match(root.querySelector('[data-testid="write-confirmation"]').textContent, /校验码/);
-  assert.doesNotMatch(root.querySelector('[data-testid="write-confirmation"]').textContent, /note-token/);
-  assert.doesNotMatch(root.querySelector('[data-testid="write-confirmation"]').textContent, /令牌/);
-
-  root.querySelector('[data-testid="note-write-confirm"]').click();
-  root.querySelector('[data-testid="note-write-confirm"]').click();
-  await settle();
-  assert.equal(adapter.calls.filter((call) => call.method === 'write_note').length, 1);
-  assert.equal(adapter.calls.find((call) => call.method === 'write_note').params.confirmed_by_user, true);
+  const evidenceButton = root.querySelector('[data-zrp-action="navigate-evidence"]');
+  assert.ok(evidenceButton, 'evidence page button should exist');
+  evidenceButton.click();
+  assert.deepEqual(adapter.navigateCalls.at(-1), ['ATT-1', 3]);
   panel.destroy();
 });
 
-test('PDF 异步定位失败在面板内显示而不是未处理的 Promise', async () => {
-  const { dom, panel, root } = setup(makeAdapter({
-    navigate: async () => { throw new Error('合成 PDF 已移动'); },
+test('清空重置消息；更换文献清空会话；打开网页按钮跳转提供方', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel, adapter } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="quick-summary-page"]').click();
+  await settle();
+  assert.ok(root.querySelectorAll('.zrp-message').length >= 1);
+
+  root.querySelector('[data-testid="webai-clear"]').click();
+  assert.ok(root.querySelector('[data-testid="webai-chat-empty"]'), 'empty state returns after clear');
+
+  root.querySelector('[data-testid="webai-open"]').click();
+  assert.deepEqual(adapter.openedUrls, ['https://gemini.google.com/app#zra-connect=1']);
+
+  panel.setContext({ ...CONTEXT, item_key: 'ITEM-2' });
+  assert.equal(root.querySelectorAll('.zrp-message').length, 0);
+  panel.destroy();
+});
+
+test('destroy 后不再响应事件', async () => {
+  const harness = makeRelayHarness();
+  const { dom, panel } = setup(makeAdapter(harness));
+  panel.destroy();
+  panel.destroy();
+  assert.equal(dom.window.document.body.querySelector('[data-zrp-root]'), null);
+  assert.doesNotThrow(() => panel.setContext(CONTEXT));
+  assert.doesNotThrow(() => harness.relay.emit({ type: 'answer', id: 'x', text: 'y', done: true }));
+});
+
+test('取证期间立即禁止重复发送', async () => {
+  let resolveEvidence;
+  const harness = makeRelayHarness();
+  const { root, panel } = setup(makeAdapter(harness, {
+    retrieveEvidence: () => new Promise(resolve => { resolveEvidence = resolve; }),
   }));
-  panel.setContext(context());
-  panel.setSelection({ attachment_key: 'ATT-1', page: 2, text: 'Synthetic quote' });
-  root.querySelector('[data-testid="selection-page"]').click();
+  panel.setContext(CONTEXT);
+  root.querySelector('[data-testid="quick-summary-page"]').click();
+  assert.equal(root.querySelector('[data-testid="webai-chat-send"]').disabled, true);
+  root.querySelector('[data-testid="quick-summary-page"]').click();
   await settle();
-  assert.match(root.querySelector('[data-testid="error"]').textContent, /PDF 已移动/);
-  panel.destroy(); dom.window.close();
-});
-
-test('真实 Crossref 状态使用中文且不将无公告当作未撤稿', async () => {
-  const { dom, panel, root } = setup(makeAdapter({
-    rpc: async (method) => method === 'health'
-      ? { status: 'ok', models: { local: null, external: null } }
-      : { results: [{ doi: '10.5555/synthetic', status: 'no_notice_found', issues: [] }], warnings: [] },
-  }));
-  root.querySelector('[data-testid="doi-input"]').value = '10.5555/synthetic';
-  root.querySelector('[data-testid="doi-network-consent"]').checked = true;
-  root.querySelector('[data-testid="doi-submit"]').click();
+  resolveEvidence([]);
   await settle();
-  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /不等于无撤稿/);
-  panel.destroy(); dom.window.close();
-});
-
-test('请求中重复点击只发出一次，并在结束后清除云端开关', async () => {
-  const pending = deferred();
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-      if (method === 'analyze') return pending.promise;
-      return Promise.resolve({});
-    },
-  });
-  const { root, panel } = setup(adapter);
-  panel.setContext(context());
-  root.querySelector('[data-testid="sensitivity-public"]').click();
-  root.querySelector('[data-testid="allow-cloud"]').click();
-  assert.equal(root.querySelector('[data-testid="allow-cloud"]').checked, true);
-  root.querySelector('[data-testid="analysis-submit"]').click();
-  root.querySelector('[data-testid="analysis-submit"]').click();
-  assert.equal(adapter.calls.filter((call) => call.method === 'analyze').length, 1);
-  assert.equal(root.querySelector('[data-testid="analysis-submit"]').disabled, true);
-  pending.resolve(analysis({ sensitivity: 'public' }));
-  await settle();
-  assert.equal(root.querySelector('[data-testid="allow-cloud"]').checked, false);
+  assert.equal(harness.relay.calls.length, 1);
   panel.destroy();
 });
 
-test('切换文献会清空结果/预览/授权，旧异步结果不会污染新文献', async () => {
-  const pending = deferred();
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-      if (method === 'analyze') return pending.promise;
-      return Promise.resolve({});
-    },
+for (const action of ['switch', 'clear', 'destroy']) {
+  test(`取证未完成时 ${action} 不发送旧文献任务`, async () => {
+    let resolveEvidence;
+    const harness = makeRelayHarness();
+    const { root, panel } = setup(makeAdapter(harness, {
+      retrieveEvidence: () => new Promise(resolve => { resolveEvidence = resolve; }),
+    }));
+    panel.setContext(CONTEXT);
+    root.querySelector('[data-testid="quick-summary-page"]').click();
+    await settle();
+    if (action === 'switch') panel.setContext({ ...CONTEXT, attachment_key: 'ATT-2', title: 'Another paper' });
+    else if (action === 'clear') root.querySelector('[data-testid="webai-clear"]').click();
+    else panel.destroy();
+    resolveEvidence([]);
+    await settle();
+    assert.equal(harness.relay.calls.length, 0);
+    panel.destroy();
   });
-  const { root, panel } = setup(adapter);
-  panel.setContext(context({ item_key: 'ITEM-A', title: 'Old paper', attachment_key: 'ATT-A' }));
-  root.querySelector('[data-testid="analysis-submit"]').click();
-  assert.equal(root.querySelector('[data-testid="analysis-submit"]').disabled, true);
-  panel.setContext(context({ item_key: 'ITEM-B', title: 'New paper', attachment_key: 'ATT-B' }));
-  assert.equal(root.querySelector('[data-testid="paper-title"]').textContent, 'New paper');
-  assert.equal(root.querySelector('[data-testid="analysis-result"]').hidden, true);
-  assert.equal(root.querySelector('[data-testid="note-preview"]').hidden, true);
-  assert.equal(root.querySelector('[data-testid="write-confirmation"]').hidden, true);
-  assert.equal(root.querySelector('[data-testid="selection-snapshot"]').textContent, '暂无选文');
-  pending.resolve(analysis({ item_key: 'ITEM-A', attachment_key: 'ATT-A' }));
+}
+
+const MARKDOWN_SOURCE = fs.readFileSync(
+  path.join(__dirname, '..', 'addon', 'content', 'markdown.js'),
+  'utf8',
+);
+
+function setupWithMarkdown(adapter) {
+  const dom = new JSDOM('<!doctype html><body></body>', {
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+  dom.window.eval(RELAY_SOURCE);
+  dom.window.eval(MARKDOWN_SOURCE);
+  dom.window.eval(PANEL_SOURCE);
+  const panel = dom.window.ZoteroResearchPanel.mount(dom.window.document.body, adapter);
+  const root = dom.window.document.querySelector('[data-zrp-root]');
+  return { dom, panel, root, adapter };
+}
+
+test('回答完成时分离思考过程并渲染 Markdown', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setupWithMarkdown(makeAdapter(harness));
+  panel.setContext(CONTEXT);
   await settle();
-  assert.equal(root.querySelector('[data-testid="analysis-result"]').hidden, true);
-  assert.doesNotMatch(root.textContent, /Model conclusion/);
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({
+    type: 'answer',
+    id: 'task-1',
+    text: '<think>先分析证据。</think>\n## 结论\n\n- **关键点**：样本 40 个（第3页）。',
+    done: true,
+  });
+  await settle();
+  const message = root.querySelector('[data-testid="webai-chat-message-1"]');
+  const think = message.querySelector('.zrp-think');
+  assert.ok(think, 'think block rendered as details');
+  assert.equal(think.querySelector('summary').textContent, '思考过程');
+  assert.equal(think.querySelector('.zrp-think-body').textContent, '先分析证据。');
+  const md = message.querySelector('.zrp-message-content.zrp-md');
+  assert.ok(md, 'answer rendered as markdown');
+  assert.equal(md.querySelector('h3').textContent, '结论');
+  assert.equal(md.querySelector('strong').textContent, '关键点');
+  assert.equal(md.querySelector('li').textContent.includes('样本 40 个'), true);
   panel.destroy();
 });
 
-test('DOI公网核验和 Codex 十分钟授权都需要独立勾选，支持撤销', async (t) => {
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-      if (method === 'audit_citations') return Promise.resolve({
-        status: 'ok',
-        results: [{ doi: '10.1000/test', status: 'unknown', issues: ['撤稿状态未确定'], details: { source: 'public-metadata' } }],
+test('API 直连模式走 callModelAPI 并流式渲染', async () => {
+  const harness = makeRelayHarness();
+  const deltas = [];
+  const adapter = makeAdapter(harness, {
+    getAPIConfig: () => ({
+      protocol: 'anthropic', baseUrl: 'https://api.example.com/anthropic',
+      model: 'test-model', apiKey: 'sk-test',
+    }),
+    callModelAPI({ messages, onDelta }) {
+      this.apiCalls = this.apiCalls || [];
+      this.apiCalls.push(messages);
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          onDelta({ type: 'thinking', text: '推理' });
+          onDelta({ type: 'text', text: '**回答**正文' });
+          resolve({ thinking: '推理', text: '**回答**正文' });
+        }, 20);
       });
-      if (method === 'grant_cloud_access') return Promise.resolve({ granted: true, expires_at: '2099-01-01T00:10:00Z' });
-      if (method === 'revoke_cloud_access') return Promise.resolve({ revoked: true });
-      return Promise.resolve({});
     },
   });
-  const { root, panel } = setup(adapter);
-  t.after(() => panel.destroy());
-  panel.setContext(context());
-
-  root.querySelector('[data-testid="doi-input"]').value = '10.1000/test';
-  root.querySelector('[data-testid="doi-network-consent"]').checked = true;
-  root.querySelector('[data-testid="doi-submit"]').click();
+  const { dom, root, panel } = setupWithMarkdown(adapter);
+  root.querySelector('[data-testid="webai-provider"]').value = 'api';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  panel.setContext(CONTEXT);
   await settle();
-  const doiParams = adapter.calls.find((call) => call.method === 'audit_citations').params;
-  assert.equal(doiParams.allow_network, true);
-  assert.equal(doiParams.requests.length, 1);
-  assert.equal(doiParams.requests[0].doi, '10.1000/test');
-  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /状态：未知/);
-  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /问题：撤稿状态未确定/);
-  assert.match(root.querySelector('[data-testid="doi-status"]').textContent, /详情：/);
-  assert.doesNotMatch(root.querySelector('[data-testid="doi-status"]').textContent, /items/);
+  assert.match(root.querySelector('[data-testid="health-status"]').textContent, /API：test-model/);
+  assert.equal(root.querySelector('[data-testid="webai-open"]').disabled, true);
 
-  root.querySelector('[data-testid="codex-consent"]').click();
-  root.querySelector('[data-testid="grant-codex"]').click();
-  await settle();
-  const grant = adapter.calls.find((call) => call.method === 'grant_cloud_access');
-  assert.equal(grant.params.item_key, 'ITEM-1');
-  assert.equal(grant.params.attachment_key, 'ATT-1');
-  assert.equal(grant.params.confirmed_public, true);
-  assert.equal(grant.params.include_notes, false);
-  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, true);
-  assert.equal(root.querySelector('[data-testid="revoke-codex"]').hidden, false);
-
-  root.querySelector('[data-testid="revoke-codex"]').click();
-  await settle();
-  assert.equal(adapter.calls.filter((call) => call.method === 'revoke_cloud_access').length, 1);
-  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, false);
+  root.querySelector('[data-testid="webai-chat-input"]').value = '实验结果？';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const calls = adapter.apiCalls;
+  assert.equal(calls.length, 1);
+  assert.match(calls[0][calls[0].length - 1].content, /本轮问题：实验结果/);
+  const message = root.querySelector('[data-testid="webai-chat-message-1"]');
+  assert.ok(message.querySelector('.zrp-think'), 'thinking separated');
+  assert.equal(message.querySelector('.zrp-message-content.zrp-md strong').textContent, '回答');
   panel.destroy();
 });
 
-test('Codex 授权仅针对当前 PDF，既有笔记必须另行勾选且切换后清空', async (t) => {
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({method, params});
-      if (method === 'health') return Promise.resolve({status: 'ok', models: {}});
-      if (method === 'grant_cloud_access') return Promise.resolve({
-        parent_item_key: params.item_key, attachment_keys: [params.attachment_key],
-        include_notes: params.include_notes, expires_at: '2099-01-01T00:00:00Z',
-      });
-      return Promise.resolve({});
-    },
+test('API 未配置时给出明确错误', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    getAPIConfig: () => ({ protocol: 'auto', baseUrl: '', model: '', apiKey: '' }),
+    callModelAPI() { throw new Error('不应调用'); },
   });
-  const {root, panel} = setup(adapter);
-  t.after(() => panel.destroy());
-  panel.setContext(context({attachment_key: null}));
-  assert.equal(root.querySelector('[data-testid="grant-codex"]').disabled, true);
-  root.querySelector('[data-testid="codex-consent"]').checked = true;
-  root.querySelector('[data-testid="grant-codex"]').dispatchEvent(new root.ownerDocument.defaultView.Event('click', {bubbles:true}));
+  const { dom, root, panel } = setupWithMarkdown(adapter);
+  root.querySelector('[data-testid="webai-provider"]').value = 'api';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  panel.setContext(CONTEXT);
   await settle();
-  assert.equal(adapter.calls.filter(c=>c.method === 'grant_cloud_access').length, 0);
-
-  panel.setContext(context({attachment_key: 'PUBLIC23'}));
-  const notes = root.querySelector('[data-testid="codex-notes-consent"]');
-  assert.ok(notes);
-  assert.equal(notes.checked, false);
-  notes.click();
-  root.querySelector('[data-testid="codex-consent"]').click();
-  root.querySelector('[data-testid="grant-codex"]').click();
+  assert.match(root.querySelector('[data-testid="health-status"]').textContent, /API 未配置/);
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
   await settle();
-  const grant = adapter.calls.find(c=>c.method === 'grant_cloud_access');
-  assert.equal(grant.params.attachment_key, 'PUBLIC23');
-  assert.equal(grant.params.include_notes, true);
-  assert.equal(notes.checked, false);
-  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /包含已明确授权的笔记/);
-  panel.setContext(context({attachment_key:'DRAFTX23'}));
-  assert.equal(root.querySelector('[data-testid="codex-consent"]').checked, false);
-  assert.equal(notes.checked, false);
-  assert.equal(root.querySelector('[data-testid="grant-codex"]').disabled, true);
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /API 未配置/);
   panel.destroy();
 });
 
-test('授权回执只在当前面板内存，撤销按钮始终可用，过期会清除 UI 回执', async () => {
-  const adapter = makeAdapter({
-    rpc(method, params) {
-      this.calls.push({ method, params });
-      if (method === 'health') return Promise.resolve({ status: 'ok', zotero: { reachable: true }, models: {} });
-      if (method === 'grant_cloud_access') {
-        return Promise.resolve({ granted: true, expires_at: new Date(Date.now() + 30).toISOString() });
-      }
-      if (method === 'revoke_cloud_access') return Promise.resolve({ revoked: true });
-      return Promise.resolve({});
-    },
+test('A−/A+ 调节字号并持久化到适配器', async () => {
+  const harness = makeRelayHarness();
+  const sizes = [];
+  const adapter = makeAdapter(harness, {
+    getFontSize: () => 'm',
+    setFontSize: (size) => sizes.push(size),
   });
   const { root, panel } = setup(adapter);
-  panel.setContext(context({ item_key: 'ITEM-A' }));
-  assert.equal(root.querySelector('[data-testid="revoke-codex"]').hidden, false);
-  assert.equal(root.querySelector('[data-testid="revoke-codex"]').disabled, false);
-  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /未在本面板保留/);
+  assert.equal(root.getAttribute('data-size'), 'm');
+  root.querySelector('[data-testid="font-increase"]').click();
+  assert.equal(root.getAttribute('data-size'), 'l');
+  root.querySelector('[data-testid="font-increase"]').click();
+  root.querySelector('[data-testid="font-increase"]').click();
+  assert.equal(root.getAttribute('data-size'), 'xl');
+  assert.equal(root.querySelector('[data-testid="font-increase"]').disabled, true);
+  root.querySelector('[data-testid="font-decrease"]').click();
+  assert.equal(root.getAttribute('data-size'), 'l');
+  // mount('m') + l + xl (the third click is disabled at xl) + back to l
+  assert.deepEqual(sizes, ['m', 'l', 'xl', 'l']);
+  panel.destroy();
+});
 
-  root.querySelector('[data-testid="codex-consent"]').click();
-  root.querySelector('[data-testid="grant-codex"]').click();
+test('API 模式显示附件行并随 PDF 发送 document block', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    getAPIConfig: () => ({
+      protocol: 'anthropic', baseUrl: 'https://api.example.com/anthropic',
+      model: 'test-model', apiKey: 'sk-test',
+    }),
+    getAttachmentBase64: () => Promise.resolve('UEJERg=='),
+    getAttachmentMediaType: () => 'application/pdf',
+    callModelAPI(request) {
+      this.apiRequests = this.apiRequests || [];
+      this.apiRequests.push(request);
+      return Promise.resolve({ thinking: '', text: '读完了' });
+    },
+  });
+  const { dom, root, panel } = setupWithMarkdown(adapter);
+  root.querySelector('[data-testid="webai-provider"]').value = 'api';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  panel.setContext(CONTEXT);
   await settle();
-  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, true);
+  const attachRow = root.querySelector('.zrp-attach-row');
+  assert.equal(attachRow.hidden, false, 'attach row visible in API mode');
+  root.querySelector('[data-testid="attach-pdf"]').checked = true;
+  root.querySelector('[data-testid="webai-chat-input"]').value = '总结这篇论文';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const request = adapter.apiRequests[0];
+  assert.equal(request.attachmentKey, 'ATT-1');
+  assert.equal(request.attachment.base64, 'UEJERg==');
+  assert.equal(request.attachment.mediaType, 'application/pdf');
+  assert.match(request.messages[request.messages.length - 1].content, /附带论文全文 PDF/);
+  panel.destroy();
+});
+
+test('API 附件在 OpenAI 协议下明确报错', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    getAPIConfig: () => ({
+      protocol: 'openai', baseUrl: 'https://api.example.com/v1',
+      model: 'test-model', apiKey: 'sk-test',
+    }),
+    getAttachmentBase64: () => Promise.resolve('UEJERg=='),
+    getAttachmentMediaType: () => 'application/pdf',
+    callModelAPI() { throw new Error('不应调用'); },
+  });
+  const { dom, root, panel } = setupWithMarkdown(adapter);
+  root.querySelector('[data-testid="webai-provider"]').value = 'api';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="attach-pdf"]').checked = true;
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
   await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, false);
-  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /回执已到期/);
-
-  panel.setContext(context({ item_key: 'ITEM-B' }));
-  assert.equal(root.querySelector('[data-testid="grant-codex"]').hidden, false);
-  assert.equal(root.querySelector('[data-testid="revoke-codex"]').hidden, false);
-  assert.equal(root.querySelector('[data-testid="revoke-codex"]').disabled, false);
-  root.querySelector('[data-testid="revoke-codex"]').click();
-  await settle();
-  const revoke = adapter.calls.filter((call) => call.method === 'revoke_cloud_access').at(-1);
-  assert.equal(revoke.params.item_key, 'ITEM-B');
-  assert.match(root.querySelector('[data-testid="cloud-status"]').textContent, /已撤销/);
+  assert.match(root.querySelector('[data-testid="error"], .zrp-error-inline').textContent, /Anthropic/);
   panel.destroy();
 });
 
-test('destroy 幂等并卸载面板，不接受异步回写', async () => {
-  const { dom, panel, root } = setup();
+test('快捷命令已精简且“上传材料”仅网页模式显示', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    getAPIConfig: () => ({
+      protocol: 'anthropic', baseUrl: 'https://api.example.com/anthropic',
+      model: 'm', apiKey: 'k',
+    }),
+    callModelAPI: () => Promise.resolve({ thinking: '', text: 'ok' }),
+  });
+  const { dom, root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+  // Web mode: six commands, upload visible.
+  const keys = [...root.querySelectorAll('[data-testid^="quick-"]')].map((b) => b.getAttribute('data-command'));
+  assert.deepEqual(keys, ['summary-page', 'translate-page', 'partial-summary', 'full-summary', 'fill-note', 'upload-material']);
+  assert.equal(root.querySelector('[data-testid="quick-upload-material"]').hidden, false);
+
+  root.querySelector('[data-testid="webai-provider"]').value = 'api';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.equal(root.querySelector('[data-testid="quick-upload-material"]').hidden, true);
+  // No duplicated bottom summary button remains.
+  assert.equal(root.querySelector('[data-testid="shortcut-summary"]'), null);
   panel.destroy();
-  panel.destroy();
-  assert.equal(dom.window.document.body.contains(root), false);
-  assert.doesNotThrow(() => panel.setContext(context()));
-  assert.doesNotThrow(() => panel.setSelection(selection()));
-  assert.doesNotThrow(() => panel.focusQuestion());
 });

@@ -1,9 +1,11 @@
-/* Zotero 10 native integration. Library writes stay in supported Zotero APIs. */
+/* Zotero 10 native integration. The panel, evidence and web-AI relay live in
+ * this plugin process; the userscript talks to Zotero's own local endpoint. */
 'use strict';
 
 var ZoteroResearchAddon = null;
 const ZRA_TOPIC = 'zotero-research:reconnect';
 const ZRA_HTML = 'http://www.w3.org/1999/xhtml';
+const RELAY_ENDPOINT_PATH = '/zotero-research/relay';
 
 function zraHash(text) {
   const hash = Cc['@mozilla.org/security/hash;1'].createInstance(Ci.nsICryptoHash);
@@ -13,46 +15,16 @@ function zraHash(text) {
   return Array.from(hash.finish(false), (c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
 }
 
-function zraRequest(url, options) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest({ mozAnon: true, mozSystem: true });
-    xhr.open('POST', url, true);
-    xhr.mozBackgroundRequest = true;
-    xhr.timeout = options.timeout;
-    xhr.responseType = 'json';
-    for (const [key, value] of Object.entries(options.headers)) xhr.setRequestHeader(key, value);
-    // Refuse even a loopback redirect: questions and tokens never follow a Location header.
-    const previous = xhr.channel.notificationCallbacks;
-    xhr.channel.notificationCallbacks = {
-      QueryInterface: ChromeUtils.generateQI(['nsIInterfaceRequestor', 'nsIChannelEventSink']),
-      getInterface(iid) {
-        if (iid.equals(Ci.nsIChannelEventSink)) return this;
-        if (previous) return previous.getInterface(iid);
-        throw Components.results.NS_NOINTERFACE;
-      },
-      asyncOnChannelRedirect(_old, _next, _flags, callback) {
-        callback.onRedirectVerifyCallback(Components.results.NS_ERROR_ABORT);
-      },
-    };
-    xhr.onload = () => resolve({ status: xhr.status, data: xhr.response });
-    xhr.onerror = xhr.ontimeout = xhr.onabort = () => reject(new Error('Private request failed'));
-    xhr.onprogress = (event) => { if (event.loaded > 4_000_000) xhr.abort(); };
-    xhr.send(JSON.stringify(options.body));
-  });
-}
-
 function zraCreateAddon(data) {
   const records = new Map();
   const documents = new Set();
   const windowListeners = new Map();
   const selections = new Map();
-  let bridge = null;
   let highlights = null;
   let sectionID = null;
   let preferenceID = null;
-  let config = null;
+  let relayStore = null;
   let alive = true;
-  let pendingRPC = 0;
   let focusNext = null;
 
   const serverID = () => {
@@ -61,56 +33,11 @@ function zraCreateAddon(data) {
   const preference = (key) => Zotero.Prefs.get('researchAssistant.' + key) || '';
   const alert = (message) => Services.prompt.alert(Zotero.getMainWindow(), '科研助手', message);
 
-  async function launch() {
-    const { Subprocess } = ChromeUtils.importESModule('resource://gre/modules/Subprocess.sys.mjs');
-    if (!config.bridgeExecutable || !config.workingDirectory
-      || !PathUtils.isAbsolute(config.bridgeExecutable) || !PathUtils.isAbsolute(config.workingDirectory)
-      || /^(\\\\|\/\/)/.test(config.bridgeExecutable)) {
-      throw new Error('Build the local package with an absolute bridge executable and working directory');
-    }
-    const environment = { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
-    for (const [setting, variable] of Object.entries({
-      localModelName: 'ZRM_LOCAL_MODEL_NAME', localModelBaseURL: 'ZRM_LOCAL_MODEL_BASE_URL',
-      mineruModelPath: 'ZRM_MINERU_MODEL_PATH', mineruExecutable: 'ZRM_MINERU_EXECUTABLE',
-    })) {
-      const value = preference(setting);
-      if (value) environment[variable] = value;
-    }
-    const process = await Subprocess.call({
-      command: config.bridgeExecutable, arguments: [], workdir: config.workingDirectory,
-      environment, environmentAppend: true, stderr: 'pipe',
-    });
-    // Discard stderr without recording potential configuration secrets or document text.
-    (async () => { try { while (await process.stderr.readString()) {} } catch (_) {} })();
-    let stopped = false;
-    return {
-      read: () => process.stdout.readString(),
-      async stop() {
-        if (stopped) return;
-        stopped = true;
-        try { await process.stdin.close(); } catch (_) {}
-        let timer;
-        await Promise.race([
-          process.wait(),
-          new Promise((resolve) => { timer = setTimeout(resolve, 1500); }),
-        ]);
-        clearTimeout(timer);
-        if (process.exitCode === null) await process.kill(0);
-      },
-    };
-  }
-
-  async function rpc(method, params) {
-    if (!alive || !bridge) throw new Error('科研助手已关闭。');
-    pendingRPC += 1;
-    try { return await bridge.rpc(method, params); } finally { pendingRPC -= 1; }
-  }
-
   async function attachment(key) {
     const item = Zotero.Items.getByLibraryAndKey(Zotero.Libraries.userLibraryID, key);
     if (!item || !item.isAttachment() || !item.isFileAttachment()
       || item.attachmentContentType !== 'application/pdf' || item.deleted) {
-      throw new Error('该附件不是可读取的个人库 PDF。');
+      throw new Error('该附件不是可读取的本地 PDF。');
     }
     const path = await item.getFilePathAsync();
     if (!path || /^(\\\\|\/\/)/.test(path)) throw new Error('PDF 未下载到本机，或位于网络共享目录。');
@@ -121,18 +48,184 @@ function zraCreateAddon(data) {
     return {
       item, key: item.key, id: item.id, libraryID: item.libraryID,
       parentKey: parent?.key || null, editable: library.editable === true,
-      isPersonal: item.libraryID === Zotero.Libraries.userLibraryID, isPDF: true,
+      isPDF: true,
       stamp: zraHash(JSON.stringify([path, stat.size, stat.lastModified])),
     };
   }
 
+  function getFontSize() {
+    return Zotero.Prefs.get('researchAssistant.uiFontSize') || 'm';
+  }
+
+  function setFontSize(size) {
+    Zotero.Prefs.set('researchAssistant.uiFontSize', size);
+  }
+
+  /** Base64 of the attachment file for direct-API document blocks. */
+  async function getAttachmentBase64(attachmentKey) {
+    const info = await attachment(attachmentKey);
+    const path = await info.item.getFilePathAsync();
+    const bytes = await IOUtils.read(path);
+    let binary = '';
+    const CHUNK = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      binary += String.fromCharCode.apply(
+        null, bytes.subarray(offset, offset + CHUNK),
+      );
+    }
+    return btoa(binary);
+  }
+
+  function getAttachmentMediaType(attachmentKey) {
+    return 'application/pdf';
+  }
+
+  function getAPIConfig() {
+    const protocol = Zotero.Prefs.get('researchAssistant.apiProtocol') || 'auto';
+    const baseUrl = (Zotero.Prefs.get('researchAssistant.apiBaseUrl') || '').trim();
+    const model = (Zotero.Prefs.get('researchAssistant.apiModel') || '').trim();
+    const apiKey = (Zotero.Prefs.get('researchAssistant.apiKey') || '').trim();
+    const resolved = protocol === 'anthropic' || protocol === 'openai'
+      ? protocol
+      : (/\/anthropic/i.test(baseUrl) ? 'anthropic' : 'openai');
+    return { protocol: resolved, baseUrl, model, apiKey };
+  }
+
+  async function callModelAPI({ messages, onDelta, attachment }) {
+    const config = getAPIConfig();
+    if (!config.baseUrl || !config.model) {
+      throw new Error('API 未配置：请在插件设置中填写，或从 CC Switch 导入。');
+    }
+    if (attachment && config.protocol !== 'anthropic') {
+      throw new Error('附带全文 PDF 目前仅支持 Anthropic 兼容协议。');
+    }
+    const emit = (delta) => { if (typeof onDelta === 'function') onDelta(delta); };
+    if (config.protocol === 'anthropic') {
+      return callAnthropicAPI(config, messages, emit, attachment || null);
+    }
+    return callOpenAIAPI(config, messages, emit);
+  }
+
+  async function readSSEStream(response, handleEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split;
+      while ((split = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, split).replace(/\r$/, '');
+        buffer = buffer.slice(split + 1);
+        if (line.startsWith('data:')) handleEvent(line.slice(5).trim());
+      }
+    }
+    const tail = decoder.decode();
+    if (tail.trim().startsWith('data:')) handleEvent(tail.trim().slice(5).trim());
+  }
+
+  async function callAnthropicAPI(config, messages, emit, attachment) {
+    const base = config.baseUrl.replace(/\/+$/, '');
+    const headers = {
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      // Sending both is harmless and works with either gateway.
+      Authorization: 'Bearer ' + config.apiKey,
+      'x-api-key': config.apiKey,
+    };
+    let payloadMessages = messages;
+    if (attachment && messages.length) {
+      // Anthropic document block rides on the final user turn.
+      const last = messages[messages.length - 1];
+      payloadMessages = [
+        ...messages.slice(0, -1),
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              source: {
+                type: 'base64',
+                media_type: attachment.mediaType || 'application/pdf',
+                data: attachment.base64,
+              },
+            },
+            { type: 'text', text: String(last.content || '') },
+          ],
+        },
+      ];
+    }
+    const response = await fetch(base + '/v1/messages', {
+      method: 'POST', headers,
+      body: JSON.stringify({
+        model: config.model, max_tokens: 16000, stream: true, messages: payloadMessages,
+      }),
+    });
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => '');
+      throw new Error('Anthropic API HTTP ' + response.status + (detail ? '：' + detail.slice(0, 300) : ''));
+    }
+    let thinking = '';
+    let text = '';
+    await readSSEStream(response, (payload) => {
+      if (!payload || payload === '[DONE]') return;
+      let data;
+      try { data = JSON.parse(payload); } catch (_) { return; }
+      if (data.type === 'content_block_delta') {
+        if (typeof data.delta?.thinking === 'string') {
+          thinking += data.delta.thinking;
+          emit({ type: 'thinking', text: data.delta.thinking });
+        } else if (typeof data.delta?.text === 'string') {
+          text += data.delta.text;
+          emit({ type: 'text', text: data.delta.text });
+        }
+      } else if (data.type === 'error') {
+        throw new Error('Anthropic API 错误：' + String(data.error?.message || '').slice(0, 300));
+      }
+    });
+    return { thinking, text };
+  }
+
+  async function callOpenAIAPI(config, messages, emit) {
+    let base = config.baseUrl.replace(/\/+$/, '');
+    if (!/\/v\d+$/.test(base)) base += '/v1';
+    const headers = { 'Content-Type': 'application/json' };
+    if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
+    const response = await fetch(base + '/chat/completions', {
+      method: 'POST', headers,
+      body: JSON.stringify({ model: config.model, max_tokens: 16000, stream: true, messages }),
+    });
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => '');
+      throw new Error('OpenAI API HTTP ' + response.status + (detail ? '：' + detail.slice(0, 300) : ''));
+    }
+    let thinking = '';
+    let text = '';
+    await readSSEStream(response, (payload) => {
+      if (!payload || payload === '[DONE]') return;
+      let data;
+      try { data = JSON.parse(payload); } catch (_) { return; }
+      const delta = data.choices?.[0]?.delta;
+      if (!delta) return;
+      if (typeof delta.reasoning_content === 'string') {
+        thinking += delta.reasoning_content;
+        emit({ type: 'thinking', text: delta.reasoning_content });
+      }
+      if (typeof delta.content === 'string') {
+        text += delta.content;
+        emit({ type: 'text', text: delta.content });
+      }
+    });
+    return { thinking, text };
+  }
+
   function makeControllers() {
-    bridge = ZoteroResearchBridge.createBridgeClient({ launch, request: zraRequest, serverID, setTimeout, clearTimeout });
     highlights = ZoteroResearchNative.createHighlightController({
       serverID, attachment, digest: async (text) => zraHash(text),
       token: () => Services.uuid.generateUUID().toString(),
       annotationKey: () => Zotero.DataObjectUtilities.generateKey(),
-      locate: (params) => rpc('locate', params),
+      locate: async () => { throw new Error('当前版本不再自动定位高亮。'); },
       async save(info, json) {
         const queue = new Zotero.Notifier.Queue();
         let saved;
@@ -147,6 +240,36 @@ function zraCreateAddon(data) {
         return saved;
       },
     });
+    relayStore = ZoteroResearchRelay.createRelayStore();
+  }
+
+  async function pdfPages(attachmentKey) {
+    const info = await attachment(attachmentKey);
+    // Zotero 10 exposes getFullText(itemID); getPages exists only inside its
+    // document worker, not on Zotero.PDFWorker. Full text uses \f between pages.
+    const result = await Zotero.PDFWorker.getFullText(info.id, undefined, true);
+    const count = result?.extractedPages;
+    if (!Number.isInteger(count) || count < 0) throw new Error('Zotero 未返回有效的 PDF 页码信息。');
+    if (!count) return [];
+    let texts = String(result.text || '').split('\f');
+    if (texts.length !== count) {
+      // Zotero trims the whole result, including form feeds at blank edge
+      // pages. Request explicit page indices in that case to avoid shifted links.
+      texts = [];
+      for (let index = 0; index < count; index += 1) {
+        const page = await Zotero.PDFWorker.getFullText(info.id, [index], true);
+        texts.push(String(page?.text || ''));
+      }
+    }
+    return texts.map((text, index) => ({
+      number: index + 1,
+      text,
+    })).filter((page) => page.text.trim());
+  }
+
+  async function retrieveEvidence(attachmentKey, query, topK) {
+    const pages = await pdfPages(attachmentKey);
+    return ZoteroResearchRelay.rankEvidence(pages, query, topK || 6);
   }
 
   async function navigate(key, page) {
@@ -155,9 +278,44 @@ function zraCreateAddon(data) {
     await Zotero.Reader.open(info.id, { pageIndex: page - 1 });
   }
 
+  function registerRelayEndpoint() {
+    class ZRARelayEndpoint {
+      supportedMethods = ['POST'];
+      supportedDataTypes = ['application/json'];
+
+      async init(requestData) {
+        const headers = requestData?.headers || {};
+        // Reject web-page origins (a page reading the relay directly), but let
+        // extension origins through: Tampermonkey's GM_xmlhttpRequest may send
+        // its own chrome-extension:// origin on the privileged request.
+        const origin = String(headers.origin || headers.Origin || '');
+        if (/^https?:/i.test(origin)) {
+          return [403, 'application/json', JSON.stringify({ error: 'FORBIDDEN' })];
+        }
+        const body = requestData?.data || {};
+        let result;
+        try {
+          const action = String(body.action || '');
+          if (action === 'poll') result = await relayStore.poll(body);
+          else if (action === 'connect') result = relayStore.connect(body);
+          else if (action === 'disconnect') result = relayStore.disconnect(body);
+          else if (action === 'update') result = relayStore.update(body);
+          else result = { error: 'UNKNOWN_ACTION' };
+        } catch (_) {
+          result = { error: 'INTERNAL' };
+        }
+        return [200, 'application/json', JSON.stringify(result)];
+      }
+    }
+    Zotero.Server.Endpoints[RELAY_ENDPOINT_PATH] = ZRARelayEndpoint;
+  }
+
   function addDocument(doc) {
     if (documents.has(doc)) return;
-    doc.defaultView.MozXULElement.insertFTLIfNeeded('zotero-research.ftl');
+    const xul = doc.defaultView?.MozXULElement;
+    if (typeof xul?.insertFTLIfNeeded === 'function') {
+      xul.insertFTLIfNeeded('zotero-research.ftl');
+    }
     const link = doc.createElementNS(ZRA_HTML, 'link');
     link.id = 'zotero-research-styles';
     link.rel = 'stylesheet';
@@ -166,24 +324,90 @@ function zraCreateAddon(data) {
     documents.add(doc);
   }
 
+  function panelRoot(body) {
+    return body?.querySelector?.('[data-zrp-root="true"]') || null;
+  }
+
+  function removePanelPlaceholder(body) {
+    const placeholder = body?.querySelector?.('[data-zrp-placeholder="true"]');
+    if (placeholder?.parentNode) placeholder.parentNode.removeChild(placeholder);
+  }
+
+  function showPanelPlaceholder(body, message, isError = false) {
+    if (!body) return;
+    let placeholder = body.querySelector?.('[data-zrp-placeholder="true"]') || null;
+    if (!placeholder) {
+      const doc = body.ownerDocument;
+      if (!doc?.createElementNS || typeof body.appendChild !== 'function') return;
+      placeholder = doc.createElementNS(ZRA_HTML, 'div');
+      placeholder.setAttribute('class', 'zrp-panel-placeholder');
+      placeholder.setAttribute('data-zrp-placeholder', 'true');
+      body.appendChild(placeholder);
+    }
+    placeholder.toggleAttribute?.('data-zrp-error', isError);
+    placeholder.textContent = message;
+  }
+
+  function showPanelError(body) {
+    const roots = body?.querySelectorAll?.('[data-zrp-root="true"]') || [];
+    for (const root of Array.from(roots)) {
+      if (root.parentNode) root.parentNode.removeChild(root);
+    }
+    showPanelPlaceholder(
+      body,
+      '科研助手界面加载失败，请在 Zotero 中停用后重新启用插件。',
+      true,
+    );
+  }
+
+  function reportPanelError(stage, error) {
+    try {
+      if (typeof Zotero.logError === 'function') Zotero.logError(error);
+      else Services.console.logStringMessage('[zotero-research] ' + stage + ': ' + String(error));
+    } catch (_) {}
+  }
+
   function mount(props) {
     addDocument(props.doc);
     let record = records.get(props.body);
     if (!record) {
       record = { body: props.body, panel: null, context: null, generation: 0, refresh: props.refresh };
       records.set(props.body, record);
+    } else if (props.refresh) {
+      record.refresh = props.refresh;
+    }
+    if (record.panel && !panelRoot(props.body)) {
+      try { record.panel.destroy(); } catch (_) {}
+      record.panel = null;
     }
     if (!record.panel) {
-      record.panel = ZoteroResearchPanel.mount(props.body, {
-        rpc, navigate,
-        prepareHighlight: (args) => highlights.prepare(args),
-        commitHighlight: async (preview) => {
-          pendingRPC += 1;
-          try { return await highlights.commit(preview, true); } finally { pendingRPC -= 1; }
-        },
-        openSettings: () => Zotero.Utilities.Internal.openPreferences(preferenceID),
-      });
+      try {
+        record.panel = ZoteroResearchPanel.mount(props.body, {
+          navigate,
+          relay: {
+            enqueueTask: (request) => relayStore.enqueueTask(request),
+            subscribe: (listener) => relayStore.subscribe(listener),
+            state: () => relayStore.state(),
+          },
+          getAPIConfig,
+          callModelAPI,
+          getAttachmentBase64,
+          getAttachmentMediaType,
+          getFontSize,
+          setFontSize,
+          retrieveEvidence,
+          prepareHighlight: (args) => highlights.prepare(args),
+          commitHighlight: async (preview) => highlights.commit(preview, true),
+          openSettings: () => Zotero.Utilities.Internal.openPreferences(preferenceID),
+          copyText: (text) => Zotero.Utilities.Internal.copyTextToClipboard(text),
+          openExternal: (url) => Zotero.launchURL(url),
+        });
+      } catch (error) {
+        record.panel = null;
+        throw error;
+      }
     }
+    removePanelPlaceholder(props.body);
     if (record.itemID !== props.item?.id) {
       record.itemID = props.item?.id;
       record.generation += 1;
@@ -191,6 +415,16 @@ function zraCreateAddon(data) {
       record.panel.setContext(null);
     }
     return record;
+  }
+
+  function safeMount(props, stage) {
+    try {
+      return mount(props);
+    } catch (error) {
+      showPanelError(props.body);
+      reportPanelError(stage, error);
+      return null;
+    }
   }
 
   async function resolveContext(item, doc, tabType) {
@@ -211,7 +445,8 @@ function zraCreateAddon(data) {
   }
 
   async function renderAsync(props) {
-    const record = records.get(props.body);
+    let record = records.get(props.body);
+    if (!record?.panel || !panelRoot(props.body)) record = safeMount(props, 'onAsyncRender');
     if (!record?.panel) return;
     const generation = record.generation;
     const context = await resolveContext(props.item, props.doc, props.tabType);
@@ -250,22 +485,22 @@ function zraCreateAddon(data) {
     const button = doc.createElementNS(ZRA_HTML, 'button');
     button.type = 'button';
     button.textContent = '发送到科研助手';
-    button.setAttribute('title', '仅在本机保留选文；分析需要在侧边栏手动启动');
+    button.setAttribute('title', '仅在本机保留选文；提问需要在侧边栏手动启动');
     button.style.cssText = 'margin:4px;padding:5px 9px;border:1px solid #9aa9be;border-radius:4px;background:Canvas;color:CanvasText;cursor:pointer;';
     button.addEventListener('click', async () => {
       button.disabled = true;
       try {
         const item = Zotero.Items.get(reader.itemID);
-        if (item.libraryID !== Zotero.Libraries.userLibraryID) throw new Error('当前只支持个人文献库。');
         const selected = await highlights.captureSelection(item.key, source);
         if (!alive) return;
-        if (selections.size >= 16) selections.delete(selections.keys().next().value);
+        const limit = ZoteroResearchNative.LIMITS.maxStoredSelections;
+        if (selections.size >= limit) selections.delete(selections.keys().next().value);
         selections.set(item.key, selected);
         if (reader.tabID) Zotero.getMainWindow().Zotero_Tabs.select(reader.tabID);
         reveal(item.key);
         button.textContent = '已送入右侧科研助手';
       } catch (_) {
-        button.textContent = '选文不可用，请在主窗口的个人库 PDF 中重试';
+        button.textContent = '选文不可用，请在本地 PDF 中重试';
         button.disabled = false;
       }
     });
@@ -274,14 +509,6 @@ function zraCreateAddon(data) {
 
   const reconnectObserver = { observe: async () => {
     if (!alive) return;
-    if (pendingRPC) {
-      alert('仍有处理任务。设置已保存，请在任务结束后再点击重新连接；当前连接未中断。');
-      return;
-    }
-    await bridge.close();
-    highlights.destroy();
-    selections.clear();
-    makeControllers();
     for (const record of records.values()) {
       record.panel?.destroy();
       record.panel = null;
@@ -293,21 +520,30 @@ function zraCreateAddon(data) {
 
   return {
     async start() {
-      config = JSON.parse(await Zotero.File.getResourceAsync(data.rootURI + 'config.json'));
       makeControllers();
+      registerRelayEndpoint();
       for (const win of Zotero.getMainWindows()) this.addWindow(win);
       sectionID = Zotero.ItemPaneManager.registerSection({
         paneID: 'research-assistant', pluginID: data.id,
         header: { l10nID: 'zotero-research-pane-header', icon: data.rootURI + 'content/icon.svg' },
         sidenav: { l10nID: 'zotero-research-pane-sidenav', icon: data.rootURI + 'content/icon.svg' },
+        bodyXHTML: '<html:div xmlns:html="http://www.w3.org/1999/xhtml" class="zrp-panel-placeholder" data-zrp-placeholder="true">科研助手正在加载…</html:div>',
         onInit: (props) => {
           addDocument(props.doc);
-          records.set(props.body, { body: props.body, panel: null, context: null, generation: 0, refresh: props.refresh });
+          const record = records.get(props.body) || {
+            body: props.body, panel: null, context: null, generation: 0,
+          };
+          if (props.refresh) record.refresh = props.refresh;
+          records.set(props.body, record);
         },
         onItemChange: ({ item, setEnabled }) => setEnabled(!!item && item.libraryID === Zotero.Libraries.userLibraryID && !item.deleted),
-        onRender: (props) => { mount(props); },
-        onAsyncRender: renderAsync,
-        onDestroy: ({ body }) => { records.get(body)?.panel?.destroy(); records.delete(body); },
+        onRender: (props) => { safeMount(props, 'onRender'); },
+        onAsyncRender: (props) => renderAsync(props).catch((error) => reportPanelError('onAsyncRender', error)),
+        onDestroy: (props) => {
+          const { body } = props;
+          records.get(body)?.panel?.destroy();
+          records.delete(body);
+        },
       });
       if (!sectionID) throw new Error('无法注册 Zotero 科研助手侧边栏。');
       preferenceID = await Zotero.PreferencePanes.register({
@@ -340,12 +576,14 @@ function zraCreateAddon(data) {
     },
     async stop() {
       alive = false;
+      relayStore?.destroy();
       Zotero.Reader.unregisterEventListener('renderTextSelectionPopup', selectionListener);
       try { Services.obs.removeObserver(reconnectObserver, ZRA_TOPIC); } catch (_) {}
       for (const record of records.values()) record.panel?.destroy();
       records.clear();
       if (sectionID) Zotero.ItemPaneManager.unregisterSection(sectionID);
       if (preferenceID) Zotero.PreferencePanes.unregister(preferenceID);
+      try { delete Zotero.Server.Endpoints[RELAY_ENDPOINT_PATH]; } catch (_) {}
       for (const doc of documents) {
         doc.getElementById('zotero-research-styles')?.remove();
         doc.querySelector('link[href="zotero-research.ftl"]')?.remove();
@@ -354,13 +592,12 @@ function zraCreateAddon(data) {
       documents.clear();
       selections.clear();
       highlights?.destroy();
-      await bridge?.close();
     },
   };
 }
 
 async function startup(data, _reason) {
-  for (const name of ['native.js', 'bridge-client.js', 'panel.js']) {
+  for (const name of ['native.js', 'relay.js', 'markdown.js', 'panel.js']) {
     Services.scriptloader.loadSubScript(data.rootURI + 'content/' + name, globalThis, 'UTF-8');
   }
   ZoteroResearchAddon = zraCreateAddon(data);
