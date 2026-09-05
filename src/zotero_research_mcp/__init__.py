@@ -1,3 +1,3 @@
-"""Safety-first Zotero research MCP server."""
+"""Zotero reading service and browser-AI relay."""
 
-__version__ = "0.2.0"
+__version__ = "0.4.1"

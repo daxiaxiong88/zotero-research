@@ -21,7 +21,7 @@ class _Chunk:
 
 
 class EvidenceRetriever:
-    """BM25 retrieval with deterministic page/chunk citations."""
+    """BM25 retrieval with deterministic page/chunk evidence identifiers."""
 
     def __init__(self, *, max_chunk_characters: int = 1_200, overlap: int = 160) -> None:
         if max_chunk_characters < 300:

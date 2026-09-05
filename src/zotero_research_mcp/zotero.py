@@ -6,13 +6,10 @@ unavailable, callers receive an explicit failure instead of bypassing Zotero.
 
 from __future__ import annotations
 
-import ipaddress
 import os
 import re
-import secrets
 from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -20,43 +17,23 @@ from urllib.request import url2pathname
 
 import httpx
 
+from . import __version__
 from .models import (
+    ITEM_KEY_FULLMATCH,
     AttachmentSummary,
     ItemContext,
     ItemSummary,
     NoteSummary,
     SearchResults,
-    WriteAuthorization,
     ZoteroStatus,
 )
+from .net import is_loopback_hostname
 
 DEFAULT_LOCAL_API_URL = "http://127.0.0.1:23119/api/"
 
 
-class LocalWriteUnavailable(RuntimeError):
-    """The running Zotero release has no supported Local API write path."""
-
-
-class LocalWriteAuthorizationRequired(PermissionError):
-    """The user must approve Zotero's native authorization dialog."""
-
-
-class LocalWriteFailed(RuntimeError):
-    """Zotero accepted the request but did not create the requested object."""
-
-
-class LocalWriteOutcomeUnknown(RuntimeError):
-    """A write may have reached Zotero, so replaying it is unsafe."""
-
-
 class ZoteroInstanceMismatch(ValueError):
     """The response came from a different or unidentified Zotero instance."""
-
-
-@dataclass(frozen=True, slots=True)
-class CreatedItem:
-    key: str
-    version: int
 
 
 class ZoteroLocalClient:
@@ -75,15 +52,12 @@ class ZoteroLocalClient:
             base_url=normalized_url,
             headers={
                 "Zotero-API-Version": "3",
-                "User-Agent": "zotero-research-mcp/0.2.0",
+                "User-Agent": f"zotero-research-mcp/{__version__}",
             },
             timeout=timeout,
             transport=transport,
             trust_env=False,
         )
-        self._write_key: str | None = None
-        self._write_server_id: str | None = None
-        self._write_key_remembered = False
         self._pinned_server_id: ContextVar[str | None] = ContextVar(
             "zotero_research_instance", default=None
         )
@@ -128,13 +102,6 @@ class ZoteroLocalClient:
         api_version = _parse_int_header(response.headers, "Zotero-API-Version")
         schema_version = _parse_int_header(response.headers, "Zotero-Schema-Version")
         server_id = response.headers.get("Zotero-Server-ID")
-        major_version = _parse_major_version(version)
-        write_supported = (
-            api_version == 3
-            and major_version is not None
-            and major_version >= 10
-            and bool(server_id)
-        )
         return ZoteroStatus(
             reachable=True,
             version=version,
@@ -142,7 +109,6 @@ class ZoteroLocalClient:
             schema_version=schema_version,
             server_id=server_id,
             read_supported=api_version == 3,
-            write_supported=write_supported,
             detail=None if api_version == 3 else "Only Zotero Local API v3 is supported.",
         )
 
@@ -244,163 +210,6 @@ class ZoteroLocalClient:
             raise ValueError("Network-share attachments are not allowed in local-only processing")
         return path
 
-    def request_write_authorization(
-        self,
-        *,
-        app_name: str = "Zotero Research MCP",
-    ) -> WriteAuthorization:
-        """Ask Zotero 10+ to show its native local-write approval dialog."""
-
-        status = self.health()
-        if not status.write_supported or status.server_id is None:
-            raise LocalWriteUnavailable("Official Local API writes require Zotero 10 or newer.")
-        if self._pinned_server_id.get() and status.server_id != self._pinned_server_id.get():
-            raise LocalWriteUnavailable("Zotero instance changed; reconnect before authorizing")
-        response = self._client.post(
-            "local/authorize",
-            headers={"Zotero-Server-ID": status.server_id},
-            json={"appName": app_name},
-            timeout=120.0,
-        )
-        self._check_response_instance(response, expected_server_id=status.server_id)
-        if response.status_code == 403:
-            return WriteAuthorization(
-                authorized=False,
-                remembered=False,
-                server_id=status.server_id,
-                detail="The Zotero write authorization request was denied.",
-            )
-        response.raise_for_status()
-        payload = _require_json_object(response)
-        key = payload.get("key")
-        if not isinstance(key, str) or len(key) != 32:
-            raise LocalWriteFailed("Zotero returned an invalid local API key")
-        remembered = bool(payload.get("remember", False))
-        self._write_key = key
-        self._write_server_id = status.server_id
-        self._write_key_remembered = remembered
-        return WriteAuthorization(
-            authorized=True,
-            remembered=remembered,
-            server_id=status.server_id,
-            detail=(
-                "Zotero granted remembered local write access."
-                if remembered
-                else "Zotero granted one-time local write access."
-            ),
-        )
-
-    def create_child_note(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        write_token: str | None = None,
-    ) -> CreatedItem:
-        """Create one child note through the authorized Zotero 10+ Local API."""
-
-        status = self.health()
-        if not status.write_supported or status.server_id is None:
-            raise LocalWriteUnavailable("Official Local API writes require Zotero 10 or newer.")
-        if self._pinned_server_id.get() and status.server_id != self._pinned_server_id.get():
-            raise LocalWriteUnavailable("Zotero instance changed; reconnect before writing")
-        if self._write_server_id != status.server_id:
-            self._clear_write_authorization()
-            raise LocalWriteAuthorizationRequired(
-                "Zotero instance changed; request write authorization again."
-            )
-        if self._write_key is None:
-            raise LocalWriteAuthorizationRequired(
-                "Call request_write_authorization before writing a note."
-            )
-
-        idempotency_token = write_token or secrets.token_hex(16)
-        if not re.fullmatch(r"[0-9a-f]{32}", idempotency_token):
-            raise ValueError("write_token must be 32 lowercase hexadecimal characters")
-        key = self._write_key
-        remembered = self._write_key_remembered
-        try:
-            try:
-                response = self._client.post(
-                    "users/0/items",
-                    headers={
-                        "Zotero-Server-ID": status.server_id,
-                        "Zotero-API-Key": key,
-                        "Zotero-Write-Token": idempotency_token,
-                    },
-                    json=[dict(payload)],
-                )
-            except httpx.HTTPError as exc:
-                raise LocalWriteOutcomeUnknown(
-                    "The Zotero write outcome is unknown; regenerate a preview after checking "
-                    "the library."
-                ) from exc
-            try:
-                self._check_response_instance(response, expected_server_id=status.server_id)
-            except ZoteroInstanceMismatch as exc:
-                raise LocalWriteOutcomeUnknown(
-                    "The Zotero write outcome is unknown; regenerate a preview after checking "
-                    "the library."
-                ) from exc
-        finally:
-            if not remembered:
-                self._clear_write_authorization()
-
-        if response.status_code == 401:
-            self._clear_write_authorization()
-            raise LocalWriteAuthorizationRequired(
-                "Zotero local write authorization expired; authorize again."
-            )
-        if response.status_code >= 500:
-            raise LocalWriteOutcomeUnknown(
-                "Zotero returned a server error after receiving the write; check the library "
-                "before creating another preview."
-            )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise LocalWriteFailed(
-                f"Zotero rejected the child note request with HTTP {response.status_code}"
-            ) from exc
-        try:
-            result = _require_json_object(response)
-        except ValueError as exc:
-            raise LocalWriteOutcomeUnknown(
-                "Zotero returned an unreadable success response; check the library before "
-                "creating another preview."
-            ) from exc
-        failed = result.get("failed", {})
-        if isinstance(failed, Mapping) and failed:
-            raise LocalWriteFailed("Zotero rejected the child note payload")
-        successful = result.get("successful")
-        if not isinstance(successful, Mapping):
-            raise LocalWriteOutcomeUnknown(
-                "Zotero response did not identify the created item; check the library before "
-                "creating another preview."
-            )
-        created = successful.get("0")
-        if not isinstance(created, Mapping):
-            raise LocalWriteOutcomeUnknown(
-                "Zotero response did not identify the created child note; check the library "
-                "before creating another preview."
-            )
-        try:
-            data = _item_data(created)
-            return CreatedItem(
-                key=_item_key(created, data),
-                version=_item_version(created, data),
-            )
-        except (TypeError, ValueError) as exc:
-            raise LocalWriteOutcomeUnknown(
-                "Zotero created an item but returned incomplete metadata; check the library "
-                "before creating another preview."
-            ) from exc
-
-    def _clear_write_authorization(self) -> None:
-        self._write_key = None
-        self._write_server_id = None
-        self._write_key_remembered = False
-
-
 def _parse_item_summary(raw: Mapping[str, Any]) -> ItemSummary:
     data = _item_data(raw)
     creators = [_creator_name(creator) for creator in data.get("creators", [])]
@@ -411,7 +220,6 @@ def _parse_item_summary(raw: Mapping[str, Any]) -> ItemSummary:
         title=str(data.get("title", "")),
         date=str(data.get("date", "")),
         creators=[name for name in creators if name],
-        doi=str(data.get("DOI", "")),
         url=str(data.get("url", "")),
     )
 
@@ -475,15 +283,8 @@ def _parse_int_header(headers: httpx.Headers, name: str) -> int | None:
         return None
 
 
-def _parse_major_version(version: str | None) -> int | None:
-    if not version:
-        return None
-    match = re.match(r"(\d+)", version)
-    return int(match.group(1)) if match else None
-
-
 def _validate_item_key(item_key: str) -> None:
-    if not re.fullmatch(r"[23456789ABCDEFGHIJKLMNPQRSTUVWXYZ]{8}", item_key):
+    if not ITEM_KEY_FULLMATCH.fullmatch(item_key):
         raise ValueError("item_key must be an 8-character Zotero key")
 
 
@@ -492,12 +293,7 @@ def _validate_local_api_base_url(base_url: str) -> None:
     hostname = parsed.hostname
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("Zotero Local API URL cannot contain credentials, query or fragment")
-    is_loopback = hostname is not None and hostname.casefold() == "localhost"
-    if hostname is not None and not is_loopback:
-        try:
-            is_loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = False
+    is_loopback = is_loopback_hostname(hostname)
     if parsed.scheme.casefold() != "http" or not is_loopback:
         raise ValueError("Zotero Local API URL must use HTTP on a loopback address")
     try:

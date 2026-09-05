@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# Zotero item/attachment keys: 8 characters from Zotero's base-32-style alphabet.
+ITEM_KEY_ALPHABET = "23456789ABCDEFGHIJKLMNPQRSTUVWXYZ"
+ITEM_KEY_FULLMATCH = re.compile(rf"[{ITEM_KEY_ALPHABET}]{{8}}")
+ITEM_KEY_PATTERN = rf"^[{ITEM_KEY_ALPHABET}]{{8}}$"
+
 
 class ZoteroStatus(BaseModel):
-    """Observed capabilities of the running Zotero instance."""
+    """Observed read capabilities of the running Zotero instance."""
 
     reachable: bool
     version: str | None = None
@@ -17,18 +22,15 @@ class ZoteroStatus(BaseModel):
     schema_version: int | None = None
     server_id: str | None = None
     read_supported: bool = False
-    write_supported: bool = False
     detail: str | None = None
 
 
 class HealthReport(BaseModel):
-    """Health and safety posture exposed through ``health_check``."""
+    """Connection and parser health exposed through ``health_check``."""
 
     status: Literal["ok", "degraded"]
     service_version: str
     zotero: ZoteroStatus
-    write_mode: Literal["local_api", "preview_only"]
-    sqlite_access: Literal["forbidden"] = "forbidden"
 
 
 class ItemSummary(BaseModel):
@@ -40,7 +42,6 @@ class ItemSummary(BaseModel):
     title: str
     date: str = ""
     creators: list[str] = Field(default_factory=list)
-    doi: str = ""
     url: str = ""
 
 
@@ -139,7 +140,6 @@ ReadingSectionKey = Literal[
     "key_findings",
     "limitations",
 ]
-DocumentSensitivity = Literal["public", "sensitive"]
 
 
 class ReadingCardSection(BaseModel):
@@ -152,48 +152,13 @@ class ReadingCardSection(BaseModel):
 
 
 class ReadingCard(BaseModel):
-    """Structured paper reading result with a closed citation set."""
+    """Structured paper reading result with a fixed evidence set."""
 
     item_key: str
     attachment_key: str
     title: str
-    sensitivity: DocumentSensitivity
     mode: Literal["evidence_only", "model"]
     generated_by: str
     sections: list[ReadingCardSection]
     evidence: list[EvidenceSpan]
     warnings: list[str] = Field(default_factory=list)
-
-
-class NotePreview(BaseModel):
-    """Exact, expiring child-note payload presented before any write."""
-
-    preview_token: str
-    digest: str
-    server_id: str | None = None
-    parent_item_key: str
-    title: str
-    note_html: str
-    note_text: str = ""
-    tags: list[str]
-    expires_at: datetime
-    requires_user_confirmation: Literal[True] = True
-
-
-class WriteAuthorization(BaseModel):
-    """Non-secret result of Zotero's local write authorization dialog."""
-
-    authorized: bool
-    remembered: bool = False
-    server_id: str | None = None
-    detail: str
-
-
-class NoteWriteResult(BaseModel):
-    """Result of committing one previously previewed child note."""
-
-    status: Literal["created"]
-    item_key: str
-    version: int = Field(ge=0)
-    parent_item_key: str
-    digest: str

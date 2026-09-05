@@ -1,7 +1,7 @@
 [project]
 name = "zotero-research-mcp"
-version = "0.2.0"
-description = "A safety-first MCP server for evidence-grounded Zotero research workflows."
+version = "0.4.1"
+description = "A Zotero 10 reading sidebar with browser-AI relay and page-linked evidence."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,7 +15,6 @@ dependencies = [
 [project.scripts]
 zotero-research-mcp = "zotero_research_mcp.server:main"
 zotero-research-doctor = "zotero_research_mcp.doctor:main"
-zotero-research-bridge = "zotero_research_mcp.bridge:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]

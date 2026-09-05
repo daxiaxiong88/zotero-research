@@ -13,6 +13,7 @@ and every selected word has a finite, positive-area geometry.
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
 import unicodedata
@@ -333,10 +334,10 @@ def _find_matches(
 
 
 def _word_index_at(starts: list[int], position: int) -> int | None:
-    for index in range(len(starts) - 1, -1, -1):
-        if starts[index] <= position:
-            return index
-    return None
+    # ``starts`` is ascending: the last start at or before ``position`` is the
+    # word owning that stream offset.
+    index = bisect.bisect_right(starts, position) - 1
+    return index if index >= 0 else None
 
 
 def _page_geometry(page: pymupdf.Page) -> _PageGeometry | None:

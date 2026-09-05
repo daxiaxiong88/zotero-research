@@ -1,4 +1,4 @@
-"""Evidence-first reading-card generation."""
+"""Build a compact, evidence-linked reading card for a public paper."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .model import ModelClient, ModelResponseError
 from .models import (
-    DocumentSensitivity,
     EvidenceSpan,
     ItemSummary,
     PdfExtraction,
@@ -18,42 +17,41 @@ from .models import (
     ReadingCardSection,
     ReadingSectionKey,
 )
-from .privacy import PrivacyPolicy
 from .retrieval import EvidenceRetriever
 
 _SECTION_SPECS: tuple[tuple[ReadingSectionKey, str, str], ...] = (
     (
-        "research_question",
-        "Research question",
-        "research question objective hypothesis aim compared",
+        'research_question',
+        'Research question',
+        'research question objective hypothesis aim compared',
     ),
     (
-        "methods",
-        "Methods",
-        "methods study design experiment randomized participants sample measurement",
+        'methods',
+        'Methods',
+        'methods study design experiment randomized participants sample measurement',
     ),
     (
-        "key_findings",
-        "Key findings",
-        "results key findings effect outcome endpoint increased decreased",
+        'key_findings',
+        'Key findings',
+        'results key findings effect outcome endpoint increased decreased',
     ),
     (
-        "limitations",
-        "Limitations",
-        "limitations uncertainty bias generalizability short follow-up future work",
+        'limitations',
+        'Limitations',
+        'limitations uncertainty bias generalizability short follow-up future work',
     ),
 )
 
 
 class _ModelSection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra='forbid')
 
     summary: str = Field(min_length=1)
     evidence_ids: list[str]
 
 
 class _ModelCard(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra='forbid')
 
     research_question: _ModelSection
     methods: _ModelSection
@@ -62,17 +60,15 @@ class _ModelCard(BaseModel):
 
 
 class ReadingCardBuilder:
-    """Build an extractive card or ask an authorized model to synthesize one."""
+    """Build an extractive card or ask the configured model to synthesize one."""
 
     def __init__(
         self,
         *,
         retriever: EvidenceRetriever,
-        privacy_policy: PrivacyPolicy,
         model: ModelClient | None,
     ) -> None:
         self._retriever = retriever
-        self._privacy_policy = privacy_policy
         self._model = model
 
     def build(
@@ -80,8 +76,6 @@ class ReadingCardBuilder:
         *,
         item: ItemSummary,
         extraction: PdfExtraction,
-        sensitivity: DocumentSensitivity,
-        allow_cloud: bool,
     ) -> ReadingCard:
         evidence_by_section: dict[ReadingSectionKey, list[EvidenceSpan]] = {}
         evidence_by_id: dict[str, EvidenceSpan] = {}
@@ -105,22 +99,16 @@ class ReadingCardBuilder:
                 item_key=item.key,
                 attachment_key=extraction.attachment_key,
                 title=item.title,
-                sensitivity=sensitivity,
-                mode="evidence_only",
-                generated_by="deterministic-retrieval",
+                mode='evidence_only',
+                generated_by='deterministic-retrieval',
                 sections=sections,
                 evidence=ordered_evidence,
                 warnings=[
                     *warnings,
-                    "No model is configured; summaries are direct evidence excerpts.",
+                    '未配置模型；当前内容是原文证据摘录。',
                 ],
             )
 
-        self._privacy_policy.authorize_full_text(
-            model_is_local=self._model.is_local,
-            sensitivity=sensitivity,
-            allow_cloud=allow_cloud,
-        )
         prompt = self._build_prompt(item, ordered_evidence)
         raw_card = self._model.complete_json(prompt)
         model_card = self._validate_model_card(raw_card, set(evidence_by_id))
@@ -137,8 +125,7 @@ class ReadingCardBuilder:
             item_key=item.key,
             attachment_key=extraction.attachment_key,
             title=item.title,
-            sensitivity=sensitivity,
-            mode="model",
+            mode='model',
             generated_by=self._model.name,
             sections=sections,
             evidence=ordered_evidence,
@@ -152,7 +139,7 @@ class ReadingCardBuilder:
         sections: list[ReadingCardSection] = []
         for key, title, _query in _SECTION_SPECS:
             evidence = evidence_by_section[key]
-            summary = evidence[0].text if evidence else "No matching evidence found."
+            summary = evidence[0].text if evidence else 'No matching evidence found.'
             sections.append(
                 ReadingCardSection(
                     key=key,
@@ -165,22 +152,22 @@ class ReadingCardBuilder:
 
     @staticmethod
     def _build_prompt(item: ItemSummary, evidence: list[EvidenceSpan]) -> str:
-        evidence_text = "\n\n".join(
-            f"[{entry.evidence_id}] page {entry.page}\n{entry.text}" for entry in evidence
+        evidence_text = '\n\n'.join(
+            f'[{entry.evidence_id}] page {entry.page}\n{entry.text}' for entry in evidence
         )
         shape = {
-            key: {"summary": "...", "evidence_ids": ["ATTACHMENT:p1:c1"]}
+            key: {'summary': '...', 'evidence_ids': ['ATTACHMENT:p1:c1']}
             for key, _title, _query in _SECTION_SPECS
         }
         return (
-            "Create a concise scientific reading card for the item below. Every factual "
-            "statement must be supported by one or more IDs from the evidence block. If the "
-            "evidence is insufficient, say so and use an empty evidence_ids list.\n\n"
-            f"Title: {item.title}\n"
-            f"Authors: {', '.join(item.creators)}\n"
-            f"Date: {item.date}\n\n"
-            f"Required JSON shape:\n{json.dumps(shape, ensure_ascii=False)}\n\n"
-            f"Evidence:\n{evidence_text}"
+            'Create a concise scientific reading card for the item below. Every factual '
+            'statement must be supported by one or more IDs from the evidence block. If the '
+            'evidence is insufficient, say so and use an empty evidence_ids list.\n\n'
+            f'Title: {item.title}\n'
+            f'Authors: {", ".join(item.creators)}\n'
+            f'Date: {item.date}\n\n'
+            f'Required JSON shape:\n{json.dumps(shape, ensure_ascii=False)}\n\n'
+            f'Evidence:\n{evidence_text}'
         )
 
     @staticmethod
@@ -192,7 +179,7 @@ class ReadingCardBuilder:
             card = _ModelCard.model_validate(payload)
         except ValidationError as exc:
             raise ModelResponseError(
-                "Model reading card does not match the required schema"
+                'Model reading card does not match the required schema'
             ) from exc
         cited_ids = {
             evidence_id
@@ -201,6 +188,6 @@ class ReadingCardBuilder:
         }
         unknown_ids = cited_ids - known_evidence_ids
         if unknown_ids:
-            joined = ", ".join(sorted(unknown_ids))
-            raise ModelResponseError(f"Model cited unknown evidence IDs: {joined}")
+            joined = ', '.join(sorted(unknown_ids))
+            raise ModelResponseError(f'Model cited unknown evidence IDs: {joined}')
         return card

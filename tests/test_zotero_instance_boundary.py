@@ -5,11 +5,7 @@ from contextvars import copy_context
 import httpx
 import pytest
 
-from zotero_research_mcp.zotero import (
-    LocalWriteAuthorizationRequired,
-    LocalWriteOutcomeUnknown,
-    ZoteroLocalClient,
-)
+from zotero_research_mcp.zotero import ZoteroLocalClient
 
 INSTANCE_A = "instance-a"
 INSTANCE_B = "instance-b"
@@ -204,75 +200,3 @@ def test_pinned_contexts_are_isolated_for_read_headers() -> None:
     assert result_a.items == []
     assert result_b.items == []
     assert seen_search_ids == [INSTANCE_A, INSTANCE_B]
-
-
-@pytest.mark.parametrize("response_id", [None, INSTANCE_B])
-def test_authorization_response_id_mismatch_is_rejected_before_key_body(
-    response_id: str | None,
-) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/":
-            return _health_response(INSTANCE_A)
-        if request.url.path == "/api/local/authorize":
-            headers = {"Zotero-Server-ID": response_id} if response_id is not None else {}
-            return httpx.Response(
-                200,
-                headers=headers,
-                json={"key": "SECRET-KEY", "remember": True},
-            )
-        raise AssertionError(f"unexpected request: {request.url}")
-
-    client = ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    client.pin_instance(INSTANCE_A)
-
-    with pytest.raises(ValueError, match="instance") as exc_info:
-        client.request_write_authorization()
-
-    assert "SECRET" not in str(exc_info.value)
-
-
-@pytest.mark.parametrize("response_id", [None, INSTANCE_B])
-def test_write_response_id_mismatch_is_unknown_and_not_replayed(
-    response_id: str | None,
-) -> None:
-    write_calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal write_calls
-        if request.url.path == "/api/":
-            return _health_response(INSTANCE_A)
-        if request.url.path == "/api/local/authorize":
-            return httpx.Response(
-                200,
-                headers={"Zotero-Server-ID": INSTANCE_A},
-                json={"key": "K" * 32, "remember": False},
-            )
-        if request.method == "POST" and request.url.path == "/api/users/0/items":
-            write_calls += 1
-            headers = {"Zotero-Server-ID": response_id} if response_id is not None else {}
-            return httpx.Response(
-                200,
-                headers=headers,
-                json={"successful": {"0": {"key": "SECRET-NOTE", "version": 1}}},
-            )
-        raise AssertionError(f"unexpected request: {request.url}")
-
-    client = ZoteroLocalClient(transport=httpx.MockTransport(handler))
-    client.pin_instance(INSTANCE_A)
-    client.request_write_authorization()
-
-    with pytest.raises(LocalWriteOutcomeUnknown) as exc_info:
-        client.create_child_note(
-            {"itemType": "note", "parentItem": "PARENT23", "note": "body"},
-            write_token="a" * 32,
-        )
-
-    assert "SECRET" not in str(exc_info.value)
-    assert write_calls == 1
-
-    with pytest.raises(LocalWriteAuthorizationRequired):
-        client.create_child_note(
-            {"itemType": "note", "parentItem": "PARENT23", "note": "body"},
-            write_token="b" * 32,
-        )
-    assert write_calls == 1

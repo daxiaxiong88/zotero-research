@@ -34,25 +34,16 @@ def test_mcp_exposes_only_scoped_zotero_research_tools() -> None:
         "generate_reading_card",
         "analyze_paper",
         "locate_quote",
-        "audit_citations",
-        "preview_child_note",
-        "request_write_authorization",
-        "write_child_note",
     }
     assert "path" not in by_name["extract_pdf"]["inputSchema"]["properties"]
-    assert set(by_name["write_child_note"]["inputSchema"]["required"]) == {
-        "preview_token",
-        "expected_digest",
-        "confirmed_by_user",
-    }
-    write_description = by_name["write_child_note"]["description"].casefold()
-    assert "exact preview" in write_description
-    assert "explicitly confirmed" in write_description
     assert by_name["search_items"]["annotations"]["readOnlyHint"] is True
     assert by_name["generate_reading_card"]["annotations"]["readOnlyHint"] is False
-    assert by_name["write_child_note"]["annotations"]["readOnlyHint"] is False
     assert all(tool["annotations"]["destructiveHint"] is False for tool in by_name.values())
     assert "delete" not in by_name
+    for tool in by_name.values():
+        properties = tool["inputSchema"].get("properties", {})
+        assert "sensitivity" not in properties
+        assert "allow_cloud" not in properties
 
 
 @pytest.mark.parametrize("entrypoint", ["python-module", "installed-script"])
@@ -88,5 +79,5 @@ def test_stdio_entrypoint_completes_mcp_handshake(tmp_path: Path, entrypoint: st
 
     assert "health_check" in names
     assert "generate_reading_card" in names
-    assert "write_child_note" in names
-    assert len(names) == 12
+    assert "write_child_note" not in names
+    assert len(names) == 8

@@ -1,5 +1,5 @@
 /* TEST ONLY: exercised exclusively inside the guarded synthetic profile. No UI automation,
- * permissions dialog, cloud grant, real model, network citation lookup or main-library access.
+ * real model or external service is used.
  * Load the packaged production code in a separate Gecko sandbox; do not register another UI.
  */
 async function runSyntheticNativeChecks(paper, pdf) {
@@ -49,9 +49,9 @@ async function runSyntheticNativeChecks(paper, pdf) {
         };
       },
     });
-    await stage('private bridge health');
+    await stage('local bridge health');
     const health = await bridge.rpc('health');
-    check(health.zotero.version === Zotero.version && health.zotero.server_id === serverID(), 'private bridge identity');
+    check(health.zotero.version === Zotero.version && health.zotero.server_id === serverID(), 'bridge identity');
     check(!health.models.local && !health.models.external, 'no inherited real model configuration');
     await stage('synthetic item context and evidence');
     const context = await bridge.rpc('item_context', { item_key: paper.key });
@@ -64,24 +64,12 @@ async function runSyntheticNativeChecks(paper, pdf) {
       await stage('no-model analysis: ' + mode);
       const result = await bridge.rpc('analyze', {
         item_key: paper.key, attachment_key: pdf.key, mode,
-        question: 'What does this synthetic scenario test?', sensitivity: 'sensitive',
+        question: 'What does this synthetic scenario test?',
         ...(['translate', 'explain'].includes(mode) ? { selected_text: quote, selection_page: 1 } : {}),
       });
       check(result.mode === 'evidence_only' && result.evidence.length > 0, mode + ' explicit no-model result');
       analysisModes.push(mode);
     }
-    await stage('safe note preview and confirmation guard');
-    const preview = await bridge.rpc('preview_note', {
-      parent_item_key: paper.key, title: 'Synthetic preview — not saved',
-      content: 'Generated software test only. <script>not executable</script>',
-    });
-    check(preview.server_id === serverID() && preview.digest.length === 64, 'bound note preview');
-    check(!preview.note_html.includes('<script>') && preview.note_html.includes('&lt;script&gt;'), 'note HTML escaped');
-    await rejected(bridge.rpc('write_note', {
-      preview_token: preview.preview_token, expected_digest: preview.digest, confirmed_by_user: false,
-    }), 'unconfirmed note write denied');
-    check(paper.getNotes().length === 0, 'note preview has no write effect');
-
     await stage('exact locator and native highlight preview');
     const location = await bridge.rpc('locate', { attachment_key: pdf.key, page: 1, quote });
     check(location.status === 'exact' && location.rects.length > 0, 'exact PDF locator');
@@ -97,12 +85,12 @@ async function runSyntheticNativeChecks(paper, pdf) {
         return {
           key: pdf.key, id: pdf.id, libraryID: pdf.libraryID, parentKey: paper.key,
           editable: Zotero.Libraries.get(pdf.libraryID).editable === true,
-          isPersonal: pdf.libraryID === Zotero.Libraries.userLibraryID, isPDF: true,
+          isPDF: true,
           stamp: scope.zraHash(JSON.stringify([file, stat.size, stat.lastModified])),
         };
       },
       save: async (info, data) => {
-        check(info.key === pdf.key, 'native write target still synthetic');
+        check(info.key === pdf.key, 'native annotation target still synthetic');
         const queue = new Zotero.Notifier.Queue();
         let saved;
         try { saved = await Zotero.Annotations.saveFromJSON(pdf, data, { notifierQueue: queue }); }
@@ -117,8 +105,7 @@ async function runSyntheticNativeChecks(paper, pdf) {
     const highlight = await controller.prepare({ attachment_key: pdf.key, page: 1, quote });
     check(pdf.getAnnotations().length === before, 'highlight preview is read-only');
     await rejected(controller.commit(highlight, false), 'highlight confirmation enforced');
-    // This test-generated annotation is the sole deliberate write after fixture creation.
-    // It never authorizes the Local API or changes the user's real library.
+    // This test-generated annotation is the sole deliberate change after fixture creation.
     await stage('native synthetic highlight save and replay guard');
     const created = await controller.commit(highlight, true);
     const annotation = Zotero.Items.getByLibraryAndKey(pdf.libraryID, created.annotation_key);
@@ -130,9 +117,9 @@ async function runSyntheticNativeChecks(paper, pdf) {
     return {
       status: 'passed', bridge: 'Gecko Subprocess + production XHR',
       analysisModes, modelExecution: 'not configured; evidence-only checked',
-      evidence: 'physical page 1', note: 'escaped preview; unconfirmed write rejected; zero notes',
+      evidence: 'physical page 1',
       highlight: 'one native annotation; exact PDF coordinates; replay rejected',
-      annotationKey: annotation.key, noCloudGrant: true,
+      annotationKey: annotation.key,
     };
   } finally {
     controller?.destroy();

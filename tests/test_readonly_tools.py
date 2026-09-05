@@ -14,7 +14,7 @@ def test_local_api_client_rejects_non_loopback_or_invalid_port() -> None:
         ZoteroLocalClient(base_url="http://127.0.0.1:0/api/")
 
 
-def test_health_check_reports_zotero_9_as_read_only() -> None:
+def test_health_check_reports_zotero_9_connection() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
         assert request.url.path == "/api/"
@@ -36,12 +36,9 @@ def test_health_check_reports_zotero_9_as_read_only() -> None:
     assert report.zotero.version == "9.0.6"
     assert report.zotero.api_version == 3
     assert report.zotero.read_supported is True
-    assert report.zotero.write_supported is False
-    assert report.write_mode == "preview_only"
-    assert report.sqlite_access == "forbidden"
 
 
-def test_health_check_requires_local_api_v3_before_enabling_writes() -> None:
+def test_health_check_requires_local_api_v3() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/"
         return httpx.Response(
@@ -57,8 +54,6 @@ def test_health_check_requires_local_api_v3_before_enabling_writes() -> None:
     report = ResearchService(zotero=client).health_check()
 
     assert report.zotero.read_supported is False
-    assert report.zotero.write_supported is False
-    assert report.write_mode == "preview_only"
 
 
 def test_search_items_returns_normalized_top_level_results() -> None:
@@ -80,7 +75,6 @@ def test_search_items_returns_normalized_top_level_results() -> None:
                         "itemType": "journalArticle",
                         "title": "A useful paper",
                         "date": "2025",
-                        "DOI": "10.1000/example",
                         "url": "https://example.test/paper",
                         "creators": [
                             {
@@ -105,7 +99,6 @@ def test_search_items_returns_normalized_top_level_results() -> None:
     assert item.item_type == "journalArticle"
     assert item.title == "A useful paper"
     assert item.creators == ["Ada Lovelace", "Research Consortium"]
-    assert item.doi == "10.1000/example"
 
 
 def test_get_item_context_separates_attachments_and_notes() -> None:
