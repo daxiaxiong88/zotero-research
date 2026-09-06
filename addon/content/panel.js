@@ -61,6 +61,7 @@
       'overview-excerpts': '跨页概览摘录（不是完整全文）',
       'full-pdf': '全文 PDF 附件', conversation: '本次阅读对话',
       image: '用户粘贴的截图（本轮随消息提供，可能是页面或图表）',
+      selection: '已选原文（本轮仅提供选文，未附其他检索片段）',
       upload: '等待用户上传材料',
     };
     var lines = ['材料范围：' + (labels[scope] || labels.retrieved)];
@@ -348,6 +349,19 @@
       return state.selection.attachment_key === state.context.attachment_key ? state.selection : null;
     }
 
+    function clearSelection() {
+      var key = state.selection ? state.selection.attachment_key : null;
+      state.selection = null;
+      // The bootstrap keeps a per-attachment snapshot and re-applies it on
+      // every async render; clear it there too or the card comes back.
+      if (key && adapter && typeof adapter.clearSelection === 'function') {
+        try { adapter.clearSelection(key); } catch (_) { /* best-effort */ }
+      }
+      renderSelection();
+      renderControls();
+      setStatus('已清除选文。');
+    }
+
     function buildUi() {
       var header = createElement(document, 'header', { className: 'zrp-header' });
       var brand = createElement(document, 'div', { className: 'zrp-brand-line' });
@@ -409,6 +423,7 @@
       refs.selectionPage = addButton(selectionFooter, 'selection-page', '暂无页码', 'navigate-selection', 'zrp-page-button');
       refs.selectionMeta = createElement(document, 'span', { className: 'zrp-hint' }, '');
       selectionFooter.appendChild(refs.selectionMeta);
+      refs.selectionClear = addButton(selectionFooter, 'selection-clear', '清除', 'selection-clear', 'zrp-button zrp-button-quiet');
       selectionSection.appendChild(selectionFooter);
       root.appendChild(selectionSection);
 
@@ -606,22 +621,10 @@
           copyMd.setAttribute('data-message-index', String(index));
           article.appendChild(distillRow);
         }
-        if (Array.isArray(message.evidence) && message.evidence.length) {
-          var evidence = createElement(document, 'div', { className: 'zrp-message-evidence' });
-          evidence.appendChild(createElement(document, 'span', { className: 'zrp-hint' }, '来源'));
-          message.evidence.forEach(function addEvidence(span, evidenceIndex) {
-            var button = addButton(
-              evidence,
-              'message-evidence-' + String(index) + '-' + String(evidenceIndex),
-              pageLabel(span.page),
-              'navigate-evidence',
-              'zrp-page-button',
-            );
-            button.setAttribute('data-page', text(span.page));
-            button.setAttribute('data-attachment-key', text((state.context && state.context.attachment_key) || ''));
-          });
-          article.appendChild(evidence);
-        }
+        // Evidence page chips removed per review: the material (with page
+        // labels) already travels inside every prompt and is restated in the
+        // saved source context, so a 来源 row under each answer duplicated
+        // what the model already sees. The selection card keeps its jump.
         refs.chatMessages.appendChild(article);
       });
       if (state.pendingTaskId) setStatus('已发送到网页 AI，等待回复…');
@@ -796,6 +799,13 @@
                 material.fallback = '当前页读取失败，已回退检索其他页；不得把这些片段称为当前页全文。';
                 return fallback();
               });
+          }
+          // A concrete selection already carries both content and position;
+          // attaching BM25 excerpts on top duplicated the material without
+          // adding information the model can use.
+          if (selected && text(selected.text).trim()) {
+            material.kind = 'selection';
+            return [];
           }
           if (typeof adapter.retrieveEvidence !== 'function') return [];
           return adapter.retrieveEvidence(attachmentKey, clean, 8);
@@ -1066,6 +1076,7 @@
       else if (action === 'webai-chat-send') sendMessage(refs.chatInput.value);
       else if (action === 'webai-open') openWebAI();
       else if (action === 'webai-clear') clearChat();
+      else if (action === 'selection-clear') clearSelection();
       else if (action === 'navigate-selection' || action === 'navigate-evidence') {
         navigateTo(target.getAttribute('data-attachment-key'), target.getAttribute('data-page'));
       } else if (action === 'distill-note') writeDistillNote(Number(target.getAttribute('data-message-index')));

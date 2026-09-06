@@ -566,6 +566,7 @@ function zraCreateAddon(data) {
           retrieveEvidence,
           retrieveOverviewEvidence,
           retrieveCurrentPageEvidence,
+          clearSelection: (attachmentKey) => { selections.delete(attachmentKey); },
           getProvider: () => Zotero.Prefs.get('researchAssistant.provider') || 'gemini',
           setProvider: (provider) => Zotero.Prefs.set('researchAssistant.provider', provider),
           prepareHighlight: (args) => highlights.prepare(args),

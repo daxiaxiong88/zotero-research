@@ -163,24 +163,20 @@ test('快捷命令直接发送；部分总结没有选文时提示先选文', as
   panel.destroy();
 });
 
-test('回答中的证据卡片按纯文本渲染并提供页码跳转', async () => {
+test('回答下方不再渲染来源页码行；自由提问仍带检索证据', async () => {
   const harness = makeRelayHarness();
-  const { root, panel, adapter } = setup(makeAdapter(harness));
+  const { root, panel } = setupWithMarkdown(makeAdapter(harness));
   panel.setContext(CONTEXT);
   await settle();
   root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
   root.querySelector('[data-testid="webai-chat-send"]').click();
   await settle();
-  harness.relay.emit({ type: 'answer', id: 'task-1', text: '<img src=x onerror=window.__xss=1>', done: true });
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '回答' });
   await settle();
-  const content = root.querySelectorAll('.zrp-message-content')[1];
-  assert.equal(content.textContent, '<img src=x onerror=window.__xss=1>');
-  assert.equal(content.querySelector('img'), null);
-
-  const evidenceButton = root.querySelector('[data-zrp-action="navigate-evidence"]');
-  assert.ok(evidenceButton, 'evidence page button should exist');
-  evidenceButton.click();
-  assert.deepEqual(adapter.navigateCalls.at(-1), ['ATT-1', 3]);
+  assert.equal(root.querySelector('.zrp-message-evidence'), null, '来源行已移除');
+  // The prompt still carries retrieved evidence with page labels.
+  const call = harness.relay.calls.at(-1);
+  assert.match(call.request.messages[0].text, /（第3页）Measured improvement\./);
   panel.destroy();
 });
 
@@ -1035,5 +1031,36 @@ test('粘贴超限图片直接报错，不产生芯片', async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.match(root.querySelector('[data-testid="error"]').textContent, /超过 4MB/);
   assert.equal(root.querySelector('.zrp-image-chip').hidden, true);
+  panel.destroy();
+});
+
+test('选文独占材料：不再附检索片段；清除按钮同步清掉选文', async () => {
+  const harness = makeRelayHarness();
+  const cleared = [];
+  const adapter = makeAdapter(harness, {
+    clearSelection: (key) => cleared.push(key),
+  });
+  const { root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+
+  // A selection arrives from the reader listener.
+  panel.setSelection({ attachment_key: 'ATT-1', text: 'Selected passage.', page: 4, page_label: '4' });
+  assert.equal(root.querySelector('[data-testid="selection-card"]').hidden, false);
+
+  root.querySelector('[data-testid="webai-chat-input"]').value = '这段在讲什么？';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  const call = harness.relay.calls.at(-1);
+  const prompt = call.request.messages[0].text;
+  assert.match(prompt, /Selected passage\./);
+  assert.match(prompt, /已选原文（本轮仅提供选文，未附其他检索片段）/);
+  assert.doesNotMatch(prompt, /Measured improvement\./, 'retrieved evidence not attached when a selection exists');
+  assert.equal(adapter.evidenceCalls, undefined, 'retrieval skipped entirely');
+
+  // Clear button removes the card and notifies the bootstrap snapshot.
+  root.querySelector('[data-testid="selection-clear"]').click();
+  assert.equal(root.querySelector('[data-testid="selection-card"]').hidden, true);
+  assert.deepEqual(cleared, ['ATT-1']);
   panel.destroy();
 });
