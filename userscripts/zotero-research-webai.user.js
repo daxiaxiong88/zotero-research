@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.3
+// @version      1.0.4
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -742,16 +742,28 @@
           this.onNewData('', true);
           return;
         }
-        // Paste images first: the page registers an upload indicator, then the
-        // text lands in the same input, exactly like a manual screenshot flow.
+        // Deliver images through the site's real upload channel, then verify
+        // an attachment actually registered before sending text. On any doubt
+        // the text stays in the input and the user pastes manually — a wrong
+        // auto-send is worse than one extra click.
         if (images.length) {
-          const pasted = await this.pasteImages(images);
-          if (!pasted) {
+          const before = this.attachmentCount();
+          const channel = await this.deliverImages(images);
+          await sleep(1600);
+          const registered = channel && this.uploadRegistered(before);
+          if (!registered) {
             this.isSendingUpdate = false;
-            await this.reportFailure('网页输入框未接受粘贴的截图，请手动粘贴图片后重发文字。');
+            this.manualBaseline = this.captureBaseline(this.config.input.message);
+            this.awaitingManualSend = true;
+            this.startDomWatcher();
+            setStatus(channel
+              ? '截图通道 ' + channel + ' 已尝试但未确认；请手动 Ctrl+V 后发送'
+              : '无法投递截图：请手动 Ctrl+V 粘贴后发送');
+            notify('截图未确认进入网页：请在输入框手动 Ctrl+V（剪贴板仍是那张图），再点发送；文字已自动填好。');
+            if (prompt) await this.fillInput(this.config.input.text, prompt);
+            await this.notifySidebar('网页未确认收到截图：请在网页输入框手动 Ctrl+V 粘贴截图（剪贴板仍是刚才那张），然后点击发送；问题文字已自动填好。');
             return;
           }
-          await sleep(1500);
         }
         const inputConfig = this.config.input.text;
         let filled = prompt ? await this.fillInput(inputConfig, prompt) : true;
@@ -907,30 +919,93 @@
       return bytes;
     }
 
-    /** Paste task images into the site input as files (screenshot flow). */
-    async pasteImages(images) {
-      const input = this.findUsable(this.config.input.text.selector)
-        || document.querySelector(this.config.input.text.selector);
-      if (!input) return false;
-      input.focus();
+    /** Build transfer files from task images; extension matches media type. */
+    buildImageFiles(images) {
+      if (typeof DataTransfer !== 'function') return null;
       const transfer = new DataTransfer();
       let added = 0;
       for (const image of images.slice(0, 4)) {
         try {
           const bytes = this.base64ToBytes(image.data);
-          const name = 'zotero-' + Date.now() + '-' + added + '.png';
-          transfer.items.add(new File([bytes], name, { type: image.mediaType || 'image/png' }));
+          const type = /^image\/jpe?g$/i.test(image.mediaType || '') ? 'image/jpeg' : (image.mediaType || 'image/png');
+          const extension = type === 'image/jpeg' ? 'jpg' : (type.split('/')[1] || 'png');
+          transfer.items.add(new File([bytes], `zotero-${Date.now()}-${added}.${extension}`, { type }));
           added += 1;
         } catch (error) {
           console.warn('[Zotero relay] image build failed', error);
         }
       }
-      if (!added) return false;
-      input.dispatchEvent(new ClipboardEvent('paste', {
-        bubbles: true, cancelable: true, clipboardData: transfer,
-      }));
-      await sleep(400);
-      return true;
+      return added ? transfer : null;
+    }
+
+    /**
+     * Deliver task images through the channel the site actually accepts:
+     * 1. a real input[type=file] (ChatGPT/Claude/Kimi) — files assignment is
+     *    the most reliable path, no synthetic-paste trust checks involved;
+     * 2. drop event on the input area (DeepSeek/AIStudio listen for drag);
+     * 3. paste event (Gemini and generic sites).
+     * Returns the channel name, or null when every channel failed.
+     */
+    async deliverImages(images) {
+      const transfer = this.buildImageFiles(images);
+      if (!transfer) return null;
+
+      const fileInput = document.querySelector('input[type=file]:not([accept*="audio"]):not([accept*="video"])');
+      if (fileInput) {
+        try {
+          fileInput.files = transfer.files;
+          fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+          fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+          await sleep(600);
+          return 'file-input';
+        } catch (error) {
+          console.warn('[Zotero relay] file-input channel failed', error);
+        }
+      }
+
+      const input = this.findUsable(this.config.input.text.selector)
+        || document.querySelector(this.config.input.text.selector)
+        // Site redesign fallback: any visible composer still accepts drops.
+        || document.querySelector('textarea, [contenteditable="true"]');
+      if (input) {
+        input.focus();
+        try {
+          input.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+          input.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+          input.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+          await sleep(600);
+          return 'drop';
+        } catch (error) {
+          console.warn('[Zotero relay] drop channel failed', error);
+        }
+        try {
+          input.dispatchEvent(new ClipboardEvent('paste', {
+            bubbles: true, cancelable: true, clipboardData: transfer,
+          }));
+          await sleep(400);
+          return 'paste';
+        } catch (error) {
+          console.warn('[Zotero relay] paste channel failed', error);
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Rough check that an upload actually registered: the count of images or
+     * attachment-ish nodes around the composer grew after delivery.
+     */
+    uploadRegistered(before) {
+      const now = document.querySelectorAll(
+        'img[src^="blob:"], img[src^="data:"], [class*="attachment" i], [class*="upload" i] img',
+      ).length;
+      return now > before;
+    }
+
+    attachmentCount() {
+      return document.querySelectorAll(
+        'img[src^="blob:"], img[src^="data:"], [class*="attachment" i], [class*="upload" i] img',
+      ).length;
     }
 
     /** True when the live input actually holds the expected text (tail match). */
@@ -1191,5 +1266,6 @@
     globalThis.__ZRA_TEST__.parseAIStudio = parseAIStudio;
     globalThis.__ZRA_TEST__.mergeStreamText = mergeStreamText;
     globalThis.__ZRA_TEST__.siteConfig = siteConfig;
+    globalThis.__ZRA_TEST__.connector = connector;
   }
 })();

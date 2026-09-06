@@ -26,6 +26,16 @@ function setup(url = 'https://gemini.google.com/app') {
   dom.window.unsafeWindow = dom.window;
   // Parser-only fixtures do not run browser lifecycle timers.
   dom.window.setInterval = () => 0;
+  // jsdom lacks DataTransfer; the userscript only needs files/items here.
+  dom.window.DataTransfer = class {
+    constructor() { this.files = []; this.items = { add: (file) => this.files.push(file) }; }
+  };
+  dom.window.DragEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.dataTransfer = init && init.dataTransfer; }
+  };
+  dom.window.ClipboardEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.clipboardData = init && init.clipboardData; }
+  };
   dom.window.eval(SOURCE);
   return dom.window.__ZRA_TEST__;
 }
@@ -197,4 +207,49 @@ test('disconnect compensates a late successful handshake', async (t) => {
   await settleBrowser();
   assert.equal(h.requests.filter(r => r.payload.action === 'disconnect').length, 2);
   assert.equal(h.requests.some(r => r.payload.action === 'poll'), false);
+});
+
+test('deliverImages 投递文件且失败时走 drop 通道并携带文件', async () => {
+  const dom = new JSDOM(
+    '<!doctype html><body><textarea id="t"></textarea></body>',
+    { url: 'https://gemini.google.com/app', runScripts: 'outside-only', pretendToBeVisual: true },
+  );
+  const values = new Map();
+  dom.window.__ZRA_TEST__ = {};
+  Object.assign(dom.window, {
+    GM_getValue: (k, f) => values.get(k) ?? f,
+    GM_setValue: (k, v) => values.set(k, v),
+    GM_addValueChangeListener: () => {},
+    GM_registerMenuCommand: () => {},
+    GM_notification: () => {},
+    GM_info: { script: { version: 'test' } },
+    GM_xmlhttpRequest: () => ({ abort() {} }),
+    unsafeWindow: dom.window,
+  });
+  dom.window.setInterval = () => 0;
+  // jsdom lacks DataTransfer; the userscript only needs files/items here.
+  dom.window.DataTransfer = class {
+    constructor() { this.files = []; this.items = { add: (file) => this.files.push(file) }; }
+  };
+  dom.window.DragEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.dataTransfer = init && init.dataTransfer; }
+  };
+  dom.window.ClipboardEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.clipboardData = init && init.clipboardData; }
+  };
+  dom.window.eval(SOURCE);
+  const connector = dom.window.__ZRA_TEST__.connector;
+  assert.ok(connector, 'connector exported for tests');
+
+  let droppedFiles = 0;
+  const textarea = dom.window.document.getElementById('t');
+  textarea.addEventListener('drop', (event) => {
+    droppedFiles = event.dataTransfer ? event.dataTransfer.files.length : 0;
+  });
+
+  const channel = await connector.deliverImages([
+    { data: Buffer.from('fakepng').toString('base64'), mediaType: 'image/png' },
+  ]);
+  assert.equal(channel, 'drop', 'falls through to the drop channel');
+  assert.equal(droppedFiles, 1, 'drop event carries the built file');
 });
