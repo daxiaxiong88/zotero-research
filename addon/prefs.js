@@ -5,3 +5,4 @@ pref("extensions.zotero.researchAssistant.apiBaseUrl", "");
 pref("extensions.zotero.researchAssistant.apiModel", "");
 pref("extensions.zotero.researchAssistant.apiKey", "");
 pref("extensions.zotero.researchAssistant.uiFontSize", "m");
+pref("extensions.zotero.researchAssistant.provider", "gemini");

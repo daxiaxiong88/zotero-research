@@ -91,7 +91,7 @@ function zraCreateAddon(data) {
     return { protocol: resolved, baseUrl, model, apiKey };
   }
 
-  async function callModelAPI({ messages, onDelta, attachment }) {
+  async function callModelAPI({ messages, onDelta, attachment, signal }) {
     const config = getAPIConfig();
     if (!config.baseUrl || !config.model) {
       throw new Error('API 未配置：请在插件设置中填写，或从 CC Switch 导入。');
@@ -101,9 +101,9 @@ function zraCreateAddon(data) {
     }
     const emit = (delta) => { if (typeof onDelta === 'function') onDelta(delta); };
     if (config.protocol === 'anthropic') {
-      return callAnthropicAPI(config, messages, emit, attachment || null);
+      return callAnthropicAPI(config, messages, emit, attachment || null, signal);
     }
-    return callOpenAIAPI(config, messages, emit);
+    return callOpenAIAPI(config, messages, emit, signal);
   }
 
   async function readSSEStream(response, handleEvent) {
@@ -125,7 +125,7 @@ function zraCreateAddon(data) {
     if (tail.trim().startsWith('data:')) handleEvent(tail.trim().slice(5).trim());
   }
 
-  async function callAnthropicAPI(config, messages, emit, attachment) {
+  async function callAnthropicAPI(config, messages, emit, attachment, signal) {
     const base = config.baseUrl.replace(/\/+$/, '');
     const headers = {
       'Content-Type': 'application/json',
@@ -157,7 +157,7 @@ function zraCreateAddon(data) {
       ];
     }
     const response = await fetch(base + '/v1/messages', {
-      method: 'POST', headers,
+      method: 'POST', headers, signal,
       body: JSON.stringify({
         model: config.model, max_tokens: 16000, stream: true, messages: payloadMessages,
       }),
@@ -187,13 +187,13 @@ function zraCreateAddon(data) {
     return { thinking, text };
   }
 
-  async function callOpenAIAPI(config, messages, emit) {
+  async function callOpenAIAPI(config, messages, emit, signal) {
     let base = config.baseUrl.replace(/\/+$/, '');
     if (!/\/v\d+$/.test(base)) base += '/v1';
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
     const response = await fetch(base + '/chat/completions', {
-      method: 'POST', headers,
+      method: 'POST', headers, signal,
       body: JSON.stringify({ model: config.model, max_tokens: 16000, stream: true, messages }),
     });
     if (!response.ok || !response.body) {
@@ -270,6 +270,41 @@ function zraCreateAddon(data) {
   async function retrieveEvidence(attachmentKey, query, topK) {
     const pages = await pdfPages(attachmentKey);
     return ZoteroResearchRelay.rankEvidence(pages, query, topK || 6);
+  }
+
+  /** 1-based page the reader currently shows for this attachment, else null. */
+  function currentReaderPage(attachmentKey) {
+    try {
+      const win = Zotero.getMainWindow();
+      const reader = win && Zotero.Reader.getByTabID(win.Zotero_Tabs.selectedID);
+      if (!reader) return null;
+      const opened = Zotero.Items.get(reader.itemID);
+      if (!opened || opened.key !== attachmentKey) return null;
+      const viewState = reader._internalReader && reader._internalReader._lastViewState;
+      const pageIndex = viewState ? viewState.pageIndex : null;
+      return Number.isInteger(pageIndex) && pageIndex >= 0 ? pageIndex + 1 : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** Evidence spanning exactly the reader's current page, or null to fall back. */
+  async function retrieveCurrentPageEvidence(attachmentKey) {
+    const page = currentReaderPage(attachmentKey);
+    if (!page) return null;
+    const pages = await pdfPages(attachmentKey);
+    const found = pages.find((entry) => entry.number === page);
+    if (!found || !String(found.text || '').trim()) return null;
+    return {
+      page,
+      spans: [{
+        evidence_id: 'p' + String(page) + ':c1',
+        page,
+        chunk_index: 1,
+        text: String(found.text).slice(0, 12000),
+        score: 1,
+      }],
+    };
   }
 
   async function navigate(key, page) {
@@ -396,6 +431,9 @@ function zraCreateAddon(data) {
           getFontSize,
           setFontSize,
           retrieveEvidence,
+          retrieveCurrentPageEvidence,
+          getProvider: () => Zotero.Prefs.get('researchAssistant.provider') || 'gemini',
+          setProvider: (provider) => Zotero.Prefs.set('researchAssistant.provider', provider),
           prepareHighlight: (args) => highlights.prepare(args),
           commitHighlight: async (preview) => highlights.commit(preview, true),
           openSettings: () => Zotero.Utilities.Internal.openPreferences(preferenceID),
@@ -586,7 +624,8 @@ function zraCreateAddon(data) {
       try { delete Zotero.Server.Endpoints[RELAY_ENDPOINT_PATH]; } catch (_) {}
       for (const doc of documents) {
         doc.getElementById('zotero-research-styles')?.remove();
-        doc.querySelector('link[href="zotero-research.ftl"]')?.remove();
+        // insertFTLIfNeeded adds <link rel="localization" href="…/zotero-research.ftl">.
+        doc.querySelector('link[rel="localization"][href$="zotero-research.ftl"]')?.remove();
       }
       for (const win of Array.from(windowListeners.keys())) this.removeWindow(win);
       documents.clear();

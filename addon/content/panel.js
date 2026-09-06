@@ -21,6 +21,10 @@
     ['upload-material', '上传材料', '请保持当前对话上下文；我将上传论文相关材料（附件/截图/笔记），上传完成后结合材料回答我的后续问题。'],
   ];
 
+  // Commands that mean "the page I am reading right now": they resolve the
+  // reader's current page and scope the evidence to it when possible.
+  var PAGE_SCOPED_COMMANDS = { 'summary-page': true, 'translate-page': true };
+
   function isObject(value) {
     return value !== null && typeof value === 'object';
   }
@@ -107,6 +111,7 @@
     var FONT_SIZES = ['s', 'm', 'l', 'xl'];
     var FONT_LABELS = { s: 'A−', m: 'A', l: 'A+', xl: 'A++' };
     var refs = {};
+    var apiAbort = null;
 
     var root = createElement(document, 'section', {
       className: 'zrp-panel',
@@ -156,7 +161,6 @@
     function applyFontSize() {
       var size = FONT_SIZES.indexOf(state.fontSize) >= 0 ? state.fontSize : 'm';
       root.setAttribute('data-size', size);
-      setText(refs.fontDecrease, FONT_SIZES.indexOf(size) > 0 ? 'A−' : 'A−');
       refs.fontDecrease.disabled = FONT_SIZES.indexOf(size) === 0;
       refs.fontIncrease.disabled = FONT_SIZES.indexOf(size) === FONT_SIZES.length - 1;
       if (rpcAdapter && typeof rpcAdapter.setFontSize === 'function') {
@@ -256,6 +260,7 @@
       chatHeader.appendChild(refs.webaiProvider);
       refs.webaiOpen = addButton(chatHeader, 'webai-open', '打开网页', 'webai-open', 'zrp-plain-button');
       refs.webaiClear = addButton(chatHeader, 'webai-clear', '清空', 'webai-clear', 'zrp-plain-button');
+      refs.webaiClear.setAttribute('title', '清空侧栏本地记录；网页 AI 中的对话上下文不受影响，换新对话请用「打开网页」');
       chatSection.appendChild(chatHeader);
 
       refs.chatMessages = createElement(document, 'div', {
@@ -480,7 +485,7 @@
       renderMessages();
     }
 
-    function sendMessage(message) {
+    function sendMessage(message, options) {
       if (destroyed || state.queueing || state.pendingTaskId) return;
       if (!state.context || !state.context.attachment_key) {
         setError('请先在 Zotero 中打开一篇 PDF 文献。');
@@ -492,6 +497,7 @@
       }
       var clean = text(message).trim();
       if (!clean) { refs.chatInput.focus(); return; }
+      var scopePage = Boolean(options && options.scopePage);
       var selected = currentSelection();
       var context = state.context;
       var generation = contextGeneration;
@@ -505,6 +511,20 @@
       renderMessages();
       Promise.resolve()
         .then(function gatherEvidence() {
+          // Page-scoped commands first try the reader's current page; when it
+          // is unavailable (library view, no text layer, older adapter) they
+          // fall back to the usual full-text retrieval.
+          if (scopePage && typeof adapter.retrieveCurrentPageEvidence === 'function') {
+            var fallback = function fallbackEvidence() {
+              if (typeof adapter.retrieveEvidence !== 'function') return [];
+              return adapter.retrieveEvidence(attachmentKey, clean, 8);
+            };
+            return Promise.resolve(adapter.retrieveCurrentPageEvidence(attachmentKey))
+              .then(function useScoped(scoped) {
+                if (scoped && Array.isArray(scoped.spans) && scoped.spans.length) return scoped.spans;
+                return fallback();
+              }, fallback);
+          }
           if (typeof adapter.retrieveEvidence !== 'function') return [];
           return adapter.retrieveEvidence(attachmentKey, clean, 8);
         })
@@ -538,6 +558,8 @@
           var assistantAt = state.messages.indexOf(assistant);
           if (assistantAt >= 0) state.messages.splice(assistantAt, 1);
           state.pendingTaskId = null;
+          // Give the question back so a failed send never costs the typing.
+          if (!refs.chatInput.value) refs.chatInput.value = clean;
           renderMessages();
           setError(text(error && error.message, '消息发送失败。'));
         });
@@ -614,6 +636,8 @@
         attachmentKey: attachment ? context.attachment_key : null,
         onDelta: applyDelta,
       };
+      apiAbort = typeof AbortController === 'function' ? new AbortController() : null;
+      if (apiAbort) request.signal = apiAbort.signal;
       Promise.resolve()
         .then(function loadAttachment() {
           if (!attachment) return null;
@@ -630,6 +654,7 @@
         })
         .then(function finished(result) {
           if (destroyed || generation !== contextGeneration) return;
+          apiAbort = null;
           thinking = (result && result.thinking) || thinking;
           answer = (result && result.text) || answer;
           assistant.content = ((thinking ? '<think>' + thinking + '</think>\n' : '') + answer)
@@ -640,6 +665,7 @@
         })
         .catch(function apiError(error) {
           if (destroyed || generation !== contextGeneration) return;
+          apiAbort = null;
           assistant.pending = false;
           assistant.error = text(error && error.message, 'API 调用失败。');
           state.apiBusy = false;
@@ -661,11 +687,19 @@
 
     function clearChat() {
       contextGeneration += 1;
+      if (apiAbort) {
+        try { apiAbort.abort(); } catch (_) { /* already settled */ }
+        apiAbort = null;
+      }
       state.queueing = false;
       state.pendingTaskId = null;
       state.messages = [];
       setError('');
       renderMessages();
+      if (!isApiMode()) {
+        // Web pages keep their own conversation; only a fresh page truly resets it.
+        setStatus('本地记录已清空；网页 AI 中的旧对话仍在，点「打开网页」换一个新对话即可彻底重来。');
+      }
     }
 
     function runQuick(command) {
@@ -675,7 +709,7 @@
         setError('请先在 PDF 中选中文本，再使用“部分总结”。');
         return;
       }
-      sendMessage(entry[2]);
+      sendMessage(entry[2], { scopePage: Boolean(PAGE_SCOPED_COMMANDS[command]) });
     }
 
     function navigateTo(attachmentKey, page) {
@@ -713,13 +747,21 @@
     function onChange(event) {
       if (event.target !== refs.webaiProvider) return;
       var next = event.target.value;
-      if (PROVIDERS[next]) state.provider = next;
+      if (PROVIDERS[next]) {
+        state.provider = next;
+        if (rpcAdapter && typeof rpcAdapter.setProvider === 'function') {
+          try { rpcAdapter.setProvider(next); } catch (_) { /* preference is best-effort */ }
+        }
+      }
       renderSession();
       renderMessages();
     }
 
     function onKeyDown(event) {
       if (event.target !== refs.chatInput) return;
+      // IME composition (e.g. Chinese pinyin): Enter confirms the candidate,
+      // it must not send the message.
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Enter' && !event.shiftKey && !(event.ctrlKey || event.metaKey)) {
         event.preventDefault();
         sendMessage(refs.chatInput.value);
@@ -730,6 +772,13 @@
     if (adapter && typeof adapter.getFontSize === 'function') {
       try { state.fontSize = adapter.getFontSize() || 'm'; } catch (_) { state.fontSize = 'm'; }
     }
+    if (rpcAdapter && typeof rpcAdapter.getProvider === 'function') {
+      try {
+        var savedProvider = rpcAdapter.getProvider();
+        if (PROVIDERS[savedProvider]) state.provider = savedProvider;
+      } catch (_) { /* keep the default provider */ }
+    }
+    refs.webaiProvider.value = state.provider;
     applyFontSize();
     refs.selection = root.querySelector('[data-testid="selection-card"]');
     listen(root, 'click', onClick);
@@ -770,6 +819,10 @@
       focusQuestion() { refs.chatInput.focus(); },
       destroy() {
         destroyed = true;
+        if (apiAbort) {
+          try { apiAbort.abort(); } catch (_) { /* already settled */ }
+          apiAbort = null;
+        }
         cleanups.forEach(function cleanup(fn) { fn(); });
         if (root.parentNode) root.parentNode.removeChild(root);
       },

@@ -222,6 +222,9 @@
     function enqueueTask({ messages, meta }) {
       if (!Array.isArray(messages) || !messages.length) throw new Error('任务内容不能为空。');
       if (queue.length >= MAX_QUEUE) throw new Error('待处理任务过多，请等待当前任务完成。');
+      // Completed records are delivered already; drop the stale ones so a long
+      // Zotero session does not accumulate every answer it ever produced.
+      prune();
       sequence += 1;
       const id = 'task-' + String(sequence) + '-' + Math.random().toString(36).slice(2, 10);
       const task = {
@@ -277,7 +280,7 @@
     function prune() {
       const cutoff = now() - 30 * 60 * 1000;
       for (const [id, task] of tasks) {
-        if (task.complete && task.completedAt && task.completedAt < cutoff) tasks.delete(id);
+        if (task.complete && Number.isFinite(task.completedAt) && task.completedAt < cutoff) tasks.delete(id);
       }
     }
 

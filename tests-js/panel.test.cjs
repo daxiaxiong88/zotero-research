@@ -460,3 +460,101 @@ test('快捷命令已精简且“上传材料”仅网页模式显示', async ()
   assert.equal(root.querySelector('[data-testid="shortcut-summary"]'), null);
   panel.destroy();
 });
+
+test('“总结本页”优先使用阅读器当前页证据，取不到时回退全文检索', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    retrieveCurrentPageEvidence(key) {
+      this.scopedCalls = this.scopedCalls || [];
+      this.scopedCalls.push(key);
+      return Promise.resolve(this.scopedResult);
+    },
+  });
+  const { root, panel } = setup(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+
+  // Current page resolved: evidence comes from that page, not BM25.
+  adapter.scopedResult = {
+    page: 5,
+    spans: [{ evidence_id: 'p5:c1', page: 5, chunk_index: 1, text: '本页核心内容', score: 1 }],
+  };
+  root.querySelector('[data-testid="quick-summary-page"]').click();
+  await settle();
+  assert.deepEqual(adapter.scopedCalls, ['ATT-1']);
+  assert.equal(adapter.evidenceCalls, undefined, 'scoped hit must not fall back to full-text retrieval');
+  assert.match(harness.relay.calls[0].request.messages[0].text, /（第5页）本页核心内容/);
+
+  harness.relay.emit({ type: 'answer', id: 'task-1', text: '好', done: true });
+  await settle();
+
+  // No reader page available: falls back to the usual retrieval.
+  adapter.scopedResult = null;
+  root.querySelector('[data-testid="quick-translate-page"]').click();
+  await settle();
+  assert.equal(adapter.evidenceCalls.length, 1, 'missing page falls back to full-text retrieval');
+  panel.destroy();
+});
+
+test('“总结本页”定位出错时同样回退全文检索而不是报错', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    retrieveCurrentPageEvidence: () => Promise.reject(new Error('reader exploded')),
+  });
+  const { root, panel } = setup(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="quick-summary-page"]').click();
+  await settle();
+  assert.equal(adapter.evidenceCalls.length, 1);
+  assert.equal(root.querySelector('[data-testid="error"]').hidden, true);
+  assert.equal(harness.relay.calls.length, 1);
+  panel.destroy();
+});
+
+test('发送失败时把问题放回输入框', async () => {
+  const harness = makeRelayHarness();
+  harness.setQueueResult(new Error('待处理任务过多'));
+  const { root, panel } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="webai-chat-input"]').value = '不想重打的问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /待处理任务过多/);
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').value, '不想重打的问题');
+  panel.destroy();
+});
+
+test('提供方选择持久化并在下次挂载时恢复', async () => {
+  const harness = makeRelayHarness();
+  const saved = [];
+  const adapter = makeAdapter(harness, {
+    getProvider: () => 'kimi',
+    setProvider: (provider) => saved.push(provider),
+  });
+  const { dom, root, panel } = setup(adapter);
+  assert.equal(root.querySelector('[data-testid="webai-provider"]').value, 'kimi');
+  root.querySelector('[data-testid="webai-provider"]').value = 'claude';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  assert.deepEqual(saved, ['claude']);
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  assert.equal(harness.relay.calls.at(-1).request.meta.provider, 'claude');
+  panel.destroy();
+});
+
+test('网页模式清空后提示网页上下文仍在', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setup(makeAdapter(harness));
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="quick-summary-page"]').click();
+  await settle();
+  root.querySelector('[data-testid="webai-clear"]').click();
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /旧对话仍在/);
+  panel.destroy();
+});

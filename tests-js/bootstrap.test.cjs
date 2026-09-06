@@ -169,3 +169,48 @@ test('evidence extraction uses Zotero 10 getFullText with attachment ID and pres
   assert.equal(spans[0].page, 3, 'blank first pages must not shift citations');
   await h.context.shutdown({}, 4);
 });
+
+test('retrieveCurrentPageEvidence reads the reader page and scopes evidence to it', async () => {
+  const h = runtime();
+  h.context.zraHash = () => 'fixture-hash';
+  h.context.IOUtils = { stat: async () => ({ size: 1024, lastModified: 1234 }) };
+  const item = {
+    id: 42, key: 'PDFTEST1', libraryID: 1, attachmentContentType: 'application/pdf',
+    isAttachment: () => true, isFileAttachment: () => true,
+    getFilePathAsync: async () => 'D://fixture.pdf',
+  };
+  h.context.Zotero.Items = {
+    getByLibraryAndKey: () => item,
+    get: (id) => (id === 42 ? item : { id, key: 'OTHERKEY1' }),
+  };
+  h.context.Zotero.Libraries.get = () => ({ editable: true });
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => ({ text: 'p1\fp2\fp3\fp4\fCurrent page text', extractedPages: 5, totalPages: 5 }),
+  };
+  const reader = { itemID: 42, _internalReader: { _lastViewState: { pageIndex: 4 } } };
+  h.context.Zotero.getMainWindow = () => ({ Zotero_Tabs: { selectedID: 'tab-1' } });
+  h.context.Zotero.Reader.getByTabID = () => reader;
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  let adapter;
+  h.context.ZoteroResearchPanel.mount = (_body, value) => {
+    adapter = value;
+    return { setContext() {}, destroy() {} };
+  };
+  const doc = {
+    defaultView: {}, createElementNS: () => ({}), documentElement: { appendChild() {} },
+    getElementById: () => null, querySelector: () => null,
+  };
+  const body = { ownerDocument: doc, appendChild() {}, querySelector: () => null, querySelectorAll: () => [] };
+  h.registrations.section.onRender({ body, doc, item: { id: 42 } });
+
+  const scoped = await adapter.retrieveCurrentPageEvidence('PDFTEST1');
+  assert.equal(scoped.page, 5, 'zero-based reader pageIndex becomes 1-based page');
+  assert.equal(scoped.spans.length, 1);
+  assert.equal(scoped.spans[0].page, 5);
+  assert.match(scoped.spans[0].text, /Current page text/);
+
+  // A reader showing a different attachment yields no scoped evidence.
+  reader.itemID = 99;
+  assert.equal(await adapter.retrieveCurrentPageEvidence('PDFTEST1'), null);
+  await h.context.shutdown({}, 4);
+});

@@ -36,7 +36,7 @@
   overflow-wrap: anywhere;
 }
 
-.zrp-panel-placeholder[data-zrp-error="true"] {
+.zrp-panel-placeholder[data-zrp-error] {
   color: var(--zrp-danger);
 }
 

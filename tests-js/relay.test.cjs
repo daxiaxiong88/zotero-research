@@ -215,3 +215,15 @@ test('progress updates refresh the claim heartbeat and carry notices', async () 
   const progress = events.find((event) => event.type === 'progress');
   assert.equal(progress.notice, '请到网页手动点击发送');
 });
+
+test('enqueueTask prunes completed tasks older than 30 minutes', async () => {
+  const { store, tick } = makeStore();
+  connect(store);
+  const id = store.enqueueTask({ messages: [{ text: 'q1' }], meta: {} });
+  await store.poll({ sessionSecret: SECRET }, 0);
+  store.update({ sessionSecret: SECRET, id, text: 'done', isDone: true });
+  assert.ok(store._tasks.has(id), 'completed task kept for late updates');
+  tick(31 * 60 * 1000);
+  store.enqueueTask({ messages: [{ text: 'q2' }], meta: {} });
+  assert.equal(store._tasks.has(id), false, 'stale completed task pruned on enqueue');
+});

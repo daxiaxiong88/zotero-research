@@ -1,10 +1,10 @@
-# Zotero Research 0.4.2
+# Zotero Research 0.4.7
 
 面向 Zotero 10 的网页 AI 阅读侧栏：在 Zotero 打开论文 PDF 后，用快捷命令或输入框把问题发送到当前浏览器中的 Gemini、DeepSeek、ChatGPT、Kimi、Claude 或 Google AI Studio，回答流式回到侧栏，并保留连续对话上下文。回答中的页码来源可以点击跳转回 PDF。
 
 ## 现在有什么
 
-- 快捷命令：总结本页、翻译本页、截图翻译、部分总结、全文总结、填充笔记、文献鸟瞰等。
+- 快捷命令：总结本页、翻译本页、部分总结、全文总结、填充笔记、上传材料。「总结本页 / 翻译本页」优先取 PDF 阅读器的当前页面作为证据；不在阅读器中时回退为全文检索。
 - PDF 选文同步：在阅读器选中文字后，侧栏显示原文和页码，发送时自动带上。
 - 网页 AI 自动中继：油猴脚本把侧栏消息填入已打开的网页 AI，并从网页 AI 自己的 API 流中捕获回答（含思考内容与完成信号），流式回传。
 - 同一篇论文的连续对话：网页 AI 侧保持上下文，侧栏可继续追问。
@@ -25,8 +25,8 @@ Python 部分只保留只读 MCP 服务器（供 Codex 等客户端检索证据�
 ## 快速安装
 
 1. 运行 Zotero 10，并在「设置 → 高级」开启「允许此计算机上的其他应用程序与 Zotero 通信」。
-2. 「工具 → 插件 → 齿轮 → 从文件安装插件」，选择 `dist/zotero-research-0.4.2.xpi`。
-3. 在浏览器 Tampermonkey 中安装或更新 `userscripts/zotero-research-webai.user.js`，确认脚本版本为 **1.0.1**。更新 XPI 不会自动更新浏览器脚本。
+2. 「工具 → 插件 → 齿轮 → 从文件安装插件」，选择 `dist/zotero-research-0.4.7.xpi`。
+3. 在浏览器 Tampermonkey 中安装或更新 `userscripts/zotero-research-webai.user.js`，确认脚本版本为 **1.0.2**。更新 XPI 不会自动更新浏览器脚本。
 4. 打开 Gemini、DeepSeek 等网页 AI；脚本自动连接 Zotero，右下角显示「已连接，等待 Zotero 消息」。
 5. 在 Zotero 打开一篇带 PDF 的文献，点击快捷命令或直接提问。
 
