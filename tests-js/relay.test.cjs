@@ -18,6 +18,29 @@ function makeStore(options = {}) {
 
 const SECRET = 'session-secret-0123456789';
 
+test('overview materials contain all short-paper text, independent of query language', () => {
+  const result = relay.overviewMaterial([
+    { number: 1, text: 'Abstract and methods.' },
+    { number: 2, text: '' },
+    { number: 3, text: 'Results and limitations.' },
+  ]);
+  assert.equal(result.kind, 'full-text');
+  assert.deepEqual(result.spans.map(s => [s.page, s.text]), [
+    [1, 'Abstract and methods.'], [3, 'Results and limitations.'],
+  ]);
+});
+
+test('long-paper overview includes beginning, middle and end within its explicit budget', () => {
+  const pages = Array.from({ length: 30 }, (_, i) => ({ number: i + 1, text: 'H'.repeat(2000) + 'T'.repeat(2000) }));
+  const result = relay.overviewMaterial(pages, 1600);
+  assert.equal(result.kind, 'overview-excerpts');
+  assert.ok(result.spans.some(s => s.page === 1));
+  assert.ok(result.spans.some(s => s.page > 10 && s.page < 20));
+  assert.ok(result.spans.some(s => s.page === 30));
+  assert.ok(result.spans.some(s => /^T+$/.test(s.text)), 'tail paragraphs must not disappear');
+  assert.ok(result.spans.reduce((n, s) => n + s.text.length, 0) <= 1600);
+});
+
 function connect(store, secret = SECRET) {
   const result = store.connect({ sessionSecret: secret, ai: 'Gemini', url: 'https://gemini.google.com/' });
   assert.equal(result.status, 'connected');

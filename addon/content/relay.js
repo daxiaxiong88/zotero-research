@@ -89,6 +89,32 @@
     }));
   }
 
+  /** Query-independent material for overviews; never label excerpts as full text. */
+  function overviewMaterial(pages, maxChars = 60000) {
+    const limit = Math.min(60000, Math.max(1, Math.floor(Number(maxChars) || 60000)));
+    const readable = (pages || []).filter(page => String(page.text || '').trim());
+    const total = readable.reduce((sum, page) => sum + String(page.text).length, 0);
+    const complete = readable.length > 0 && total <= limit;
+    const count = complete ? readable.length : Math.min(16, readable.length, limit);
+    const spans = [];
+    for (let index = 0; index < count; index += 1) {
+      const at = complete || count === 1 ? index : Math.round(index * (readable.length - 1) / (count - 1));
+      const page = readable[at];
+      const source = String(page.text);
+      const budget = complete ? source.length : Math.floor(limit / count);
+      const clipped = source.length > budget;
+      const parts = clipped
+        ? [source.slice(0, Math.ceil(budget / 2)), source.slice(source.length - Math.floor(budget / 2))]
+        : [source];
+      parts.filter(Boolean).forEach((part, partIndex) => spans.push({
+        evidence_id: `p${page.number}:overview${partIndex + 1}`,
+        page: page.number, chunk_index: partIndex + 1, text: part,
+        score: 0, truncated: clipped,
+      }));
+    }
+    return { kind: complete ? 'full-text' : 'overview-excerpts', spans };
+  }
+
   function createRelayStore(options) {
     const schedule = options && options.setTimeout ? options.setTimeout : setTimeout.bind(globalThis);
     const cancel = options && options.clearTimeout ? options.clearTimeout : clearTimeout.bind(globalThis);
@@ -291,7 +317,7 @@
     };
   }
 
-  const api = { createRelayStore, rankEvidence, tokenize, splitText };
+  const api = { createRelayStore, rankEvidence, overviewMaterial, tokenize, splitText };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ZoteroResearchRelay = api;
 })(globalThis);

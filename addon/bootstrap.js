@@ -361,7 +361,16 @@ function zraCreateAddon(data) {
 
   async function retrieveEvidence(attachmentKey, query, topK) {
     const pages = await pdfPages(attachmentKey);
-    return ZoteroResearchRelay.rankEvidence(pages, query, topK || 6);
+    const matched = ZoteroResearchRelay.rankEvidence(pages, query, topK || 6);
+    if (matched.length) return matched;
+    // Keyword misses (including Chinese questions about English papers) do not
+    // mean the PDF has no text. Supply a bounded, explicitly labelled overview.
+    const overview = ZoteroResearchRelay.overviewMaterial(pages, 12000);
+    return overview.spans.map(span => ({ ...span, source_kind: overview.kind, retrieval_fallback: true }));
+  }
+
+  async function retrieveOverviewEvidence(attachmentKey) {
+    return ZoteroResearchRelay.overviewMaterial(await pdfPages(attachmentKey));
   }
 
   /** 1-based page the reader currently shows for this attachment, else null. */
@@ -393,7 +402,7 @@ function zraCreateAddon(data) {
         evidence_id: 'p' + String(page) + ':c1',
         page,
         chunk_index: 1,
-        text: String(found.text).slice(0, 12000),
+        text: String(found.text),
         score: 1,
       }],
     };
@@ -527,6 +536,7 @@ function zraCreateAddon(data) {
           clearChatSession,
           createChildNote,
           retrieveEvidence,
+          retrieveOverviewEvidence,
           retrieveCurrentPageEvidence,
           getProvider: () => Zotero.Prefs.get('researchAssistant.provider') || 'gemini',
           setProvider: (provider) => Zotero.Prefs.set('researchAssistant.provider', provider),

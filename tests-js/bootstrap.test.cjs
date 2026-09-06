@@ -163,6 +163,12 @@ test('evidence extraction uses Zotero 10 getFullText with attachment ID and pres
   let spans = await adapter.retrieveEvidence('PDFTEST1', 'Seismic', 6);
   assert.equal(calls[0][0], 42, 'worker takes item ID, not filesystem path');
   assert.equal(spans[0].page, 3);
+  const overview = await adapter.retrieveOverviewEvidence('PDFTEST1');
+  assert.equal(overview.kind, 'full-text');
+  assert.deepEqual(Array.from(overview.spans, s => s.page), [1, 3]);
+  const fallback = await adapter.retrieveEvidence('PDFTEST1', '这篇论文讲什么', 6);
+  assert.ok(fallback.length > 0);
+  assert.equal(fallback[0].retrieval_fallback, true);
   // Zotero trims leading/trailing form feeds when the edge pages are blank.
   fullText = { text: 'Seismic results', extractedPages: 3, totalPages: 3 };
   spans = await adapter.retrieveEvidence('PDFTEST1', 'Seismic', 6);
