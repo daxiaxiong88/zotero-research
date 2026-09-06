@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.4
+// @version      1.0.5
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -1111,11 +1111,16 @@
           this.notifySidebar('网页未找到发送按钮：请手动点击发送，或回到侧栏重新发送。');
           return true;
         }
+        // Wall-clock deadlines, not iteration counts: background tabs clamp
+        // setTimeout to >=1s, so a 25x100ms loop would stretch to 25s and the
+        // send would visibly fire only when the tab regains focus.
+        setStatus('正在输入并发送…');
         for (let attempt = 0; attempt < 2; attempt += 1) {
           button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
           button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
           button.click();
-          for (let index = 0; index < 25; index += 1) {
+          const deadline = Date.now() + 2500;
+          while (Date.now() < deadline) {
             if (sendConfirmed()) break;
             await sleep(100);
           }
@@ -1123,7 +1128,8 @@
           // One retry: the first click can land before the page re-enables.
         }
       } else {
-        for (let index = 0; index < 30; index += 1) {
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
           if (sendConfirmed()) break;
           await sleep(100);
         }
@@ -1206,7 +1212,37 @@
   // Utilities & UI
   // ---------------------------------------------------------------------------
 
-  function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+  // Background tabs clamp page timers to >=1s (and to ~1/min after five
+  // minutes hidden). A dedicated worker's timers are exempt, so sleeps run at
+  // full speed while the tab is hidden; a plain setTimeout race keeps every
+  // call bounded even when worker creation is blocked by page CSP.
+  const sleepWaiters = new Map();
+  let sleepSequence = 0;
+  const timerWorker = (() => {
+    try {
+      const source = 'onmessage=(e)=>setTimeout(()=>postMessage(e.data.id),e.data.ms)';
+      const worker = new Worker(URL.createObjectURL(new Blob([source])));
+      worker.onmessage = (event) => {
+        const resolve = sleepWaiters.get(event.data);
+        if (resolve) { sleepWaiters.delete(event.data); resolve(); }
+      };
+      return worker;
+    } catch (_) { return null; }
+  })();
+
+  function sleep(ms) {
+    if (!timerWorker) return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const id = ++sleepSequence;
+      sleepWaiters.set(id, resolve);
+      timerWorker.postMessage({ id, ms });
+      // Safety net: if the worker died silently, the (throttled) page timer
+      // still resolves the promise, at worst ~1.5s late.
+      setTimeout(() => {
+        if (sleepWaiters.delete(id)) resolve();
+      }, ms + 1500);
+    });
+  }
 
   function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, (m) => ({
