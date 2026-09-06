@@ -183,7 +183,7 @@ function zraCreateAddon(data) {
     return { protocol: resolved, baseUrl, model, apiKey };
   }
 
-  async function callModelAPI({ messages, onDelta, attachment, signal }) {
+  async function callModelAPI({ messages, onDelta, attachment, images, signal }) {
     const config = getAPIConfig();
     if (!config.baseUrl || !config.model) {
       throw new Error('API 未配置：请在插件设置中填写，或从 CC Switch 导入。');
@@ -193,9 +193,9 @@ function zraCreateAddon(data) {
     }
     const emit = (delta) => { if (typeof onDelta === 'function') onDelta(delta); };
     if (config.protocol === 'anthropic') {
-      return callAnthropicAPI(config, messages, emit, attachment || null, signal);
+      return callAnthropicAPI(config, messages, emit, attachment || null, signal, images || []);
     }
-    return callOpenAIAPI(config, messages, emit, signal);
+    return callOpenAIAPI(config, messages, emit, signal, images || []);
   }
 
   async function readSSEStream(response, handleEvent) {
@@ -217,7 +217,7 @@ function zraCreateAddon(data) {
     if (tail.trim().startsWith('data:')) handleEvent(tail.trim().slice(5).trim());
   }
 
-  async function callAnthropicAPI(config, messages, emit, attachment, signal) {
+  async function callAnthropicAPI(config, messages, emit, attachment, signal, images = []) {
     const base = config.baseUrl.replace(/\/+$/, '');
     const headers = {
       'Content-Type': 'application/json',
@@ -227,24 +227,37 @@ function zraCreateAddon(data) {
       'x-api-key': config.apiKey,
     };
     let payloadMessages = messages;
-    if (attachment && messages.length) {
-      // Anthropic document block rides on the final user turn.
+    if ((attachment || images.length) && messages.length) {
+      // Anthropic document/image blocks ride on the final user turn.
       const last = messages[messages.length - 1];
+      const blocks = [];
+      if (attachment) {
+        blocks.push({
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: attachment.mediaType || 'application/pdf',
+            data: attachment.base64,
+          },
+        });
+      }
+      for (const image of images) {
+        const comma = String(image.dataUrl || '').indexOf(',');
+        if (comma < 0) continue;
+        blocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: image.mediaType || 'image/png',
+            data: image.dataUrl.slice(comma + 1),
+          },
+        });
+      }
       payloadMessages = [
         ...messages.slice(0, -1),
         {
           role: 'user',
-          content: [
-            {
-              type: 'document',
-              source: {
-                type: 'base64',
-                media_type: attachment.mediaType || 'application/pdf',
-                data: attachment.base64,
-              },
-            },
-            { type: 'text', text: String(last.content || '') },
-          ],
+          content: [...blocks, { type: 'text', text: String(last.content || '') }],
         },
       ];
     }
@@ -279,14 +292,29 @@ function zraCreateAddon(data) {
     return { thinking, text };
   }
 
-  async function callOpenAIAPI(config, messages, emit, signal) {
+  async function callOpenAIAPI(config, messages, emit, signal, images = []) {
     let base = config.baseUrl.replace(/\/+$/, '');
     if (!/\/v\d+$/.test(base)) base += '/v1';
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
+    let payloadMessages = messages;
+    if (images.length && messages.length) {
+      // Multimodal chat completions: image parts precede the text part on
+      // the final user turn, using data URLs.
+      const last = messages[messages.length - 1];
+      const parts = [];
+      for (const image of images) {
+        if (!/^data:image\//i.test(String(image.dataUrl || ''))) continue;
+        parts.push({ type: 'image_url', image_url: { url: image.dataUrl } });
+      }
+      payloadMessages = [
+        ...messages.slice(0, -1),
+        { role: 'user', content: [...parts, { type: 'text', text: String(last.content || '') }] },
+      ];
+    }
     const response = await fetch(base + '/chat/completions', {
       method: 'POST', headers, signal,
-      body: JSON.stringify({ model: config.model, max_tokens: 16000, stream: true, messages }),
+      body: JSON.stringify({ model: config.model, max_tokens: 16000, stream: true, messages: payloadMessages }),
     });
     if (!response.ok || !response.body) {
       const detail = await response.text().catch(() => '');

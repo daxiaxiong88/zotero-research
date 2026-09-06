@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.2
+// @version      1.0.3
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -734,18 +734,31 @@
         this.isSendingUpdate = true;
         this.resetTaskState();
         this.currentTaskId = task.id;
-        const prompt = (task.messages || []).filter((m) => m.type !== 'file').map((m) => m.text).join('\n\n');
-        if (!prompt) {
+        const textMessages = (task.messages || []).filter((m) => m.type !== 'file' && m.type !== 'image');
+        const prompt = textMessages.map((m) => m.text).join('\n\n');
+        const images = (task.messages || []).filter((m) => m.type === 'image' && m.data);
+        if (!prompt && !images.length) {
           this.isSendingUpdate = false;
           this.onNewData('', true);
           return;
         }
+        // Paste images first: the page registers an upload indicator, then the
+        // text lands in the same input, exactly like a manual screenshot flow.
+        if (images.length) {
+          const pasted = await this.pasteImages(images);
+          if (!pasted) {
+            this.isSendingUpdate = false;
+            await this.reportFailure('网页输入框未接受粘贴的截图，请手动粘贴图片后重发文字。');
+            return;
+          }
+          await sleep(1500);
+        }
         const inputConfig = this.config.input.text;
-        let filled = await this.fillInput(inputConfig, prompt);
-        if (!filled || !this.inputAccepts(inputConfig, prompt)) {
+        let filled = prompt ? await this.fillInput(inputConfig, prompt) : true;
+        if (prompt && (!filled || !this.inputAccepts(inputConfig, prompt))) {
           filled = await this.refillByReplace(inputConfig, prompt);
         }
-        if (!filled || !this.inputAccepts(inputConfig, prompt)) {
+        if (prompt && (!filled || !this.inputAccepts(inputConfig, prompt))) {
           this.isSendingUpdate = false;
           await this.reportFailure('无法把问题填入网页 AI 输入框（页面可能改版），请手动粘贴发送。');
           return;
@@ -885,6 +898,39 @@
         console.warn('[Zotero relay] fillInput', error);
         return false;
       }
+    }
+
+    base64ToBytes(base64) {
+      const binary = atob(String(base64 || ''));
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    }
+
+    /** Paste task images into the site input as files (screenshot flow). */
+    async pasteImages(images) {
+      const input = this.findUsable(this.config.input.text.selector)
+        || document.querySelector(this.config.input.text.selector);
+      if (!input) return false;
+      input.focus();
+      const transfer = new DataTransfer();
+      let added = 0;
+      for (const image of images.slice(0, 4)) {
+        try {
+          const bytes = this.base64ToBytes(image.data);
+          const name = 'zotero-' + Date.now() + '-' + added + '.png';
+          transfer.items.add(new File([bytes], name, { type: image.mediaType || 'image/png' }));
+          added += 1;
+        } catch (error) {
+          console.warn('[Zotero relay] image build failed', error);
+        }
+      }
+      if (!added) return false;
+      input.dispatchEvent(new ClipboardEvent('paste', {
+        bubbles: true, cancelable: true, clipboardData: transfer,
+      }));
+      await sleep(400);
+      return true;
     }
 
     /** True when the live input actually holds the expected text (tail match). */

@@ -614,3 +614,8 @@
 .zrp-distill-row { margin-top: 6px; gap: 6px; }
 
 .zrp-md a.zrp-md-link { cursor: pointer; }
+
+/* Pasted-screenshot chip */
+.zrp-image-chip { display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; }
+.zrp-image-chip[hidden] { display: none; }
+.zrp-image-chip .zrp-hint { color: var(--zrp-accent, #2c5cc5); }

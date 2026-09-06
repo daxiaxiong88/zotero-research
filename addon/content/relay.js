@@ -255,7 +255,20 @@
       const id = 'task-' + String(sequence) + '-' + Math.random().toString(36).slice(2, 10);
       const task = {
         id,
-        messages: messages.map((message) => ({ type: 'text', text: String(message.text || '') })),
+        messages: messages.map((message) => {
+          if (message && message.type === 'image') {
+            const data = String(message.data || '');
+            if (!data || data.length > 6_000_000) {
+              throw new Error('截图缺失或超过大小限制，请重新粘贴。');
+            }
+            return {
+              type: 'image',
+              data,
+              mediaType: String(message.mediaType || 'image/png'),
+            };
+          }
+          return { type: 'text', text: String(message.text || '') };
+        }),
         meta: meta || {},
         text: '', notice: '', done: false, complete: false, error: '', claimedAt: null, completedAt: 0,
       };

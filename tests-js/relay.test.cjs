@@ -250,3 +250,24 @@ test('enqueueTask prunes completed tasks older than 30 minutes', async () => {
   store.enqueueTask({ messages: [{ text: 'q2' }], meta: {} });
   assert.equal(store._tasks.has(id), false, 'stale completed task pruned on enqueue');
 });
+
+test('enqueueTask preserves image messages and rejects oversized ones', () => {
+  const { store } = makeStore();
+  connect(store);
+  const id = store.enqueueTask({
+    messages: [
+      { text: '请看这张截图' },
+      { type: 'image', data: 'aGVsbG8=', mediaType: 'image/png' },
+    ],
+    meta: {},
+  });
+  const messages = store._tasks.get(id).messages;
+  assert.equal(messages[0].type, 'text');
+  assert.equal(messages[1].type, 'image');
+  assert.equal(messages[1].data, 'aGVsbG8=');
+  assert.equal(messages[1].mediaType, 'image/png');
+  assert.throws(() => store.enqueueTask({
+    messages: [{ type: 'image', data: 'x'.repeat(6_000_001), mediaType: 'image/png' }],
+    meta: {},
+  }), /截图缺失或超过大小限制/);
+});

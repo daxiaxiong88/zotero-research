@@ -60,6 +60,7 @@
       'full-text': '全文提取文本（不等于已提供 PDF 图像）',
       'overview-excerpts': '跨页概览摘录（不是完整全文）',
       'full-pdf': '全文 PDF 附件', conversation: '本次阅读对话',
+      image: '用户粘贴的截图（本轮随消息提供，可能是页面或图表）',
       upload: '等待用户上传材料',
     };
     var lines = ['材料范围：' + (labels[scope] || labels.retrieved)];
@@ -191,6 +192,9 @@
     var refs = {};
     var apiAbort = null;
     var sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
+    // Pasted screenshot awaiting the next send: { dataUrl, mediaType, name }.
+    var pendingImage = null;
+    var MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
     function persistSession() {
       if (!state.context || !state.context.item_key) return;
@@ -445,6 +449,14 @@
       attachRow.appendChild(refs.attachPdf);
       attachRow.appendChild(createElement(document, 'label', { className: 'zrp-hint' }, '附带全文 PDF（需 Anthropic 协议）'));
       refs.attachRow = attachRow;
+
+      // Pasted-screenshot chip: shows what will ride along with the next send.
+      var imageChip = createElement(document, 'div', { className: 'zrp-image-chip' });
+      refs.imageChipText = createElement(document, 'span', { className: 'zrp-hint' }, '');
+      imageChip.appendChild(refs.imageChipText);
+      var removeImageButton = addButton(imageChip, 'image-remove', '移除截图', 'image-remove', 'zrp-button zrp-button-quiet');
+      refs.imageChip = imageChip;
+      imageChip.hidden = true;
       var promptRow = createElement(document, 'div', { className: 'zrp-prompt-row' });
       refs.chatInput = createElement(document, 'textarea', {
         className: 'zrp-chat-input', 'data-testid': 'webai-chat-input', rows: '3',
@@ -454,6 +466,7 @@
       refs.chatSend = addButton(promptRow, 'webai-chat-send', '↑', 'webai-chat-send', 'zrp-send-button');
       refs.chatSend.setAttribute('aria-label', '发送到网页 AI');
       chatSection.appendChild(attachRow);
+      chatSection.appendChild(imageChip);
       chatSection.appendChild(promptRow);
       refs.chatStatus = createElement(document, 'div', {
         className: 'zrp-chat-status', 'data-testid': 'webai-chat-status', role: 'status',
@@ -729,6 +742,7 @@
       var distill = Boolean(options && options.distill);
       var task = (options && options.task) || (distill ? 'distill' : 'ask');
       var hasPdf = isApiMode() && Boolean(refs.attachPdf && refs.attachPdf.checked);
+      var image = pendingImage;
       var material = { kind: 'retrieved', spans: [] };
       var selected = currentSelection();
       var context = state.context;
@@ -795,6 +809,7 @@
               + '本轮关键词未命中，提供概览文本作为背景，不代表这些段落已精确回答问题。';
           }
           material.spans = spans;
+          if (image) material.kind = 'image';
           var prepared = materialPrompt(material, selected, hasPdf);
           assistant.evidence = prepared.spans;
           // Keep original material for follow-up grounding, not a duplicate of
@@ -803,7 +818,9 @@
           var prompt = buildPrompt(clean, prepared, context, task);
           if (prompt.length > HISTORY_CHAR_LIMIT - 1000) throw new Error('本轮输入过长，请拆分问题或材料后再发送。');
           if (isApiMode()) {
-            sendViaAPI(prompt, context, assistant, outgoing, generation);
+            sendViaAPI(prompt, context, assistant, outgoing, generation, image);
+            pendingImage = null;
+            renderImageChip();
             return;
           }
           if (distill) {
@@ -813,8 +830,16 @@
                 return '我：' + pair[0].content + '\n\nAI：' + pair[1].content;
               }).join('\n\n');
           }
+          var taskMessages = [{ text: prompt }];
+          if (image) {
+            taskMessages.push({
+              type: 'image',
+              data: image.dataUrl.slice(image.dataUrl.indexOf(',') + 1),
+              mediaType: image.mediaType,
+            });
+          }
           var taskId = relayAdapter.enqueueTask({
-            messages: [{ text: prompt }],
+            messages: taskMessages,
             meta: {
               title: context.title || '',
               provider: state.provider,
@@ -822,6 +847,8 @@
               attachment_key: attachmentKey,
             },
           });
+          pendingImage = null;
+          renderImageChip();
           assistant.taskId = taskId;
           state.pendingTaskId = taskId;
           state.queueing = false;
@@ -842,7 +869,7 @@
         });
     }
 
-    function sendViaAPI(prompt, context, assistant, outgoing, generation) {
+    function sendViaAPI(prompt, context, assistant, outgoing, generation, image) {
       var config = apiConfig();
       if (!adapter || typeof adapter.callModelAPI !== 'function') {
         throw new Error('当前插件版本不支持 API 直连。');
@@ -896,6 +923,7 @@
       var request = {
         messages: history,
         attachmentKey: attachment ? context.attachment_key : null,
+        images: image ? [image] : [],
         onDelta: applyDelta,
       };
       apiAbort = typeof AbortController === 'function' ? new AbortController() : null;
@@ -1043,6 +1071,7 @@
       } else if (action === 'distill-note') writeDistillNote(Number(target.getAttribute('data-message-index')));
       else if (action === 'distill-copy') copyDistillMarkdown(Number(target.getAttribute('data-message-index')));
       else if (action === 'webai-resume') resumeWebConversation();
+      else if (action === 'image-remove') removePendingImage();
       else if (action === 'font-decrease') changeFontSize(-1);
       else if (action === 'font-increase') changeFontSize(1);
       else if (action === 'settings') openSettings();
@@ -1059,6 +1088,56 @@
       }
       renderSession();
       renderMessages();
+    }
+
+    /** Ctrl+V with an image in the clipboard attaches it to the next send. */
+    function onPaste(event) {
+      if (destroyed) return;
+      var clipboard = event.clipboardData;
+      var items = clipboard && clipboard.items;
+      if (!items || !items.length) return;
+      for (var index = 0; index < items.length; index += 1) {
+        var item = items[index];
+        if (!item || item.kind !== 'file') continue;
+        var file = item.getAsFile && item.getAsFile();
+        if (!file) continue;
+        var mediaType = String(file.type || '');
+        if (!/^image\/(png|jpe?g|webp|gif)$/i.test(mediaType)) continue;
+        event.preventDefault();
+        if (file.size > MAX_IMAGE_BYTES) {
+          setError('截图超过 4MB，请裁剪或换更小区域后重试。');
+          return;
+        }
+        var FileReaderCtor = view.FileReader || FileReader;
+        var reader = new FileReaderCtor();
+        reader.onload = function loaded() {
+          pendingImage = {
+            dataUrl: String(reader.result || ''),
+            mediaType: mediaType,
+            name: String(file.name || '剪贴板截图'),
+          };
+          setError('');
+          renderImageChip();
+          setStatus('已附截图（' + pendingImage.name + '），将随下一条消息发送。');
+        };
+        reader.onerror = function failed() { setError('读取剪贴板图片失败。'); };
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+
+    function renderImageChip() {
+      if (!refs.imageChip) return;
+      refs.imageChip.hidden = !pendingImage;
+      setText(refs.imageChipText, pendingImage
+        ? '📷 已附截图：' + pendingImage.name + '（随下一条消息发送）'
+        : '');
+    }
+
+    function removePendingImage() {
+      pendingImage = null;
+      renderImageChip();
+      setStatus('已移除截图。');
     }
 
     function onKeyDown(event) {
@@ -1088,6 +1167,7 @@
     listen(root, 'click', onClick);
     listen(root, 'change', onChange);
     listen(root, 'keydown', onKeyDown);
+    listen(root, 'paste', onPaste);
     if (typeof relayAdapter.subscribe === 'function') {
       var sessionListener = function captureSession(event) {
         if (isObject(event) && event.type === 'session') onRelaySession(event);

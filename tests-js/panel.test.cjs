@@ -957,3 +957,83 @@ test('蒸馏请求气泡显示简短说明，实际发送内容不变', async ()
   assert.equal(root.querySelector('[data-testid="quick-distill"]').getAttribute('title').includes('知识沉淀'), true);
   panel.destroy();
 });
+
+test('粘贴截图显示芯片，随消息进入 API 请求或网页任务，可移除', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    getAPIConfig: () => ({
+      protocol: 'anthropic', baseUrl: 'https://api.example.com/anthropic',
+      model: 'm', apiKey: 'k',
+    }),
+    callModelAPI(request) {
+      this.apiRequests = this.apiRequests || [];
+      this.apiRequests.push(request);
+      return Promise.resolve({ thinking: '', text: '图里是对照实验。' });
+    },
+  });
+  const { dom, root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+
+  // Paste a fake PNG from the clipboard onto the chat input.
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  const file = new dom.window.File([bytes], 'shot.png', { type: 'image/png' });
+  const paste = new dom.window.Event('paste', { bubbles: true, cancelable: true });
+  paste.clipboardData = { items: [{ kind: 'file', getAsFile: () => file }] };
+  root.querySelector('[data-testid="webai-chat-input"]').dispatchEvent(paste);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(root.querySelector('.zrp-image-chip').hidden, false, 'chip visible after paste');
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /已附截图/);
+
+  // Send in API mode: the image rides on the request.
+  root.querySelector('[data-testid="webai-provider"]').value = 'api';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  root.querySelector('[data-testid="webai-chat-input"]').value = '这张图说明了什么？';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  const request = adapter.apiRequests.at(-1);
+  assert.equal(request.images.length, 1);
+  assert.match(request.images[0].dataUrl, /^data:image\/png;base64,/);
+  assert.equal(root.querySelector('.zrp-image-chip').hidden, true, 'chip cleared after send');
+
+  // Paste again, then remove: nothing rides along.
+  const paste2 = new dom.window.Event('paste', { bubbles: true, cancelable: true });
+  paste2.clipboardData = { items: [{ kind: 'file', getAsFile: () => file }] };
+  root.querySelector('[data-testid="webai-chat-input"]').dispatchEvent(paste2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(root.querySelector('.zrp-image-chip').hidden, false);
+  root.querySelector('[data-testid="image-remove"]').click();
+  assert.equal(root.querySelector('.zrp-image-chip').hidden, true);
+
+  // Web mode: the task carries the image as an explicit message entry.
+  const paste3 = new dom.window.Event('paste', { bubbles: true, cancelable: true });
+  paste3.clipboardData = { items: [{ kind: 'file', getAsFile: () => file }] };
+  root.querySelector('[data-testid="webai-chat-input"]').dispatchEvent(paste3);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  root.querySelector('[data-testid="webai-provider"]').value = 'gemini';
+  root.querySelector('[data-testid="webai-provider"]').dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  root.querySelector('[data-testid="webai-chat-input"]').value = '图里是什么？';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  const call = harness.relay.calls.at(-1);
+  const imageEntry = call.request.messages.find((m) => m.type === 'image');
+  assert.ok(imageEntry, 'task message carries the image');
+  assert.equal(imageEntry.mediaType, 'image/png');
+  assert.match(imageEntry.data, /^[A-Za-z0-9+/]+={0,2}$/);
+  panel.destroy();
+});
+
+test('粘贴超限图片直接报错，不产生芯片', async () => {
+  const harness = makeRelayHarness();
+  const { dom, root, panel } = setupWithMarkdown(makeAdapter(harness));
+  panel.setContext(CONTEXT);
+  await settle();
+  const huge = new dom.window.File([new Uint8Array(5 * 1024 * 1024)], 'huge.png', { type: 'image/png' });
+  const paste = new dom.window.Event('paste', { bubbles: true, cancelable: true });
+  paste.clipboardData = { items: [{ kind: 'file', getAsFile: () => huge }] };
+  root.querySelector('[data-testid="webai-chat-input"]').dispatchEvent(paste);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /超过 4MB/);
+  assert.equal(root.querySelector('.zrp-image-chip').hidden, true);
+  panel.destroy();
+});
