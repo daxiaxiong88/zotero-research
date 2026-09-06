@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.6
+// @version      1.0.7
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -315,18 +315,23 @@
     }
 
     clearIdle() {
+      this.idleToken = null;
       if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     }
 
     scheduleIdle(taskId) {
       this.clearIdle();
-      this.idleTimer = setTimeout(() => {
-        this.idleTimer = null;
+      // Pace through the timer-worker sleep so a hidden tab does not stretch
+      // the idle-completion wait; a token cancels superseded schedules.
+      const token = (this.idleToken = {});
+      sleep(NETWORK_IDLE_COMPLETE_MS).then(() => {
+        if (this.idleToken !== token) return;
+        this.idleToken = null;
         const connector = this.connector;
         if (!connector.isRunning || connector.currentTaskId !== taskId
           || connector.doneSignal || !connector.accumulatedText) return;
         connector.onNewData(connector.accumulatedText, true);
-      }, NETWORK_IDLE_COMPLETE_MS);
+      });
     }
 
     parseOutput(outputConfig, allText) {
@@ -681,7 +686,12 @@
       if (nextText === this.accumulatedText && nextDone === this.doneSignal) return;
       this.clearManualFallback();
       this.accumulatedText = nextText;
-      if (nextDone) this.doneSignal = true;
+      if (nextDone) {
+        this.doneSignal = true;
+        if (this.taskStartedAt) {
+          setStatus('回答完成 ' + ((Date.now() - this.taskStartedAt) / 1000).toFixed(1) + 's');
+        }
+      }
       this.hasPendingData = true;
       this.flushData();
     }
@@ -734,6 +744,7 @@
         this.isSendingUpdate = true;
         this.resetTaskState();
         this.currentTaskId = task.id;
+        this.taskStartedAt = Date.now();
         const textMessages = (task.messages || []).filter((m) => m.type !== 'file' && m.type !== 'image');
         const prompt = textMessages.map((m) => m.text).join('\n\n');
         const images = (task.messages || []).filter((m) => m.type === 'image' && m.data);
@@ -764,6 +775,9 @@
         let filled = prompt ? await this.fillInput(inputConfig, prompt) : true;
         if (prompt && (!filled || !this.inputAccepts(inputConfig, prompt))) {
           filled = await this.refillByReplace(inputConfig, prompt);
+        }
+        if (this.taskStartedAt) {
+          setStatus('输入完成 ' + ((Date.now() - this.taskStartedAt) / 1000).toFixed(1) + 's，正在发送…');
         }
         if (prompt && (!filled || !this.inputAccepts(inputConfig, prompt))) {
           this.isSendingUpdate = false;
@@ -799,14 +813,48 @@
     }
 
     // --- input strategies (subset of the reference connector) ---
-    async waitForCondition(check, timeout) {
-      const started = Date.now();
-      while (Date.now() - started < timeout) {
-        const value = check();
+    /**
+     * Resolve with the first truthy check() result. Re-checks run on every
+     * DOM mutation and on paced sleep ticks. MutationObserver callbacks are
+     * microtasks: they run at full speed in background tabs, immune to the
+     * timer clamping that stalls a hidden page (and independent of the
+     * timer worker, which strict page CSP can block on some sites).
+     */
+    async waitForValue(check, timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      const recheck = () => {
+        try { return check() || null; } catch (_) { return null; }
+      };
+      let value = recheck();
+      if (value) return value;
+      while (Date.now() < deadline) {
+        value = await new Promise((resolve) => {
+          let settled = false;
+          let observer = null;
+          const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            if (observer) { try { observer.disconnect(); } catch (_) { } }
+            resolve(result);
+          };
+          if (typeof MutationObserver === 'function' && document.documentElement) {
+            try {
+              observer = new MutationObserver(() => { const hit = recheck(); if (hit) finish(hit); });
+              observer.observe(document.documentElement, {
+                childList: true, subtree: true, attributes: true, characterData: true,
+              });
+            } catch (_) { observer = null; }
+          }
+          const tick = Math.max(20, Math.min(250, deadline - Date.now()));
+          sleep(tick).then(() => finish(recheck()));
+        });
         if (value) return value;
-        await sleep(100);
       }
       return null;
+    }
+
+    async waitForCondition(check, timeout) {
+      return this.waitForValue(check, timeout);
     }
 
     findUsable(selector) {
@@ -1015,12 +1063,7 @@
 
     /** Poll for an upload indicator until the deadline. */
     async waitRegistered(before, timeoutMs) {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        await sleep(550);
-        if (this.registeredSince(before)) return true;
-      }
-      return false;
+      return Boolean(await this.waitForValue(() => this.registeredSince(before) || null, timeoutMs));
     }
 
     /** True when the live input actually holds the expected text (tail match). */
@@ -1134,23 +1177,18 @@
           button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
           button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
           button.click();
-          const deadline = Date.now() + 2500;
-          while (Date.now() < deadline) {
-            if (sendConfirmed()) break;
-            await sleep(100);
-          }
+          await this.waitForValue(() => (sendConfirmed() ? true : null), 2500);
           if (sendConfirmed()) break;
           // One retry: the first click can land before the page re-enables.
         }
       } else {
-        const deadline = Date.now() + 3000;
-        while (Date.now() < deadline) {
-          if (sendConfirmed()) break;
-          await sleep(100);
-        }
+        await this.waitForValue(() => (sendConfirmed() ? true : null), 3000);
       }
       if (sendConfirmed()) {
         this.clearManualFallback();
+        if (this.taskStartedAt) {
+          setStatus('已发送 ' + ((Date.now() - this.taskStartedAt) / 1000).toFixed(1) + 's，等待回答…');
+        }
         return true;
       }
       // Click never registered. Surface it in the sidebar, then watch for a
@@ -1190,36 +1228,66 @@
       const outputConfig = this.config.output;
       let lastLength = 0;
       let stableCycles = 0;
-      this.domWatchInterval = setInterval(async () => {
-        if (!this.isRunning || !this.currentTaskId) { this.stopDomWatcher(); return; }
-        if (this.awaitingManualSend && this.manualBaseline) {
-          if (!this.conversationAdvanced(this.manualBaseline)) return;
-          this.clearManualFallback();
+      let ticking = false;
+      let lastRun = 0;
+      const tick = async () => {
+        if (ticking) return;
+        ticking = true;
+        try {
+          if (!this.isRunning || !this.currentTaskId) { this.stopDomWatcher(); return; }
+          if (this.awaitingManualSend && this.manualBaseline) {
+            if (!this.conversationAdvanced(this.manualBaseline)) return;
+            this.clearManualFallback();
+          }
+          let result = null;
+          if (outputConfig?.type === 'dom' && typeof outputConfig.parser === 'function') {
+            try { result = outputConfig.parser(); } catch (_) { result = null; }
+          } else {
+            // Manual-send recovery on a network site: read the visible answer.
+            const node = [...document.querySelectorAll(this.config.input.message)].at(-1);
+            const content = node ? String(node.innerText || node.textContent || '') : '';
+            result = { text: content, isDone: false };
+          }
+          if (!result || typeof result.text !== 'string') return;
+          if (result.isDone) {
+            if (result.text.length > lastLength) { stableCycles = 0; this.onNewData(result.text, false); }
+            else if (++stableCycles >= 5) { this.onNewData(result.text, true); this.stopDomWatcher(); }
+            else this.onNewData(result.text, false);
+          } else {
+            stableCycles = 0;
+            this.onNewData(result.text, false);
+          }
+          lastLength = result.text.length;
+        } finally {
+          ticking = false;
         }
-        let result = null;
-        if (outputConfig?.type === 'dom' && typeof outputConfig.parser === 'function') {
-          try { result = outputConfig.parser(); } catch (_) { result = null; }
-        } else {
-          // Manual-send recovery on a network site: read the visible answer.
-          const node = [...document.querySelectorAll(this.config.input.message)].at(-1);
-          const content = node ? String(node.innerText || node.textContent || '') : '';
-          result = { text: content, isDone: false };
-        }
-        if (!result || typeof result.text !== 'string') return;
-        if (result.isDone) {
-          if (result.text.length > lastLength) { stableCycles = 0; this.onNewData(result.text, false); }
-          else if (++stableCycles >= 5) { this.onNewData(result.text, true); this.stopDomWatcher(); }
-          else this.onNewData(result.text, false);
-        } else {
-          stableCycles = 0;
-          this.onNewData(result.text, false);
-        }
-        lastLength = result.text.length;
-      }, 200);
+      };
+      // One shared pacer: the interval keeps working when nothing mutates,
+      // the observer reacts immediately — page intervals are throttled in
+      // background tabs, MutationObserver callbacks are not.
+      const paced = () => {
+        const nowMs = Date.now();
+        if (nowMs - lastRun < 150) return;
+        lastRun = nowMs;
+        void tick();
+      };
+      this.domWatchInterval = setInterval(paced, 200);
+      if (typeof MutationObserver === 'function' && document.documentElement) {
+        try {
+          this.domWatchObserver = new MutationObserver(paced);
+          this.domWatchObserver.observe(document.documentElement, {
+            childList: true, subtree: true, characterData: true,
+          });
+        } catch (_) { this.domWatchObserver = null; }
+      }
     }
 
     stopDomWatcher() {
       if (this.domWatchInterval) { clearInterval(this.domWatchInterval); this.domWatchInterval = null; }
+      if (this.domWatchObserver) {
+        try { this.domWatchObserver.disconnect(); } catch (_) { }
+        this.domWatchObserver = null;
+      }
     }
   }
 

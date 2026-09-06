@@ -363,8 +363,23 @@ function zraCreateAddon(data) {
     relayStore = ZoteroResearchRelay.createRelayStore();
   }
 
+  // Extracted text cache keyed by the attachment stamp (path+size+mtime):
+  // re-parsing the whole PDF on every question cost 1-3s per message.
+  const pdfTextCache = new Map();
+
   async function pdfPages(attachmentKey) {
     const info = await attachment(attachmentKey);
+    const cached = pdfTextCache.get(info.stamp);
+    if (cached) return cached;
+    const pages = await extractPdfPages(info);
+    if (pdfTextCache.size >= 6) {
+      pdfTextCache.delete(pdfTextCache.keys().next().value);
+    }
+    pdfTextCache.set(info.stamp, pages);
+    return pages;
+  }
+
+  async function extractPdfPages(info) {
     // Zotero 10 exposes getFullText(itemID); getPages exists only inside its
     // document worker, not on Zotero.PDFWorker. Full text uses \f between pages.
     const result = await Zotero.PDFWorker.getFullText(info.id, undefined, true);
