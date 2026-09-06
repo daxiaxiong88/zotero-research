@@ -558,3 +558,24 @@ test('网页模式清空后提示网页上下文仍在', async () => {
   assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /旧对话仍在/);
   panel.destroy();
 });
+
+test('回答中的 Markdown 链接点击经 openExternal 打开，非 http 链接拒绝', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness);
+  const { dom, root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="webai-chat-input"]').value = 'q';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({
+    type: 'answer', id: 'task-1', done: true,
+    text: '见 [官网](https://example.com/paper) 和 [危险](javascript:alert(1))',
+  });
+  await settle();
+  const links = root.querySelectorAll('a.zrp-md-link');
+  assert.equal(links.length, 1);
+  links[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  assert.deepEqual(adapter.openedUrls, ['https://example.com/paper']);
+  panel.destroy();
+});

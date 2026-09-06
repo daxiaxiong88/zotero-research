@@ -587,3 +587,12 @@
 /* Attach-full-PDF row (API direct mode) */
 .zrp-attach-row { display: flex; align-items: center; gap: 6px; margin: 4px 0 2px; }
 .zrp-attach-row[hidden] { display: none; }
+
+/* The item pane disables text selection on custom sections; answers,
+ * evidence and thinking blocks must stay selectable for copy. */
+.zrp-panel {
+  -moz-user-select: text;
+  user-select: text;
+}
+
+.zrp-md a.zrp-md-link { cursor: pointer; }

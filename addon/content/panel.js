@@ -730,6 +730,20 @@
     }
 
     function onClick(event) {
+      // Markdown links cannot navigate from a chrome document; open them
+      // through Zotero.launchURL instead.
+      var anchor = event.target && event.target.closest
+        ? event.target.closest('a.zrp-md-link') : null;
+      if (anchor) {
+        event.preventDefault();
+        var href = String(anchor.getAttribute('href') || '');
+        if (/^https?:/i.test(href) && adapter && typeof adapter.openExternal === 'function') {
+          try { adapter.openExternal(href); } catch (_) { /* leave the page alone */ }
+        } else {
+          setError('只支持打开 http(s) 链接。');
+        }
+        return;
+      }
       var target = actionTarget(event.target, root);
       if (!target || destroyed) return;
       var action = target.getAttribute('data-zrp-action');
