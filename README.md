@@ -30,7 +30,7 @@ Python 部分只保留只读 MCP 服务器（供 Codex 等客户端检索证据�
 
 1. 运行 Zotero 10，并在「设置 → 高级」开启「允许此计算机上的其他应用程序与 Zotero 通信」。
 2. 「工具 → 插件 → 齿轮 → 从文件安装插件」，选择 `dist/zotero-research-0.6.0.xpi`。
-3. 在浏览器 Tampermonkey 中安装或更新 `userscripts/zotero-research-webai.user.js`，确认脚本版本为 **1.0.5**。更新 XPI 不会自动更新浏览器脚本。
+3. 在浏览器 Tampermonkey 中安装或更新 `userscripts/zotero-research-webai.user.js`，确认脚本版本为 **1.0.6**。更新 XPI 不会自动更新浏览器脚本。
 4. 打开 Gemini、DeepSeek 等网页 AI；脚本自动连接 Zotero，右下角显示「已连接，等待 Zotero 消息」。
 5. 在 Zotero 打开一篇带 PDF 的文献，点击快捷命令或直接提问。
 

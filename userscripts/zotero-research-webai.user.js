@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.5
+// @version      1.0.6
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -747,21 +747,16 @@
         // the text stays in the input and the user pastes manually — a wrong
         // auto-send is worse than one extra click.
         if (images.length) {
-          const before = this.attachmentCount();
           const channel = await this.deliverImages(images);
-          await sleep(1600);
-          const registered = channel && this.uploadRegistered(before);
-          if (!registered) {
+          if (!channel) {
             this.isSendingUpdate = false;
             this.manualBaseline = this.captureBaseline(this.config.input.message);
             this.awaitingManualSend = true;
             this.startDomWatcher();
-            setStatus(channel
-              ? '截图通道 ' + channel + ' 已尝试但未确认；请手动 Ctrl+V 后发送'
-              : '无法投递截图：请手动 Ctrl+V 粘贴后发送');
-            notify('截图未确认进入网页：请在输入框手动 Ctrl+V（剪贴板仍是那张图），再点发送；文字已自动填好。');
+            setStatus('截图未能自动进入 ' + location.host + '；请手动 Ctrl+V 后发送');
+            notify('截图未进入 ' + location.host + '：请在输入框手动 Ctrl+V（剪贴板仍是那张图），再点发送；文字已自动填好。');
             if (prompt) await this.fillInput(this.config.input.text, prompt);
-            await this.notifySidebar('网页未确认收到截图：请在网页输入框手动 Ctrl+V 粘贴截图（剪贴板仍是刚才那张），然后点击发送；问题文字已自动填好。');
+            await this.notifySidebar('网页未确认收到截图（已尝试文件、粘贴、拖放三种通道）：请在网页输入框手动 Ctrl+V 粘贴截图（剪贴板仍是刚才那张），然后点击发送；问题文字已自动填好。');
             return;
           }
         }
@@ -939,25 +934,26 @@
     }
 
     /**
-     * Deliver task images through the channel the site actually accepts:
-     * 1. a real input[type=file] (ChatGPT/Claude/Kimi) — files assignment is
-     *    the most reliable path, no synthetic-paste trust checks involved;
-     * 2. drop event on the input area (DeepSeek/AIStudio listen for drag);
-     * 3. paste event (Gemini and generic sites).
-     * Returns the channel name, or null when every channel failed.
+     * Deliver task images through whichever channel the site actually
+     * accepts, verifying each attempt before falling through:
+     * 1. a real input[type=file] (files assignment, no trust checks);
+     * 2. paste event on the composer (most sites listen document-wide);
+     * 3. drop events on the composer (DeepSeek/AIStudio drag targets).
+     * Returns the channel name that verified, or null when all failed.
      */
     async deliverImages(images) {
       const transfer = this.buildImageFiles(images);
       if (!transfer) return null;
+      const before = this.attachmentSnapshot();
 
-      const fileInput = document.querySelector('input[type=file]:not([accept*="audio"]):not([accept*="video"])');
+      const fileInput = this.pickFileInput();
       if (fileInput) {
         try {
           fileInput.files = transfer.files;
           fileInput.dispatchEvent(new Event('input', { bubbles: true }));
           fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-          await sleep(600);
-          return 'file-input';
+          if (await this.waitRegistered(before, 2600)) return 'file-input';
+          console.warn('[Zotero relay] file-input channel not confirmed');
         } catch (error) {
           console.warn('[Zotero relay] file-input channel failed', error);
         }
@@ -970,42 +966,61 @@
       if (input) {
         input.focus();
         try {
-          input.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: transfer }));
-          input.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer }));
-          input.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
-          await sleep(600);
-          return 'drop';
-        } catch (error) {
-          console.warn('[Zotero relay] drop channel failed', error);
-        }
-        try {
           input.dispatchEvent(new ClipboardEvent('paste', {
             bubbles: true, cancelable: true, clipboardData: transfer,
           }));
-          await sleep(400);
-          return 'paste';
+          if (await this.waitRegistered(before, 2600)) return 'paste';
+          console.warn('[Zotero relay] paste channel not confirmed');
         } catch (error) {
           console.warn('[Zotero relay] paste channel failed', error);
+        }
+        try {
+          input.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+          input.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+          input.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+          if (await this.waitRegistered(before, 2600)) return 'drop';
+          console.warn('[Zotero relay] drop channel not confirmed');
+        } catch (error) {
+          console.warn('[Zotero relay] drop channel failed', error);
         }
       }
       return null;
     }
 
-    /**
-     * Rough check that an upload actually registered: the count of images or
-     * attachment-ish nodes around the composer grew after delivery.
-     */
-    uploadRegistered(before) {
-      const now = document.querySelectorAll(
-        'img[src^="blob:"], img[src^="data:"], [class*="attachment" i], [class*="upload" i] img',
-      ).length;
-      return now > before;
+    /** Prefer an input accepting images; any file input beats none. */
+    pickFileInput() {
+      const inputs = Array.from(document.querySelectorAll('input[type=file]'));
+      if (!inputs.length) return null;
+      return inputs.find((node) => /image/i.test(node.accept || ''))
+        || inputs.find((node) => !node.accept)
+        || inputs[0];
     }
 
-    attachmentCount() {
-      return document.querySelectorAll(
-        'img[src^="blob:"], img[src^="data:"], [class*="attachment" i], [class*="upload" i] img',
+    /** Attachment-ish node counts, globally and around the composer. */
+    attachmentSnapshot() {
+      const global = document.querySelectorAll(
+        'img[src^="blob:"], img[src^="data:"], [class*="attachment" i], [class*="file-preview" i], [class*="upload-preview" i]',
       ).length;
+      const input = this.findUsable(this.config.input.text.selector)
+        || document.querySelector('textarea, [contenteditable="true"]');
+      const scope = input && (input.closest('form, [class*="chat" i], [class*="composer" i], [class*="input" i]') || input.parentElement);
+      const composer = scope ? scope.querySelectorAll('img, [class*="attach" i], [class*="file" i]').length : 0;
+      return { global, composer };
+    }
+
+    registeredSince(before) {
+      const now = this.attachmentSnapshot();
+      return now.global > before.global || now.composer > before.composer;
+    }
+
+    /** Poll for an upload indicator until the deadline. */
+    async waitRegistered(before, timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        await sleep(550);
+        if (this.registeredSince(before)) return true;
+      }
+      return false;
     }
 
     /** True when the live input actually holds the expected text (tail match). */

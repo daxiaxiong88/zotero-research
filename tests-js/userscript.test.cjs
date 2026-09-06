@@ -209,7 +209,7 @@ test('disconnect compensates a late successful handshake', async (t) => {
   assert.equal(h.requests.some(r => r.payload.action === 'poll'), false);
 });
 
-test('deliverImages 投递文件且失败时走 drop 通道并携带文件', async () => {
+test('deliverImages 依次尝试通道，验证通过即返回', async () => {
   const dom = new JSDOM(
     '<!doctype html><body><textarea id="t"></textarea></body>',
     { url: 'https://gemini.google.com/app', runScripts: 'outside-only', pretendToBeVisual: true },
@@ -227,7 +227,7 @@ test('deliverImages 投递文件且失败时走 drop 通道并携带文件', asy
     unsafeWindow: dom.window,
   });
   dom.window.setInterval = () => 0;
-  // jsdom lacks DataTransfer; the userscript only needs files/items here.
+  // jsdom lacks these constructors; polyfill enough for the delivery paths.
   dom.window.DataTransfer = class {
     constructor() { this.files = []; this.items = { add: (file) => this.files.push(file) }; }
   };
@@ -241,15 +241,66 @@ test('deliverImages 投递文件且失败时走 drop 通道并携带文件', asy
   const connector = dom.window.__ZRA_TEST__.connector;
   assert.ok(connector, 'connector exported for tests');
 
-  let droppedFiles = 0;
+  // A paste handler that registers an attachment preview (blob img), like a
+  // real composer would; drop stays inert so the paste channel must win.
+  let pasteFiles = 0;
   const textarea = dom.window.document.getElementById('t');
-  textarea.addEventListener('drop', (event) => {
-    droppedFiles = event.dataTransfer ? event.dataTransfer.files.length : 0;
+  textarea.addEventListener('paste', (event) => {
+    pasteFiles = event.clipboardData ? event.clipboardData.files.length : 0;
+    const img = dom.window.document.createElement('img');
+    img.setAttribute('src', 'blob:zotero-test');
+    textarea.parentElement.appendChild(img);
   });
 
   const channel = await connector.deliverImages([
     { data: Buffer.from('fakepng').toString('base64'), mediaType: 'image/png' },
   ]);
-  assert.equal(channel, 'drop', 'falls through to the drop channel');
-  assert.equal(droppedFiles, 1, 'drop event carries the built file');
+  assert.equal(channel, 'paste', 'paste channel verified via the blob preview');
+  assert.equal(pasteFiles, 1, 'paste event carries the built file');
+});
+
+test('file-input 通道优先：accept 含 image 的输入框直接赋 files', async () => {
+  const dom = new JSDOM(
+    '<!doctype html><body><input type="file" id="f" accept="image/*"><div id="wrap"></div></body>',
+    { url: 'https://chatgpt.com/', runScripts: 'outside-only', pretendToBeVisual: true },
+  );
+  const values = new Map();
+  dom.window.__ZRA_TEST__ = {};
+  Object.assign(dom.window, {
+    GM_getValue: (k, f) => values.get(k) ?? f,
+    GM_setValue: (k, v) => values.set(k, v),
+    GM_addValueChangeListener: () => {},
+    GM_registerMenuCommand: () => {},
+    GM_notification: () => {},
+    GM_info: { script: { version: 'test' } },
+    GM_xmlhttpRequest: () => ({ abort() {} }),
+    unsafeWindow: dom.window,
+  });
+  dom.window.setInterval = () => 0;
+  dom.window.DataTransfer = class {
+    constructor() { this.files = []; this.items = { add: (file) => this.files.push(file) }; }
+  };
+  dom.window.DragEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.dataTransfer = init && init.dataTransfer; }
+  };
+  dom.window.ClipboardEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.clipboardData = init && init.clipboardData; }
+  };
+  dom.window.eval(SOURCE);
+  const connector = dom.window.__ZRA_TEST__.connector;
+
+  const fileInput = dom.window.document.getElementById('f');
+  // Chrome allows assigning input.files; jsdom's is read-only, so emulate it.
+  Object.defineProperty(fileInput, 'files', { value: null, writable: true, configurable: true });
+  fileInput.addEventListener('change', () => {
+    const img = dom.window.document.createElement('img');
+    img.setAttribute('src', 'blob:zotero-file');
+    dom.window.document.body.appendChild(img);
+  });
+
+  const channel = await connector.deliverImages([
+    { data: Buffer.from('fakepng').toString('base64'), mediaType: 'image/png' },
+  ]);
+  assert.equal(channel, 'file-input');
+  assert.equal(fileInput.files.length, 1);
 });
