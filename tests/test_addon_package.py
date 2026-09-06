@@ -10,6 +10,7 @@ import pytest
 
 from scripts.build_addon import (
     DEFAULT_OUTPUT,
+    PACKAGE_VERSION,
     REPO_ROOT,
     PackageError,
     build_addon,
@@ -44,7 +45,7 @@ def _make_addon_tree(root: Path) -> None:
     manifest = {
         "manifest_version": 2,
         "name": "Zotero Research",
-        "version": "0.4.6",
+        "version": PACKAGE_VERSION,
         "applications": {
             "zotero": {
                 "id": "zotero-research@local.invalid",
@@ -66,7 +67,7 @@ def _make_addon_tree(root: Path) -> None:
 def test_build_addon_injects_local_paths_and_writes_sidecars(tmp_path: Path) -> None:
     addon_dir = tmp_path / "addon"
     _make_addon_tree(addon_dir)
-    output = tmp_path / "dist" / "zotero-research-0.4.6.xpi"
+    output = tmp_path / "dist" / f"zotero-research-{PACKAGE_VERSION}.xpi"
 
     result = build_addon(addon_dir=addon_dir, output=output)
 
@@ -94,7 +95,7 @@ def test_build_addon_injects_local_paths_and_writes_sidecars(tmp_path: Path) -> 
         "addon_id": "zotero-research@local.invalid",
         "files": sorted(_RUNTIME_FILES),
         "format": 1,
-        "version": "0.4.6",
+        "version": PACKAGE_VERSION,
         "zotero_min_version": "10.0",
         "zotero_max_version": "10.0.*",
     }
