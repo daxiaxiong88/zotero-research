@@ -665,3 +665,110 @@ test('会话持久化：回答后保存，重开文献自动恢复并提示继�
   assert.deepEqual(second.adapter.openedUrls.at(-1), 'https://gemini.google.com/app/abc123');
   second.panel.destroy();
 });
+
+test('清空同时删除本机存档，重开文献不会复活旧对话', async () => {
+  const saved = [];
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    saveChatSession(itemKey, session) {
+      const at = saved.findIndex((entry) => entry.itemKey === itemKey);
+      if (at >= 0) saved[at] = { itemKey, session };
+      else saved.push({ itemKey, session });
+      return true;
+    },
+    loadChatSession(itemKey) {
+      const hit = saved.filter((entry) => entry.itemKey === itemKey).at(-1);
+      return Promise.resolve(hit ? hit.session : null);
+    },
+    clearChatSession(itemKey) {
+      this.cleared = this.cleared || [];
+      this.cleared.push(itemKey);
+      const at = saved.findIndex((entry) => entry.itemKey === itemKey);
+      if (at >= 0) saved.splice(at, 1);
+      return true;
+    },
+  });
+  const first = setupWithMarkdown(adapter);
+  first.panel.setContext(CONTEXT);
+  await settle();
+  first.root.querySelector('[data-testid="webai-chat-input"]').value = '问题一';
+  first.root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '回答一' });
+  await settle();
+  assert.equal(saved.length, 1);
+
+  first.root.querySelector('[data-testid="webai-clear"]').click();
+  assert.deepEqual(adapter.cleared, ['ITEM-1']);
+  assert.equal(saved.length, 0, 'clear must drop the on-disk transcript');
+  first.panel.destroy();
+
+  // Reopening the paper must not resurrect the cleared conversation.
+  const second = setupWithMarkdown(adapter);
+  second.panel.setContext(CONTEXT);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.ok(second.root.querySelector('[data-testid="webai-chat-empty"]'), 'no restored transcript');
+  assert.equal(second.root.textContent.includes('回答一'), false);
+  second.panel.destroy();
+});
+
+test('恢复的蒸馏文档仍提供写入子笔记与复制', async () => {
+  const saved = [];
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    saveChatSession(itemKey, session) { saved.push({ itemKey, session }); return true; },
+    loadChatSession(itemKey) {
+      const hit = saved.filter((entry) => entry.itemKey === itemKey).at(-1);
+      return Promise.resolve(hit ? hit.session : null);
+    },
+  });
+  const first = setupWithMarkdown(adapter);
+  first.panel.setContext(CONTEXT);
+  await settle();
+  first.root.querySelector('[data-testid="webai-chat-input"]').value = '问题一';
+  first.root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '回答一' });
+  await settle();
+  first.root.querySelector('[data-testid="quick-distill"]').click();
+  await settle();
+  harness.relay.emit({
+    type: 'answer', id: 'task-1', done: true,
+    text: '# 知识沉淀\n\n## 核心知识点\n- 要点（第3页）',
+  });
+  await settle();
+  assert.ok(first.root.querySelector('[data-zrp-action="distill-note"]'));
+  first.panel.destroy();
+
+  const second = setupWithMarkdown(adapter);
+  second.panel.setContext(CONTEXT);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.ok(second.root.textContent.includes('核心知识点'), 'distilled document restored');
+  assert.ok(second.root.querySelector('[data-zrp-action="distill-note"]'),
+    'restored distillation keeps the write-to-note button');
+  assert.ok(second.root.querySelector('[data-zrp-action="distill-copy"]'),
+    'restored distillation keeps the copy button');
+  second.panel.destroy();
+});
+
+test('蒸馏请求气泡显示简短说明，实际发送内容不变', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setupWithMarkdown(makeAdapter(harness));
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题一';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '回答一' });
+  await settle();
+
+  root.querySelector('[data-testid="quick-distill"]').click();
+  await settle();
+  const userBubble = root.querySelectorAll('[data-testid="webai-chat-message-2"] .zrp-message-content')[0];
+  assert.match(userBubble.textContent, /已发送「知识沉淀」请求/);
+  assert.equal(userBubble.textContent.includes('核心知识点'), false, 'template must stay out of the bubble');
+  // The payload actually sent to the web AI is untouched.
+  assert.match(harness.relay.calls.at(-1).request.messages[0].text, /核心知识点/);
+  assert.equal(root.querySelector('[data-testid="quick-distill"]').getAttribute('title').includes('知识沉淀'), true);
+  panel.destroy();
+});

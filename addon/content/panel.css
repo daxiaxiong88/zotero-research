@@ -600,8 +600,13 @@
 .zrp-panel button,
 .zrp-panel select,
 .zrp-panel input,
+.zrp-panel summary,
+.zrp-panel label,
 .zrp-panel .zrp-quick-button,
-.zrp-panel .zrp-page-button {
+.zrp-panel .zrp-page-button,
+.zrp-panel .zrp-plain-button,
+.zrp-panel .zrp-icon-button,
+.zrp-panel .zrp-send-button {
   -moz-user-select: none !important;
   user-select: none !important;
 }

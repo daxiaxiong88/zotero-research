@@ -121,7 +121,15 @@
       var messages = state.messages
         .filter(function keep(m) { return !m.pending && Boolean(m.content); })
         .map(function pack(m) {
-          return { role: m.role, content: m.content, evidence: m.evidence || [] };
+          return {
+            role: m.role,
+            content: m.content,
+            evidence: m.evidence || [],
+            // Keep the distillation flags: restored documents must stay
+            // writable to a note and copyable.
+            distill: Boolean(m.distill),
+            distillRequest: Boolean(m.distillRequest),
+          };
         });
       if (!messages.length) return;
       try {
@@ -300,6 +308,9 @@
         button.setAttribute('data-command', key);
         button.setAttribute('title', entry[2]);
         if (key === 'upload-material') button.setAttribute('data-web-only', 'true');
+        if (key === 'distill') {
+          button.setAttribute('title', '「知识沉淀」：把本次读文献的对话整理成 Markdown——核心知识点、方法论、我的困惑与解答、值得追问的方向（至少先提一个问题）');
+        }
         refs.quickButtons[key] = button;
       });
       quickSection.appendChild(refs.quickActions);
@@ -480,8 +491,14 @@
           content.appendChild(markdownApi.renderMarkdown(document, parts.answer || message.content));
           article.appendChild(content);
         } else {
-          // Streaming/plain messages stay as fast plain text.
-          article.appendChild(createElement(document, 'pre', { className: 'zrp-message-content' }, message.content));
+          // Streaming/plain messages stay as fast plain text. A distillation
+          // request carries a long template (and the transcript in API mode),
+          // so show a short label instead of the payload.
+          var plain = message.content;
+          if (role === 'user' && message.distillRequest) {
+            plain = '（已发送「知识沉淀」请求：正在根据本次对话整理 Markdown 文档）';
+          }
+          article.appendChild(createElement(document, 'pre', { className: 'zrp-message-content' }, plain));
         }
         if (message.pending) {
           article.appendChild(createElement(document, 'div', { className: 'zrp-hint' },
@@ -579,6 +596,8 @@
 
     function onRelaySession(event) {
       if (event && event.connected && event.url) sessionMeta.aiUrl = String(event.url);
+      // Keep the resume affordance in sync with what we know.
+      refs.webaiResume.hidden = isApiMode() || !sessionMeta.aiUrl;
     }
 
     function sendMessage(message, options) {
@@ -600,7 +619,7 @@
       var generation = contextGeneration;
       var attachmentKey = context.attachment_key;
       state.queueing = true;
-      var outgoing = { role: 'user', content: clean };
+      var outgoing = { role: 'user', content: clean, distillRequest: distill };
       var assistant = { role: 'assistant', content: '', pending: true, notice: '', taskId: null, evidence: [], distill: distill };
       state.messages.push(outgoing, assistant);
       refs.chatInput.value = '';
@@ -792,11 +811,18 @@
       state.queueing = false;
       state.pendingTaskId = null;
       state.messages = [];
+      sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
+      refs.webaiResume.hidden = true;
+      // Drop the on-disk transcript too, or switching papers brings it back.
+      if (state.context && state.context.item_key
+        && adapter && typeof adapter.clearChatSession === 'function') {
+        try { adapter.clearChatSession(state.context.item_key); } catch (_) { /* best-effort */ }
+      }
       setError('');
       renderMessages();
       if (!isApiMode()) {
         // Web pages keep their own conversation; only a fresh page truly resets it.
-        setStatus('本地记录已清空；网页 AI 中的旧对话仍在，点「打开网页」换一个新对话即可彻底重来。');
+        setStatus('已清空本次记录（含本机存档）；网页 AI 中的旧对话仍在，点「打开网页」换一个新对话即可彻底重来。');
       }
     }
 
@@ -961,6 +987,7 @@
               content: String(m.content || ''),
               evidence: Array.isArray(m.evidence) ? m.evidence : [],
               distill: Boolean(m.distill),
+              distillRequest: Boolean(m.distillRequest),
             };
           });
           var turns = Math.floor(state.messages.length / 2);
