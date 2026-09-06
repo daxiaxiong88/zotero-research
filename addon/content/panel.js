@@ -19,6 +19,7 @@
     ['fill-note', '填充笔记', '请把当前论文要点整理成可直接粘贴到 Zotero 笔记中的 Markdown。'],
     // Web relay only: the browser file picker needs a human hand anyway.
     ['upload-material', '上传材料', '请保持当前对话上下文；我将上传论文相关材料（附件/截图/笔记），上传完成后结合材料回答我的后续问题。'],
+    ['distill', '知识沉淀', ''],
   ];
 
   // Commands that mean "the page I am reading right now": they resolve the
@@ -112,6 +113,83 @@
     var FONT_LABELS = { s: 'A−', m: 'A', l: 'A+', xl: 'A++' };
     var refs = {};
     var apiAbort = null;
+    var sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
+
+    function persistSession() {
+      if (!state.context || !state.context.item_key) return;
+      if (!adapter || typeof adapter.saveChatSession !== 'function') return;
+      var messages = state.messages
+        .filter(function keep(m) { return !m.pending && Boolean(m.content); })
+        .map(function pack(m) {
+          return { role: m.role, content: m.content, evidence: m.evidence || [] };
+        });
+      if (!messages.length) return;
+      try {
+        adapter.saveChatSession(state.context.item_key, {
+          title: (state.context && state.context.title) || '',
+          provider: state.provider,
+          aiUrl: sessionMeta.aiUrl || '',
+          messages: messages,
+        });
+      } catch (_) { /* persistence is best-effort */ }
+    }
+
+    function distillMarkdown(index) {
+      var message = state.messages[index];
+      if (!message) return '';
+      return markdownApi.splitThinking(message.content).answer;
+    }
+
+    function copyDistillMarkdown(index) {
+      var markdown = distillMarkdown(index);
+      if (!markdown) return;
+      if (!adapter || typeof adapter.copyText !== 'function') {
+        setError('当前环境不支持复制。');
+        return;
+      }
+      Promise.resolve(adapter.copyText(markdown)).then(function copied() {
+        setStatus('Markdown 已复制到剪贴板。');
+      }, function failed(error) {
+        setError(text(error && error.message, '复制失败。'));
+      });
+    }
+
+    function writeDistillNote(index) {
+      var markdown = distillMarkdown(index);
+      if (!markdown) return;
+      if (!state.context || !state.context.item_key) {
+        setError('没有当前文献，无法创建子笔记。');
+        return;
+      }
+      if (!adapter || typeof adapter.createChildNote !== 'function') {
+        setError('当前插件版本不支持写入子笔记。');
+        return;
+      }
+      var title = '知识沉淀：' + ((state.context && state.context.title) || '当前文献')
+        + '（' + new Date().toISOString().slice(0, 10) + '）';
+      setStatus('正在写入子笔记…');
+      Promise.resolve(adapter.createChildNote(state.context.item_key, title, markdown))
+        .then(function created() {
+          setStatus('已写入子笔记：' + title + '（可在条目下查看）。');
+        })
+        .catch(function noteError(error) {
+          setStatus('');
+          setError(text(error && error.message, '写入子笔记失败。'));
+        });
+    }
+
+    function resumeWebConversation() {
+      if (!sessionMeta.aiUrl) {
+        setError('没有记录上次的网页对话地址。');
+        return;
+      }
+      if (!adapter || typeof adapter.openExternal !== 'function') {
+        setError('当前环境无法打开浏览器。');
+        return;
+      }
+      try { adapter.openExternal(sessionMeta.aiUrl); }
+      catch (error) { setError(text(error && error.message, '打开网页失败。')); }
+    }
 
     var root = createElement(document, 'section', {
       className: 'zrp-panel',
@@ -259,6 +337,9 @@
       });
       chatHeader.appendChild(refs.webaiProvider);
       refs.webaiOpen = addButton(chatHeader, 'webai-open', '打开网页', 'webai-open', 'zrp-plain-button');
+      refs.webaiResume = addButton(chatHeader, 'webai-resume', '上次对话', 'webai-resume', 'zrp-plain-button');
+      refs.webaiResume.hidden = true;
+      refs.webaiResume.setAttribute('title', '打开上次的网页对话页；在那一页点油猴菜单“连接 Zotero”即可带着原上下文继续');
       refs.webaiClear = addButton(chatHeader, 'webai-clear', '清空', 'webai-clear', 'zrp-plain-button');
       refs.webaiClear.setAttribute('title', '清空侧栏本地记录；网页 AI 中的对话上下文不受影响，换新对话请用「打开网页」');
       chatSection.appendChild(chatHeader);
@@ -407,6 +488,16 @@
             message.notice || '正在生成…'));
         }
         if (message.error) article.appendChild(createElement(document, 'div', { className: 'zrp-error-inline' }, message.error));
+        if (message.distill && !message.pending && !message.error && message.content) {
+          var distillRow = createElement(document, 'div', { className: 'zrp-row zrp-distill-row' });
+          var writeButton = addButton(distillRow,
+            'distill-note-' + String(index), '写入子笔记', 'distill-note', 'zrp-button');
+          writeButton.setAttribute('data-message-index', String(index));
+          var copyMd = addButton(distillRow,
+            'distill-copy-' + String(index), '复制 Markdown', 'distill-copy', 'zrp-button zrp-button-quiet');
+          copyMd.setAttribute('data-message-index', String(index));
+          article.appendChild(distillRow);
+        }
         if (Array.isArray(message.evidence) && message.evidence.length) {
           var evidence = createElement(document, 'div', { className: 'zrp-message-evidence' });
           evidence.appendChild(createElement(document, 'span', { className: 'zrp-hint' }, '来源'));
@@ -481,8 +572,13 @@
         message.pending = false;
         message.error = text(event.error, '');
         if (state.pendingTaskId === event.id) state.pendingTaskId = null;
+        persistSession();
       }
       renderMessages();
+    }
+
+    function onRelaySession(event) {
+      if (event && event.connected && event.url) sessionMeta.aiUrl = String(event.url);
     }
 
     function sendMessage(message, options) {
@@ -498,13 +594,14 @@
       var clean = text(message).trim();
       if (!clean) { refs.chatInput.focus(); return; }
       var scopePage = Boolean(options && options.scopePage);
+      var distill = Boolean(options && options.distill);
       var selected = currentSelection();
       var context = state.context;
       var generation = contextGeneration;
       var attachmentKey = context.attachment_key;
       state.queueing = true;
       var outgoing = { role: 'user', content: clean };
-      var assistant = { role: 'assistant', content: '', pending: true, notice: '', taskId: null, evidence: [] };
+      var assistant = { role: 'assistant', content: '', pending: true, notice: '', taskId: null, evidence: [], distill: distill };
       state.messages.push(outgoing, assistant);
       refs.chatInput.value = '';
       setError('');
@@ -661,6 +758,7 @@
             || 'API 返回了空回答。';
           assistant.pending = false;
           state.apiBusy = false;
+          persistSession();
           renderMessages();
         })
         .catch(function apiError(error) {
@@ -709,7 +807,46 @@
         setError('请先在 PDF 中选中文本，再使用“部分总结”。');
         return;
       }
+      if (command === 'distill') {
+        runDistill();
+        return;
+      }
       sendMessage(entry[2], { scopePage: Boolean(PAGE_SCOPED_COMMANDS[command]) });
+    }
+
+    /** Distill the reading session into a markdown document via the AI. */
+    function runDistill() {
+      var finished = state.messages.filter(function keep(m) {
+        return !m.pending && !m.error && Boolean(m.content);
+      });
+      var exchanges = Math.floor(finished.length / 2);
+      if (exchanges < 1) {
+        setError('还没有可沉淀的对话：先就这篇文献提过至少一个问题。');
+        return;
+      }
+      var title = (state.context && state.context.title) || '当前文献';
+      var template = '请把这次读文献的对话沉淀为一份 Markdown 文档，直接输出 Markdown 本身，不要额外解释。'
+        + '\n\n文档结构：'
+        + '\n# 知识沉淀：' + title
+        + '\n\n## 核心知识点'
+        + '\n\n## 方法论'
+        + '\n\n## 我的困惑与解答（列出用户提出的问题、AI 的解答要点，标注已解决/待深入）'
+        + '\n\n## 值得追问的方向'
+        + '\n\n要求：'
+        + '\n- 每条要点尽量标注对话中出现的原文页码（如「第3页」）'
+        + '\n- 只沉淀对话中出现过的内容，不要编造论文里没有的东西'
+        + '\n- 用户明确提问过的问题必须全部覆盖，那是最重要的部分';
+      // Web relay: the page already holds the conversation context, so the
+      // short template is enough. Direct API: include the transcript.
+      if (isApiMode()) {
+        var transcript = finished.map(function line(m) {
+          return (m.role === 'assistant' ? 'AI：' : '我：')
+            + markdownApi.splitThinking(m.content).answer;
+        }).join('\n\n');
+        sendMessage(template + '\n\n以下是完整对话记录：\n\n' + transcript, { distill: true });
+      } else {
+        sendMessage(template, { distill: true });
+      }
     }
 
     function navigateTo(attachmentKey, page) {
@@ -753,7 +890,10 @@
       else if (action === 'webai-clear') clearChat();
       else if (action === 'navigate-selection' || action === 'navigate-evidence') {
         navigateTo(target.getAttribute('data-attachment-key'), target.getAttribute('data-page'));
-      } else if (action === 'font-decrease') changeFontSize(-1);
+      } else if (action === 'distill-note') writeDistillNote(Number(target.getAttribute('data-message-index')));
+      else if (action === 'distill-copy') copyDistillMarkdown(Number(target.getAttribute('data-message-index')));
+      else if (action === 'webai-resume') resumeWebConversation();
+      else if (action === 'font-decrease') changeFontSize(-1);
       else if (action === 'font-increase') changeFontSize(1);
       else if (action === 'settings') openSettings();
     }
@@ -799,12 +939,45 @@
     listen(root, 'change', onChange);
     listen(root, 'keydown', onKeyDown);
     if (typeof relayAdapter.subscribe === 'function') {
+      var sessionListener = function captureSession(event) {
+        if (isObject(event) && event.type === 'session') onRelaySession(event);
+      };
+      cleanups.push(relayAdapter.subscribe(sessionListener));
       cleanups.push(relayAdapter.subscribe(onRelayEvent));
     }
     renderAll();
 
+    function restoreSession(itemKey) {
+      if (!adapter || typeof adapter.loadChatSession !== 'function') return;
+      Promise.resolve(adapter.loadChatSession(itemKey))
+        .then(function accept(data) {
+          if (destroyed || !state.context || state.context.item_key !== itemKey) return;
+          if (!data || !data.messages || !data.messages.length) return;
+          sessionMeta.aiUrl = String(data.aiUrl || '');
+          sessionMeta.updatedAt = String(data.updatedAt || '');
+          state.messages = data.messages.map(function unpack(m) {
+            return {
+              role: m.role === 'assistant' ? 'assistant' : 'user',
+              content: String(m.content || ''),
+              evidence: Array.isArray(m.evidence) ? m.evidence : [],
+              distill: Boolean(m.distill),
+            };
+          });
+          var turns = Math.floor(state.messages.length / 2);
+          if (turns > 0) {
+            setStatus('已恢复上次对话（约 ' + turns + ' 轮'
+              + (sessionMeta.updatedAt ? '，' + String(sessionMeta.updatedAt).slice(0, 10) : '')
+              + '）；直接提问即可继续。');
+          }
+          refs.webaiResume.hidden = isApiMode() || !sessionMeta.aiUrl;
+          renderMessages();
+        })
+        .catch(function restoreError() { /* a broken session file is not fatal */ });
+    }
+
     return {
       setContext(nextContext) {
+        var previousKey = state.context ? state.context.item_key : null;
         var changed = !state.context || !nextContext
           || state.context.item_key !== nextContext.item_key
           || state.context.attachment_key !== nextContext.attachment_key;
@@ -821,6 +994,11 @@
           state.queueing = false;
           state.pendingTaskId = null;
           state.messages = [];
+          sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
+          refs.webaiResume.hidden = true;
+          if (state.context && state.context.item_key && state.context.item_key !== previousKey) {
+            restoreSession(state.context.item_key);
+          }
         }
         setError('');
         renderAll();

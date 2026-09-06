@@ -450,7 +450,7 @@ test('快捷命令已精简且“上传材料”仅网页模式显示', async ()
   await settle();
   // Web mode: six commands, upload visible.
   const keys = [...root.querySelectorAll('[data-testid^="quick-"]')].map((b) => b.getAttribute('data-command'));
-  assert.deepEqual(keys, ['summary-page', 'translate-page', 'partial-summary', 'full-summary', 'fill-note', 'upload-material']);
+  assert.deepEqual(keys, ['summary-page', 'translate-page', 'partial-summary', 'full-summary', 'fill-note', 'upload-material', 'distill']);
   assert.equal(root.querySelector('[data-testid="quick-upload-material"]').hidden, false);
 
   root.querySelector('[data-testid="webai-provider"]').value = 'api';
@@ -578,4 +578,90 @@ test('回答中的 Markdown 链接点击经 openExternal 打开，非 http 链�
   links[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
   assert.deepEqual(adapter.openedUrls, ['https://example.com/paper']);
   panel.destroy();
+});
+
+test('知识沉淀：需先有对话；完成后提供写入子笔记与复制', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    createChildNote(itemKey, title, markdown) {
+      this.noteCalls = this.noteCalls || [];
+      this.noteCalls.push({ itemKey, title, markdown });
+      return Promise.resolve({ key: 'NOTE2345' });
+    },
+  });
+  const { root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+
+  root.querySelector('[data-testid="quick-distill"]').click();
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /至少一个问题/);
+
+  root.querySelector('[data-testid="webai-chat-input"]').value = '这个方法为什么有效？';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '因为对照实验（第3页）。' });
+  await settle();
+
+  root.querySelector('[data-testid="quick-distill"]').click();
+  await settle();
+  const prompt = harness.relay.calls.at(-1).request.messages[0].text;
+  assert.match(prompt, /知识沉淀/);
+  assert.match(prompt, /核心知识点/);
+
+  harness.relay.emit({
+    type: 'answer', id: 'task-1', done: true,
+    text: '# 知识沉淀：A paper title\n\n## 核心知识点\n- 对照实验设计（第3页）',
+  });
+  await settle();
+
+  const writeButton = root.querySelector('[data-zrp-action="distill-note"]');
+  assert.ok(writeButton, 'note-write button rendered on distill answer');
+  writeButton.click();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(adapter.noteCalls.length, 1);
+  assert.equal(adapter.noteCalls[0].itemKey, 'ITEM-1');
+  assert.match(adapter.noteCalls[0].title, /知识沉淀：A paper title/);
+  assert.match(adapter.noteCalls[0].markdown, /核心知识点/);
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /已写入子笔记/);
+
+  root.querySelector('[data-zrp-action="distill-copy"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  panel.destroy();
+});
+
+test('会话持久化：回答后保存，重开文献自动恢复并提示继续', async () => {
+  const saved = [];
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    saveChatSession(itemKey, session) { saved.push({ itemKey, session }); return true; },
+    loadChatSession(itemKey) {
+      const hit = saved.filter((entry) => entry.itemKey === itemKey).at(-1);
+      return Promise.resolve(hit ? hit.session : null);
+    },
+  });
+
+  // First reading session: one exchange, web conversation url recorded.
+  const first = setupWithMarkdown(adapter);
+  first.panel.setContext(CONTEXT);
+  await settle();
+  harness.relay.emit({ type: 'session', connected: true, ai: 'Gemini', url: 'https://gemini.google.com/app/abc123' });
+  first.root.querySelector('[data-testid="webai-chat-input"]').value = '问题一';
+  first.root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '回答一（第2页）' });
+  await settle();
+  first.panel.destroy();
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].session.messages.length, 2);
+  assert.equal(saved[0].session.aiUrl, 'https://gemini.google.com/app/abc123');
+
+  // Reopen the paper in a fresh panel: history restored, resume visible.
+  const second = setupWithMarkdown(adapter);
+  second.panel.setContext(CONTEXT);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.ok(second.root.textContent.includes('回答一（第2页）'), 'previous answer restored');
+  assert.equal(second.root.querySelector('[data-testid="webai-resume"]').hidden, false);
+  second.root.querySelector('[data-testid="webai-resume"]').click();
+  assert.deepEqual(second.adapter.openedUrls.at(-1), 'https://gemini.google.com/app/abc123');
+  second.panel.destroy();
 });

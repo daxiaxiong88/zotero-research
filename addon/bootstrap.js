@@ -53,6 +53,98 @@ function zraCreateAddon(data) {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Per-paper rolling chat sessions, persisted as JSON in the profile dir.
+  // ---------------------------------------------------------------------------
+
+  function sessionsDirectory() {
+    const base = Zotero.Profile?.dir
+      || Services.dirsvc.get('ProfD', Ci.nsIFile).path;
+    const dir = PathUtils.join(base, 'zotero-research-sessions');
+    return dir;
+  }
+
+  async function ensureSessionsDirectory() {
+    const dir = sessionsDirectory();
+    if (!(await IOUtils.exists(dir))) await IOUtils.makeDirectory(dir, { createAncestors: true });
+    return dir;
+  }
+
+  async function loadChatSession(itemKey) {
+    try {
+      const path = PathUtils.join(sessionsDirectory(), itemKey + '.json');
+      if (!(await IOUtils.exists(path))) return null;
+      const raw = await Zotero.File.getContentsAsync(path);
+      const data = JSON.parse(raw);
+      if (!data || !Array.isArray(data.messages)) return null;
+      return data;
+    } catch (error) {
+      Zotero.logError(error);
+      return null;
+    }
+  }
+
+  async function saveChatSession(itemKey, session) {
+    try {
+      await ensureSessionsDirectory();
+      const path = PathUtils.join(sessionsDirectory(), itemKey + '.json');
+      const payload = {
+        itemKey,
+        title: String(session.title || ''),
+        provider: String(session.provider || ''),
+        aiUrl: String(session.aiUrl || ''),
+        updatedAt: new Date().toISOString(),
+        // Bound the rolling session so a long history cannot grow the file forever.
+        messages: (session.messages || []).slice(-500),
+      };
+      await Zotero.File.putContentsAsync(path, JSON.stringify(payload));
+      return true;
+    } catch (error) {
+      Zotero.logError(error);
+      return false;
+    }
+  }
+
+  async function clearChatSession(itemKey) {
+    try {
+      const path = PathUtils.join(sessionsDirectory(), itemKey + '.json');
+      if (await IOUtils.exists(path)) await IOUtils.remove(path);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Create a child note from markdown. Uses Better Notes' converter when
+   * installed (its markdown flavor understands [[note links]], [@citations]
+   * and ==highlights==), otherwise falls back to this plugin's own renderer.
+   */
+  async function createChildNote(itemKey, title, markdown) {
+    const item = Zotero.Items.getByLibraryAndKey(Zotero.Libraries.userLibraryID, itemKey);
+    if (!item) throw new Error('找不到当前文献条目。');
+    let html = '';
+    const betterNotes = Zotero.BetterNotes;
+    const converter = betterNotes?.api?.convert?.md2html;
+    if (typeof converter === 'function') {
+      html = await converter(markdown);
+    } else {
+      // Fallback: build the note HTML with our own safe renderer.
+      const doc = Zotero.getMainWindow().document;
+      const container = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+      container.appendChild(ZoteroResearchMarkdown.renderMarkdown(doc, markdown));
+      html = container.innerHTML;
+    }
+    const note = new Zotero.Item('note');
+    note.libraryID = item.libraryID;
+    note.parentID = item.id;
+    const heading = '<h1>' + title.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' })[c]) + '</h1>';
+    note.setNote(heading + html);
+    note.addTag('zotero-research');
+    await note.saveTx();
+    return { key: note.key, id: note.id };
+  }
+
   function getFontSize() {
     return Zotero.Prefs.get('researchAssistant.uiFontSize') || 'm';
   }
@@ -430,6 +522,10 @@ function zraCreateAddon(data) {
           getAttachmentMediaType,
           getFontSize,
           setFontSize,
+          loadChatSession,
+          saveChatSession,
+          clearChatSession,
+          createChildNote,
           retrieveEvidence,
           retrieveCurrentPageEvidence,
           getProvider: () => Zotero.Prefs.get('researchAssistant.provider') || 'gemini',

@@ -590,9 +590,22 @@
 
 /* The item pane disables text selection on custom sections; answers,
  * evidence and thinking blocks must stay selectable for copy. */
-.zrp-panel {
-  -moz-user-select: text;
-  user-select: text;
+.zrp-panel,
+.zrp-panel * {
+  -moz-user-select: text !important;
+  user-select: text !important;
 }
+
+/* Interactive controls keep their native behavior. */
+.zrp-panel button,
+.zrp-panel select,
+.zrp-panel input,
+.zrp-panel .zrp-quick-button,
+.zrp-panel .zrp-page-button {
+  -moz-user-select: none !important;
+  user-select: none !important;
+}
+
+.zrp-distill-row { margin-top: 6px; gap: 6px; }
 
 .zrp-md a.zrp-md-link { cursor: pointer; }
