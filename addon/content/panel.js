@@ -20,6 +20,7 @@
     // Web relay only: the browser file picker needs a human hand anyway.
     ['upload-material', '上传材料', '请保持当前对话上下文；我将上传论文相关材料（附件/截图/笔记），上传完成后结合材料回答我的后续问题。'],
     ['distill', '知识沉淀', ''],
+    ['deep-parse', '深度解析', ''],
   ];
 
   // Commands that mean "the page I am reading right now": they resolve the
@@ -183,6 +184,7 @@
       pendingTaskId: null,
       queueing: false,
       apiBusy: false,
+      deepParsing: false,
       restoring: false,
       attachPdf: false,
       fontSize: 'm',
@@ -530,7 +532,7 @@
 
     function renderControls() {
       var hasContext = Boolean(state.context && state.context.attachment_key);
-      var busy = state.restoring || state.queueing || Boolean(state.pendingTaskId) || state.apiBusy;
+      var busy = state.restoring || state.deepParsing || state.queueing || Boolean(state.pendingTaskId) || state.apiBusy;
       Array.prototype.forEach.call(refs.quickActions.querySelectorAll('button'), function setQuickState(button) {
         button.disabled = !hasContext || busy;
         if (button.getAttribute('data-web-only') === 'true') button.hidden = isApiMode();
@@ -788,7 +790,7 @@
     }
 
     function sendMessage(message, options) {
-      if (destroyed || state.restoring || state.queueing || state.pendingTaskId || state.apiBusy) return;
+      if (destroyed || state.restoring || state.deepParsing || state.queueing || state.pendingTaskId || state.apiBusy) return;
       if (!state.context || !state.context.attachment_key) {
         setError('请先在 Zotero 中打开一篇 PDF 文献。');
         return;
@@ -1093,7 +1095,49 @@
         runDistill();
         return;
       }
+      if (command === 'deep-parse') {
+        runDeepParse();
+        return;
+      }
       sendMessage(entry[2], { task: command, scopePage: Boolean(PAGE_SCOPED_COMMANDS[command]) });
+    }
+
+    /** Manual MinerU deep parse of the current paper (long-running). */
+    function runDeepParse() {
+      if (destroyed || state.deepParsing) return;
+      if (!state.context || !state.context.attachment_key) {
+        setError('请先在 Zotero 中打开一篇 PDF 文献。');
+        return;
+      }
+      if (!adapter || typeof adapter.deepParseWithMineru !== 'function') {
+        setError('当前插件版本不支持深度解析。');
+        return;
+      }
+      var attachmentKey = state.context.attachment_key;
+      var generation = contextGeneration;
+      state.deepParsing = true;
+      setError('');
+      setStatus('深度解析中…首次运行需加载本地模型，可能需要 1-3 分钟；完成后此文献的所有提问自动使用解析结果。');
+      renderControls();
+      Promise.resolve()
+        .then(function parse() { return adapter.deepParseWithMineru(attachmentKey); })
+        .then(function done(result) {
+          if (destroyed || generation !== contextGeneration) return;
+          var stats = result && result.stats ? result.stats : {};
+          setStatus((result && result.cached ? '本文献此前已深度解析（' : '深度解析完成（')
+            + (stats.textPages || '?') + '/' + (stats.pageCount || '?') + ' 页含文本'
+            + '）；后续提问将自动使用这份更完整的文本。');
+        })
+        .catch(function failed(error) {
+          if (destroyed || generation !== contextGeneration) return;
+          setError(text(error && error.message, '深度解析失败。'));
+          setStatus('');
+        })
+        .finally(function settled() {
+          if (destroyed || generation !== contextGeneration) return;
+          state.deepParsing = false;
+          renderControls();
+        });
     }
 
     /** Distill the reading session into a markdown document via the AI. */

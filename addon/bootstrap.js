@@ -645,10 +645,218 @@ function zraCreateAddon(data) {
   // re-parsing the whole PDF on every question cost 1-3s per message.
   const pdfTextCache = new Map();
 
+  // ---------------------------------------------------------------------------
+  // MinerU deep parsing: manual-trigger, disk-cached page text per attachment.
+  // ---------------------------------------------------------------------------
+
+  const mineruDirectory = () => PathUtils.join(sessionsDirectory(), '..', 'zotero-research-mineru');
+
+  async function ensureMineruDirectory() {
+    const dir = mineruDirectory();
+    if (!(await IOUtils.exists(dir))) await IOUtils.makeDirectory(dir, { createAncestors: true });
+    return dir;
+  }
+
+  function mineruCachePath(attachmentKey) {
+    return PathUtils.join(mineruDirectory(), attachmentKey + '.json');
+  }
+
+  /** Flatten a MinerU table_body HTML string into readable row text. */
+  function tableBodyToText(html) {
+    return String(html || '')
+      .replace(/<tr[^>]*>/gi, '\n')
+      .replace(/<t[dh][^>]*>/gi, ' ')
+      .replace(/<\/t[dh]>/gi, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ \n/g, '\n')
+      .trim();
+  }
+
+  /** Group a MinerU content_list array into per-page text blocks. */
+  function mineruPagesFromContentList(items, pageCount) {
+    const blocks = new Map();
+    for (let index = 0; index < pageCount; index += 1) blocks.set(index, []);
+    for (const item of Array.isArray(items) ? items : []) {
+      if (!item || typeof item !== 'object') continue;
+      const pageIndex = Number(item.page_idx);
+      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= pageCount) continue;
+      const type = String(item.type || '');
+      let text = '';
+      if (type === 'table') {
+        const parts = [];
+        for (const caption of Array.isArray(item.table_caption) ? item.table_caption : []) {
+          if (caption) parts.push(String(caption));
+        }
+        parts.push(tableBodyToText(item.table_body));
+        text = parts.filter(Boolean).join('\n');
+      } else if (type === 'image') {
+        continue;
+      } else {
+        text = String(item.text || '');
+      }
+      if (text.trim()) blocks.get(pageIndex).push(text.trim());
+    }
+    const pages = [];
+    for (let index = 0; index < pageCount; index += 1) {
+      const text = blocks.get(index).join('\n').trim();
+      if (text) pages.push({ number: index + 1, text });
+    }
+    return pages;
+  }
+
+  async function readMineruCache(attachmentKey, stamp) {
+    try {
+      const path = mineruCachePath(attachmentKey);
+      if (!(await IOUtils.exists(path))) return null;
+      const raw = await Zotero.File.getContentsAsync(path);
+      const data = JSON.parse(raw);
+      // Stamp mismatch means the file changed: the archive is stale.
+      if (!data || data.stamp !== stamp || !Array.isArray(data.pages)) return null;
+      return data;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function writeMineruCache(attachmentKey, payload) {
+    try {
+      await ensureMineruDirectory();
+      const path = mineruCachePath(attachmentKey);
+      await Zotero.File.putContentsAsync(path, JSON.stringify(payload));
+      return true;
+    } catch (error) {
+      Zotero.logError(error);
+      return false;
+    }
+  }
+
+  function mineruConfigPath() {
+    return PathUtils.join(mineruDirectory(), 'mineru-tools.json');
+  }
+
+  /**
+   * Run the local MinerU CLI on one attachment. Manual-trigger only; results
+   * land in the disk cache keyed by the attachment stamp and are then picked
+   * up by pdfPages() for every later question.
+   */
+  async function deepParseWithMineru(attachmentKey) {
+    const info = await attachment(attachmentKey);
+    const cached = await readMineruCache(attachmentKey, info.stamp);
+    if (cached) return { pages: cached.pages, cached: true, stats: cached.stats };
+
+    const executable = String(Zotero.Prefs.get('researchAssistant.mineruExecutable') || '').trim();
+    const modelPath = String(Zotero.Prefs.get('researchAssistant.mineruModelPath') || '').trim();
+    if (!executable || !modelPath) {
+      throw new Error('MinerU 未配置：请在插件设置中填写 mineru 可执行文件路径和模型目录。');
+    }
+    if (!(await IOUtils.exists(executable))) {
+      throw new Error('mineru 可执行文件不存在：' + executable);
+    }
+    if (!(await IOUtils.exists(modelPath))) {
+      throw new Error('MinerU 模型目录不存在：' + modelPath);
+    }
+
+    await ensureMineruDirectory();
+    // A plugin-managed tools config: local model source, no downloads.
+    const configPath = mineruConfigPath();
+    await Zotero.File.putContentsAsync(configPath, JSON.stringify({
+      'model-source': 'local',
+      'models-dir': { vlm: modelPath },
+    }));
+
+    const path = await info.item.getFilePathAsync();
+    const outputDirectory = PathUtils.join(mineruDirectory(), 'runs',
+      info.stamp.slice(0, 16) + '-' + String(Date.now()));
+    if (!(await IOUtils.exists(PathUtils.parent(outputDirectory)))) {
+      await IOUtils.makeDirectory(outputDirectory, { createAncestors: true });
+    }
+
+    const { Subprocess } = ChromeUtils.importESModule('resource://gre/modules/Subprocess.sys.mjs');
+    const environment = {
+      MINERU_TOOLS_CONFIG_JSON: configPath,
+      MINERU_MODEL_SOURCE: 'local',
+      HF_HUB_OFFLINE: '1',
+      HF_HUB_DISABLE_TELEMETRY: '1',
+      TRANSFORMERS_OFFLINE: '1',
+      HF_DATASETS_OFFLINE: '1',
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+    };
+    const process = await Subprocess.call({
+      command: executable,
+      arguments: ['-p', path, '-o', outputDirectory, '-b', 'vlm-engine'],
+      environment, environmentAppend: true, stderr: 'pipe',
+    });
+    const stderrTail = [];
+    (async () => { try { while (await process.stderr.readString()) { /* drained */ } } catch (_) {} })();
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let exitCode = null;
+    while (Date.now() < deadline) {
+      exitCode = await Promise.race([
+        process.wait(),
+        new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+      ]);
+      if (exitCode !== null) break;
+    }
+    if (exitCode === null) {
+      try { await process.kill(0); } catch (_) {}
+      throw new Error('MinerU 解析超时（超过 15 分钟），已终止。');
+    }
+    if (exitCode !== 0) {
+      throw new Error('MinerU 退出码 ' + exitCode + '：请检查模型目录和显卡状态后重试。');
+    }
+
+    // Locate the content_list JSON produced under <output>/<stem>/vlm/.
+    const stem = PathUtils.filename(path).replace(/\.pdf$/i, '');
+    let contentPath = null;
+    const queue = [outputDirectory];
+    while (queue.length && !contentPath) {
+      const dir = queue.shift();
+      for (const child of await IOUtils.getChildren(dir)) {
+        const stat = await IOUtils.stat(child);
+        if (stat.isDir) queue.push(child);
+        else if (child.endsWith('_content_list.json')) contentPath = child;
+      }
+    }
+    if (!contentPath) {
+      throw new Error('MinerU 未生成 content_list.json；请确认模型目录指向完整权重。');
+    }
+    const payload = JSON.parse(await Zotero.File.getContentsAsync(contentPath));
+    const sourceCount = await (async () => {
+      const pageTexts = await extractPdfPages(info);
+      // Count physical pages even when the text layer is empty (scanned PDFs).
+      const result = await Zotero.PDFWorker.getFullText(info.id, undefined, true);
+      return Number.isInteger(result?.extractedPages) ? result.extractedPages
+        : Math.max(pageTexts.length, 1);
+    })();
+    const pages = mineruPagesFromContentList(payload, sourceCount);
+    if (!pages.length) {
+      throw new Error('MinerU 解析完成但没有可用文本；该 PDF 可能是纯图像扫描件。');
+    }
+    const stats = {
+      pageCount: sourceCount,
+      textPages: pages.length,
+      parsedAt: new Date().toISOString(),
+    };
+    await writeMineruCache(attachmentKey, { stamp: info.stamp, pages, stats });
+    pdfTextCache.set(info.stamp, pages);
+    // Best-effort cleanup of the run directory; the archive keeps the text.
+    try { await IOUtils.remove(outputDirectory, { recursive: true }); } catch (_) {}
+    return { pages, cached: false, stats };
+  }
+
   async function pdfPages(attachmentKey) {
     const info = await attachment(attachmentKey);
     const cached = pdfTextCache.get(info.stamp);
     if (cached) return cached;
+    // A deep-parsed archive (manual MinerU run, stamp-matched) always wins:
+    // the user explicitly asked for the better text layer on this paper.
+    const mineru = await readMineruCache(attachmentKey, info.stamp);
+    if (mineru && mineru.pages.length) {
+      pdfTextCache.set(info.stamp, mineru.pages);
+      return mineru.pages;
+    }
     const pages = await extractPdfPages(info);
     if (pdfTextCache.size >= 6) {
       pdfTextCache.delete(pdfTextCache.keys().next().value);
@@ -860,6 +1068,7 @@ function zraCreateAddon(data) {
           retrieveOverviewEvidence,
           retrieveCurrentPageEvidence,
           clearSelection: (attachmentKey) => { selections.delete(attachmentKey); },
+          deepParseWithMineru,
           getProvider: () => Zotero.Prefs.get('researchAssistant.provider') || 'gemini',
           setProvider: (provider) => Zotero.Prefs.set('researchAssistant.provider', provider),
           prepareHighlight: (args) => highlights.prepare(args),

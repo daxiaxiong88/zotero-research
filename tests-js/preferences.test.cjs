@@ -94,7 +94,10 @@ test('no credential-bearing fields beyond the optional API key', () => {
     'utf8',
   );
   assert.ok(xhtml.includes('API 直连'), 'API 直连配置区存在');
-  assert.ok(!xhtml.includes('本地模型'), '本地模型字段已随网页 AI 架构移除');
+  // The old Ollama local-model fields are gone; the MinerU model directory
+  // is a deliberate new local preference for deep parsing.
+  assert.ok(!xhtml.includes('本地模型名称'), '旧本地模型字段已移除');
+  assert.ok(xhtml.includes('MinerU'), 'MinerU 深度解析配置区存在');
 });
 
 test('save persists API fields into Zotero preferences', () => {

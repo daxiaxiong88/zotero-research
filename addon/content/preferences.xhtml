@@ -29,6 +29,15 @@
     <html:p id="zra-api-status" role="status"></html:p>
   </groupbox>
   <groupbox>
+    <html:h2>MinerU 深度解析（可选）</html:h2>
+    <html:p>手动触发：侧栏快捷命令「深度解析」用本地 MinerU 模型重新提取全文（含公式 LaTeX 与表格），结果按文件缓存在本机；之后该文献的所有提问自动使用解析结果。需已安装 mineru 与 CUDA 版 torch。</html:p>
+    <html:label>mineru 可执行文件路径</html:label>
+    <html:input id="zra-mineru-executable" type="text" placeholder="例如 D:\Research\ChatGPT\.venv\Scripts\mineru.exe" />
+    <html:label>本地模型目录（MinerU2.5 VLM 权重）</html:label>
+    <html:input id="zra-mineru-model" type="text" placeholder="例如 D:\Zotero\MinerU" />
+    <html:p id="zra-mineru-status" role="status"></html:p>
+  </groupbox>
+  <groupbox>
     <html:h2>连接</html:h2>
     <html:p id="zra-backend-path">网页 AI 通过 Zotero 本机端口 23119 直连本插件；“设置 → 高级 → 允许其他应用与 Zotero 通信”需保持开启。</html:p>
     <html:button id="zra-reconnect" type="button">刷新侧边栏</html:button>

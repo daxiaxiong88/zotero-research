@@ -1,4 +1,8 @@
 const ZRA_PREFERENCES_ROOT = 'zra-preferences-root';
+const MINERU_FIELDS = {
+  'zra-mineru-executable': 'mineruExecutable',
+  'zra-mineru-model': 'mineruModelPath',
+};
 const API_FIELDS = {
   'zra-api-protocol': 'apiProtocol',
   'zra-api-base': 'apiBaseUrl',
@@ -46,6 +50,10 @@ var ZoteroResearchPreferences = {
       const element = this.field(id);
       if (element) element.value = Zotero.Prefs.get('researchAssistant.' + preference) || '';
     }
+    for (const [id, preference] of Object.entries(MINERU_FIELDS)) {
+      const element = document.getElementById(id);
+      if (element) element.value = Zotero.Prefs.get('researchAssistant.' + preference) || '';
+    }
     const backendPath = document.getElementById('zra-backend-path');
     if (backendPath) {
       backendPath.textContent = '网页 AI 通过 Zotero 本机端口 23119 直连本插件；'
@@ -54,6 +62,12 @@ var ZoteroResearchPreferences = {
   },
 
   save() {
+    for (const [id, preference] of Object.entries(MINERU_FIELDS)) {
+      const element = document.getElementById(id);
+      if (element) Zotero.Prefs.set('researchAssistant.' + preference, (element.value || '').trim());
+    }
+    const mineruStatus = document.getElementById('zra-mineru-status');
+    if (mineruStatus) mineruStatus.textContent = 'MinerU 路径已保存。';
     const base = (this.field('zra-api-base')?.value || '').trim();
     const model = (this.field('zra-api-model')?.value || '').trim();
     const key = (this.field('zra-api-key')?.value || '').trim();

@@ -460,7 +460,7 @@ test('快捷命令已精简且“上传材料”仅网页模式显示', async ()
   await settle();
   // Web mode: six commands, upload visible.
   const keys = [...root.querySelectorAll('[data-testid^="quick-"]')].map((b) => b.getAttribute('data-command'));
-  assert.deepEqual(keys, ['summary-page', 'translate-page', 'partial-summary', 'full-summary', 'fill-note', 'upload-material', 'distill']);
+  assert.deepEqual(keys, ['summary-page', 'translate-page', 'partial-summary', 'full-summary', 'fill-note', 'upload-material', 'distill', 'deep-parse']);
   assert.equal(root.querySelector('[data-testid="quick-upload-material"]').hidden, false);
 
   root.querySelector('[data-testid="webai-provider"]').value = 'api';
@@ -1249,5 +1249,52 @@ test('存档保存或清空失败时明确提示，不误报已经写盘或已�
   await settle();
   assert.match(root.querySelector('[data-testid="error"]').textContent, /存档清空失败/);
   assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /本机存档未清除/);
+  panel.destroy();
+});
+
+test('深度解析：busy 状态锁定输入，完成后状态显示统计', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    deepParseWithMineru(attachmentKey) {
+      this.parseCalls = this.parseCalls || [];
+      this.parseCalls.push(attachmentKey);
+      return new Promise((resolve) => {
+        setTimeout(() => resolve({
+          cached: false,
+          pages: [{ number: 1, text: 'parsed' }],
+          stats: { pageCount: 2, textPages: 2, parsedAt: 'now' },
+        }), 40);
+      });
+    },
+  });
+  const { root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+
+  root.querySelector('[data-testid="quick-deep-parse"]').click();
+  // Busy immediately: input disabled while parsing.
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, true);
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /深度解析中/);
+  // Double click is a no-op.
+  root.querySelector('[data-testid="quick-deep-parse"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(adapter.parseCalls, ['ATT-1']);
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /深度解析完成（2\/2 页含文本/);
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
+  panel.destroy();
+});
+
+test('深度解析未配置时显示指引错误', async () => {
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    deepParseWithMineru() { return Promise.reject(new Error('MinerU 未配置：请在插件设置中填写 mineru 可执行文件路径和模型目录。')); },
+  });
+  const { root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="quick-deep-parse"]').click();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /MinerU 未配置/);
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
   panel.destroy();
 });
