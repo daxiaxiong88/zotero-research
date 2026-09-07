@@ -843,12 +843,17 @@ function zraCreateAddon(data) {
       ]);
       if (exitCode !== null) break;
     }
+    const failParse = (message) => {
+      // Never leave a multi-MB run directory behind on a failed parse.
+      IOUtils.remove(outputDirectory, { recursive: true }).catch(() => {});
+      throw new Error(message);
+    };
     if (exitCode === null) {
       try { await process.kill(0); } catch (_) {}
-      throw new Error('MinerU 解析超时（超过 15 分钟），已终止。');
+      failParse('MinerU 解析超时（超过 15 分钟），已终止。');
     }
     if (exitCode !== 0) {
-      throw new Error('MinerU 退出码 ' + exitCode + '：请检查模型目录和显卡状态后重试。');
+      failParse('MinerU 退出码 ' + exitCode + '：请检查模型目录和显卡状态后重试。');
     }
 
     // Locate the content_list JSON produced under <output>/<stem>/vlm/.
@@ -864,7 +869,7 @@ function zraCreateAddon(data) {
       }
     }
     if (!contentPath) {
-      throw new Error('MinerU 未生成 content_list.json；请确认模型目录指向完整权重。');
+      failParse('MinerU 未生成 content_list.json；请确认模型目录指向完整权重。');
     }
     const payload = JSON.parse(await Zotero.File.getContentsAsync(contentPath));
     const sourceCount = await (async () => {
@@ -876,7 +881,7 @@ function zraCreateAddon(data) {
     })();
     const pages = mineruPagesFromContentList(payload, sourceCount);
     if (!pages.length) {
-      throw new Error('MinerU 解析完成但没有可用文本；该 PDF 可能是纯图像扫描件。');
+      failParse('MinerU 解析完成但没有可用文本；该 PDF 可能是纯图像扫描件。');
     }
     emitProgress({ phase: 'saving' });
     const stats = {

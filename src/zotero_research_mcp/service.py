@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from . import __version__
-from .analysis import AnalysisTask, PaperAnalysis, PaperAnalysisBuilder, pdf_source
+from .analysis import AnalysisTask, PaperAnalysis, PaperAnalysisBuilder
 from .models import (
     EvidenceResults,
-    EvidenceSpan,
     HealthReport,
     ItemContext,
     PdfExtraction,
-    PdfPage,
     ReadingCard,
     SearchResults,
 )
@@ -19,9 +17,6 @@ from .pdf_geometry import PdfQuoteLocator, QuoteLocation
 from .reading import ReadingCardBuilder
 from .retrieval import EvidenceRetriever
 from .zotero import ZoteroLocalClient
-
-_WEB_AI_FALLBACK_PAGE_LIMIT = 6
-_WEB_AI_FALLBACK_PAGE_CHARACTERS = 9_000
 
 
 class ResearchService:
@@ -40,9 +35,6 @@ class ResearchService:
 
     def close(self) -> None:
         self._zotero.close()
-
-    def verify_instance(self, expected_server_id: str) -> None:
-        self._zotero.pin_instance(expected_server_id)
 
     def parser_status(self) -> dict[str, str | None]:
         return {'fast': 'pymupdf', 'heavy': self._pdf_extractor.heavy_parser_name}
@@ -158,34 +150,3 @@ class ResearchService:
     def locate_quote(self, attachment_key: str, *, page: int, quote: str) -> QuoteLocation:
         path = self._zotero.get_attachment_path(attachment_key)
         return PdfQuoteLocator().locate(path, page=page, quote=quote)
-
-    def fallback_page_context(self, extraction: PdfExtraction) -> list[EvidenceSpan]:
-        """Bounded opening/closing pages for questions that miss BM25 terms."""
-
-        pages = extraction.pages
-        if not pages:
-            return []
-        selected_pages: list[PdfPage] = []
-        for page in [*pages[:4], *pages[-2:]]:
-            if page.number not in {item.number for item in selected_pages}:
-                selected_pages.append(page)
-        spans: list[EvidenceSpan] = []
-        for page in selected_pages[:_WEB_AI_FALLBACK_PAGE_LIMIT]:
-            text = page.text.strip()[:_WEB_AI_FALLBACK_PAGE_CHARACTERS]
-            if not text:
-                continue
-            spans.append(
-                EvidenceSpan(
-                    evidence_id=f'{extraction.attachment_key}:p{page.number}:context',
-                    page=page.number,
-                    chunk_index=1,
-                    text=text,
-                    score=0.0,
-                    source=pdf_source(extraction.attachment_key, page.number),
-                )
-            )
-        return spans
-
-
-def _compact(value: str) -> str:
-    return ''.join(value.split()).replace('­', '').casefold()

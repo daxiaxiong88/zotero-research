@@ -193,8 +193,7 @@
       health: null,
     };
     var FONT_SIZES = ['s', 'm', 'l', 'xl'];
-    var FONT_LABELS = { s: 'A−', m: 'A', l: 'A+', xl: 'A++' };
-    var refs = {};
+      var refs = {};
     var apiAbort = null;
     var sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
     // Pasted screenshot awaiting the next send: { dataUrl, mediaType, name }.
@@ -1256,7 +1255,7 @@
       else if (action === 'webai-open') openWebAI();
       else if (action === 'webai-clear') clearChat();
       else if (action === 'selection-clear') clearSelection();
-      else if (action === 'navigate-selection' || action === 'navigate-evidence') {
+      else if (action === 'navigate-selection') {
         navigateTo(target.getAttribute('data-attachment-key'), target.getAttribute('data-page'));
       } else if (action === 'distill-note') writeDistillNote(Number(target.getAttribute('data-message-index')));
       else if (action === 'distill-copy') copyDistillMarkdown(Number(target.getAttribute('data-message-index')));

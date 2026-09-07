@@ -267,7 +267,11 @@
               mediaType: String(message.mediaType || 'image/png'),
             };
           }
-          return { type: 'text', text: String(message.text || '') };
+          const text = String(message.text || '');
+          if (text.length > MAX_TEXT_LENGTH) {
+            throw new Error('任务文本超过大小限制，请拆分后发送。');
+          }
+          return { type: 'text', text };
         }),
         meta: meta || {},
         text: '', notice: '', done: false, complete: false, error: '', claimedAt: null, completedAt: 0,
