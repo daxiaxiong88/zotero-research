@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import zipfile
 from collections.abc import Sequence
@@ -20,6 +21,11 @@ EXPECTED_ZOTERO_MIN_VERSION = "10.0"
 EXPECTED_ZOTERO_MAX_VERSION = "10.0.*"
 DEFAULT_OUTPUT = REPO_ROOT / "dist" / f"zotero-research-{PACKAGE_VERSION}.xpi"
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+# Rollback copy kept next to the release: the package that shipped before the
+# newest build, with the same sidecars, so a bad release can be undone without
+# rebuilding from an older checkout.
+PREVIOUS_STABLE_NAME = "zotero-research-previous-stable.xpi"
+_SIDECAR_SUFFIXES = (".sha256", ".manifest.json")
 
 ALLOWED_RUNTIME_FILES = frozenset(
     {
@@ -93,6 +99,7 @@ def build_addon(
 
     source_files = _validate_addon_tree(source_dir)
     manifest = _read_manifest(source_dir / "manifest.json")
+    _promote_previous_release(output_path)
 
     file_bytes = {
         relative_path: (source_dir / Path(relative_path)).read_bytes()
@@ -119,6 +126,44 @@ def build_addon(
         sha256_path=sha256_path,
         manifest_path=manifest_path,
     )
+
+
+def _promote_previous_release(output_path: Path) -> Path | None:
+    """Copy the package this build replaces to the rollback slot.
+
+    The newest existing package wins, so rebuilding the current version keeps
+    the build you are about to overwrite, while a version bump keeps the
+    release that shipped before it. Sidecars are copied byte for byte; only
+    the sidecars that exist are carried over.
+    """
+
+    output_dir = output_path.parent
+    if not output_dir.is_dir():
+        return None
+    candidates = [
+        path
+        for path in output_dir.glob("*.xpi")
+        if path.is_file() and path.name != PREVIOUS_STABLE_NAME
+    ]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda path: path.stat().st_mtime)
+    previous = output_dir / PREVIOUS_STABLE_NAME
+    shutil.copyfile(newest, previous)
+    for suffix in _SIDECAR_SUFFIXES:
+        sidecar = newest.with_name(newest.name + suffix)
+        if not sidecar.is_file():
+            continue
+        target = previous.with_name(previous.name + suffix)
+        if suffix == ".sha256":
+            # The digest is copied, the recorded filename follows the copy so
+            # the rollback package still verifies under its own name.
+            digest = sidecar.read_text(encoding="utf-8").split()
+            if digest and len(digest[0]) == 64:
+                _write_text_atomically(target, f"{digest[0]}  {previous.name}\n")
+                continue
+        shutil.copyfile(sidecar, target)
+    return previous
 
 
 def _resolve_directory(value: Path | str, description: str) -> Path:

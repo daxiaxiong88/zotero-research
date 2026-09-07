@@ -882,7 +882,10 @@
           assistant.evidence = prepared.spans;
           // Keep original material for follow-up grounding, not a duplicate of
           // the entire task prompt or a claim that a former PDF is still attached.
-          outgoing.sourceContext = boundedText(prepared.sources, 24000);
+          // Store the untrimmed text: the archive cap lives in the storage
+          // layer and every prompt path re-caps on its own, so trimming here
+          // only threw away the tail before anyone could read it.
+          outgoing.sourceContext = prepared.sources;
           var prompt = buildPrompt(clean, prepared, context, task);
           if (prompt.length > HISTORY_CHAR_LIMIT - 1000) throw new Error('本轮输入过长，请拆分问题或材料后再发送。');
           if (isApiMode()) {
@@ -1270,7 +1273,7 @@
             return {
               role: m.role === 'assistant' ? 'assistant' : 'user',
               content: String(m.content || ''),
-              sourceContext: boundedText(m.sourceContext || '', 24000),
+              sourceContext: text(m.sourceContext),
               evidence: Array.isArray(m.evidence) ? m.evidence : [],
               contextNotice: text(m.contextNotice),
               distill: Boolean(m.distill),

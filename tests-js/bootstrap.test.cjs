@@ -379,17 +379,28 @@ test('legacy backup preserves exact bytes once and backup failure leaves old fil
   assert.equal(await differentAdapter.saveChatSession('BACKUP03', { messages: [{ role: 'user', content: 'new' }] }), true);
   assert.equal(different.files.get(differentBackup), previousLegacy);
 
+  // A backup that cannot be parsed has no rollback value and must not block
+  // migration forever, so it is rewritten from the old archive instead.
   const damaged = sessionHarness();
   const damagedMain = damaged.pathFor('BACKUP04', '.json');
   const damagedBackup = damaged.pathFor('BACKUP04', '.json.pre-v2.bak');
   damaged.files.set(damagedMain, legacy);
   damaged.files.set(damagedBackup, 'not-json');
   const damagedAdapter = await damaged.start();
-  assert.equal(await damagedAdapter.saveChatSession('BACKUP04', { messages: [{ role: 'user', content: 'new' }] }), false);
-  assert.equal(damaged.files.get(damagedMain), legacy);
-  damaged.files.set(damagedBackup, JSON.stringify({ format: 2 }));
-  assert.equal(await damagedAdapter.saveChatSession('BACKUP04', { messages: [{ role: 'user', content: 'newer' }] }), false);
-  assert.equal(damaged.files.get(damagedMain), legacy);
+  assert.equal(await damagedAdapter.saveChatSession('BACKUP04', { messages: [{ role: 'user', content: 'new' }] }), true);
+  assert.equal(damaged.files.get(damagedBackup), legacy, 'unusable backup is rewritten from the old archive');
+  assert.equal(JSON.parse(damaged.files.get(damagedMain)).format, 2, 'migration is no longer blocked');
+  assert.equal(await damagedAdapter.saveChatSession('BACKUP04', { messages: [{ role: 'user', content: 'newer' }] }), true);
+  assert.equal(damaged.files.get(damagedBackup), legacy, 'the rewritten backup is then left alone');
+
+  const partial = sessionHarness();
+  const partialMain = partial.pathFor('BACKUP06', '.json');
+  const partialBackup = partial.pathFor('BACKUP06', '.json.pre-v2.bak');
+  partial.files.set(partialMain, legacy);
+  partial.files.set(partialBackup, JSON.stringify({ format: 2 }));
+  const partialAdapter = await partial.start();
+  assert.equal(await partialAdapter.saveChatSession('BACKUP06', { messages: [{ role: 'user', content: 'new' }] }), true);
+  assert.equal(partial.files.get(partialBackup), legacy, 'a format-only file is not a usable backup either');
 
   const corrupt = sessionHarness();
   const corruptMain = corrupt.pathFor('BACKUP05', '.json');

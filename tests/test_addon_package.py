@@ -341,3 +341,63 @@ def test_cli_defaults_are_repo_local_and_main_reports_outputs(
     )
     stdout = capsys.readouterr().out
     assert str(output.resolve()) in stdout
+
+
+def test_build_addon_promotes_replaced_package_to_previous_stable(tmp_path: Path) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    output_dir.mkdir()
+    older = output_dir / "zotero-research-0.6.2.xpi"
+    older.write_bytes(b"older release")
+    (output_dir / "zotero-research-0.6.2.xpi.sha256").write_bytes(b"older sha")
+    newest = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=newest)
+
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    assert previous.read_bytes() == b"older release"
+    assert (output_dir / "zotero-research-previous-stable.xpi.sha256").read_bytes() == b"older sha"
+    assert newest.read_bytes() != b"older release"
+
+    # Rebuilding the same version keeps the build that is about to be replaced.
+    first_build = newest.read_bytes()
+    build_addon(addon_dir=addon_dir, output=newest)
+    assert previous.read_bytes() == first_build
+
+
+def test_build_addon_promotes_nothing_without_a_previous_package(tmp_path: Path) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    output_dir.mkdir()
+
+    build_addon(addon_dir=addon_dir, output=output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi")
+
+    assert not (output_dir / "zotero-research-previous-stable.xpi").exists()
+
+
+def test_build_addon_previous_stable_sha256_names_the_copy(tmp_path: Path) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    output_dir.mkdir()
+    older = output_dir / "zotero-research-0.6.2.xpi"
+    payload = b"older release"
+    older.write_bytes(payload)
+    (output_dir / "zotero-research-0.6.2.xpi.sha256").write_text(
+        f"{hashlib.sha256(payload).hexdigest()}  {older.name}\n", encoding="utf-8"
+    )
+
+    build_addon(
+        addon_dir=addon_dir,
+        output=output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi",
+    )
+
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    sidecar = output_dir / "zotero-research-previous-stable.xpi.sha256"
+    recorded = sidecar.read_text(encoding="utf-8")
+    assert recorded.startswith(hashlib.sha256(payload).hexdigest())
+    assert recorded.strip().endswith(previous.name)
+
+

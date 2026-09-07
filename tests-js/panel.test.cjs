@@ -677,6 +677,32 @@ test('会话持久化：回答后保存，重开文献自动恢复并提示继�
   second.panel.destroy();
 });
 
+test('大材料原样交给存档层：面板不再提前截到 24000', async () => {
+  const saved = [];
+  const harness = makeRelayHarness();
+  let longText = '';
+  for (let index = 0; index < 3000; index += 1) longText += '第' + index + '段原始摘录；';
+  const adapter = makeAdapter(harness, {
+    retrieveEvidence() {
+      return Promise.resolve([{ evidence_id: 'p9:c1', page: 9, chunk_index: 1, text: longText, score: 1 }]);
+    },
+    saveChatSession(itemKey, session) { saved.push({ itemKey, session }); return true; },
+  });
+  const view = setup(adapter);
+  view.panel.setContext(CONTEXT);
+  await settle();
+  view.root.querySelector('[data-testid="webai-chat-input"]').value = '这段讲了什么';
+  view.root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '回答' });
+  await settle();
+  const user = saved.at(-1).session.messages.find((entry) => entry.role === 'user');
+  assert.ok(user.sourceContext.length > 24000, '材料不再在面板层被截断');
+  assert.ok(user.sourceContext.includes(longText.slice(0, 200)), '材料开头完整');
+  assert.ok(user.sourceContext.includes(longText.slice(-200)), '材料尾部不再被丢弃');
+  view.panel.destroy();
+});
+
 test('清空同时删除本机存档，重开文献不会复活旧对话', async () => {
   const saved = [];
   const harness = makeRelayHarness();

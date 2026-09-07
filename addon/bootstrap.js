@@ -59,6 +59,9 @@ function zraCreateAddon(data) {
 
   const SESSION_FORMAT = 2;
   const SESSION_MESSAGE_LIMIT = 500;
+  // The single archive-side cap for one turn's reference material. The panel
+  // hands over the untrimmed text; raising this trades file size for keeping
+  // more of the original excerpts a long turn pulled in.
   const SESSION_SOURCE_LIMIT = 24000;
   const SESSION_EVIDENCE_LIMIT = 200;
   const sessionQueues = new Map();
@@ -251,17 +254,18 @@ function zraCreateAddon(data) {
     try { current = JSON.parse(raw); } catch (_) { current = null; }
     if (current && current.format === SESSION_FORMAT) return;
     if (hasBackup) {
-      // An existing backup is never overwritten. Verify it before allowing a
-      // retry after a partial/failed backup write to replace the old archive.
-      const saved = await Zotero.File.getContentsAsync(paths.backup);
-      if (!isCompleteSessionJSON(saved)) throw new Error('现有迁移备份不是完整会话 JSON。');
-      return;
+      // A readable, complete backup is never overwritten. One that cannot be
+      // parsed has no rollback value, and refusing to touch it would fail
+      // every later save for this paper, so rewrite it instead of giving up.
+      let saved = null;
+      try { saved = await Zotero.File.getContentsAsync(paths.backup); } catch (_) { saved = null; }
+      if (isCompleteSessionJSON(saved)) return;
     }
     // Do not use a read/modify/write JSON round trip: the backup must retain
     // the exact contents returned for the old archive.
     await Zotero.File.putContentsAsync(paths.backup, raw);
-    const saved = await Zotero.File.getContentsAsync(paths.backup);
-    if (saved !== raw) throw new Error('迁移备份回读与旧存档不一致。');
+    const written = await Zotero.File.getContentsAsync(paths.backup);
+    if (written !== raw) throw new Error('迁移备份回读与旧存档不一致。');
   }
 
   async function writeSessionSnapshot(payload) {
