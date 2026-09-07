@@ -746,7 +746,7 @@ function zraCreateAddon(data) {
    * land in the disk cache keyed by the attachment stamp and are then picked
    * up by pdfPages() for every later question.
    */
-  async function deepParseWithMineru(attachmentKey) {
+  async function deepParseWithMineru(attachmentKey, onProgress) {
     const info = await attachment(attachmentKey);
     const cached = await readMineruCache(attachmentKey, info.stamp);
     if (cached) return { pages: cached.pages, cached: true, stats: cached.stats };
@@ -792,10 +792,48 @@ function zraCreateAddon(data) {
     const process = await Subprocess.call({
       command: executable,
       arguments: ['-p', path, '-o', outputDirectory, '-b', 'vlm-engine'],
-      environment, environmentAppend: true, stderr: 'pipe',
+      environment, environmentAppend: true, stdout: 'pipe', stderr: 'pipe',
     });
-    const stderrTail = [];
-    (async () => { try { while (await process.stderr.readString()) { /* drained */ } } catch (_) {} })();
+    // MinerU writes tqdm-style progress ("Processing pages: 3/10") and a
+    // final "Processed N/M pages" to its logs; parse the page counts out of
+    // the rolling tail and hand them to the panel progress bar.
+    const emitProgress = (info) => {
+      if (typeof onProgress !== 'function') return;
+      try { onProgress(info); } catch (_) { /* progress is advisory */ }
+    };
+    let progressTail = '';
+    let lastEmitted = '';
+    const parseProgress = (chunk) => {
+      progressTail = (progressTail + String(chunk)).slice(-4000);
+      const patterns = [
+        /Processing pages:[^\r\n]*?(\d+)\s*\/\s*(\d+)/g,
+        /Processed\s+(\d+)\s*\/\s*(\d+)\s*pages/g,
+      ];
+      let latest = null;
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(progressTail)) !== null) {
+          const total = Number(match[2]);
+          const current = Number(match[1]);
+          if (total > 0 && current >= 0 && current <= total) {
+            latest = { current, total };
+          }
+        }
+      }
+      if (latest && latest.current + '/' + latest.total !== lastEmitted) {
+        lastEmitted = latest.current + '/' + latest.total;
+        emitProgress({ phase: 'parsing', current: latest.current, total: latest.total });
+      }
+    };
+    emitProgress({ phase: 'starting' });
+    (async () => {
+      try { while (true) { const chunk = await process.stdout.readString(); if (!chunk) break; parseProgress(chunk); } }
+      catch (_) {}
+    })();
+    (async () => {
+      try { while (true) { const chunk = await process.stderr.readString(); if (!chunk) break; parseProgress(chunk); } }
+      catch (_) {}
+    })();
     const deadline = Date.now() + 15 * 60 * 1000;
     let exitCode = null;
     while (Date.now() < deadline) {
@@ -840,6 +878,7 @@ function zraCreateAddon(data) {
     if (!pages.length) {
       throw new Error('MinerU 解析完成但没有可用文本；该 PDF 可能是纯图像扫描件。');
     }
+    emitProgress({ phase: 'saving' });
     const stats = {
       pageCount: sourceCount,
       textPages: pages.length,

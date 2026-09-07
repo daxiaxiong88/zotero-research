@@ -185,6 +185,7 @@
       queueing: false,
       apiBusy: false,
       deepParsing: false,
+      deepTimer: null,
       restoring: false,
       attachPdf: false,
       fontSize: 'm',
@@ -497,6 +498,18 @@
         className: 'zrp-chat-status', 'data-testid': 'webai-chat-status', role: 'status',
       }, '等待网页连接');
       chatSection.appendChild(refs.chatStatus);
+      var deepProgress = createElement(document, 'div', {
+        className: 'zrp-progress', 'data-testid': 'deep-progress',
+      });
+      var progressTrack = createElement(document, 'div', { className: 'zrp-progress-track' });
+      refs.deepProgressFill = createElement(document, 'div', { className: 'zrp-progress-fill zrp-indeterminate' });
+      progressTrack.appendChild(refs.deepProgressFill);
+      deepProgress.appendChild(progressTrack);
+      refs.deepProgressLabel = createElement(document, 'div', { className: 'zrp-hint' }, '');
+      deepProgress.appendChild(refs.deepProgressLabel);
+      refs.deepProgress = deepProgress;
+      deepProgress.hidden = true;
+      chatSection.appendChild(deepProgress);
       refs.error = createElement(document, 'div', {
         className: 'zrp-error', 'data-testid': 'error', role: 'alert', hidden: true,
       }, '');
@@ -1117,16 +1130,65 @@
       var generation = contextGeneration;
       state.deepParsing = true;
       setError('');
-      setStatus('深度解析中…首次运行需加载本地模型，可能需要 1-3 分钟；完成后此文献的所有提问自动使用解析结果。');
       renderControls();
+
+      // Progress bar + elapsed timer: the first run can take minutes (model
+      // load), so visible motion and a page counter matter for the wait.
+      var startedAt = Date.now();
+      var current = 0;
+      var total = 0;
+      function clearDeepTimer() {
+        if (state.deepTimer !== null && typeof view.clearInterval === 'function') {
+          view.clearInterval(state.deepTimer);
+        }
+        state.deepTimer = null;
+      }
+      function showProgress(label, fraction) {
+        if (!refs.deepProgress) return;
+        refs.deepProgress.hidden = false;
+        setText(refs.deepProgressLabel, label);
+        if (fraction === null) {
+          refs.deepProgressFill.className = 'zrp-progress-fill zrp-indeterminate';
+          refs.deepProgressFill.style.width = '';
+        } else {
+          refs.deepProgressFill.className = 'zrp-progress-fill';
+          refs.deepProgressFill.style.width = Math.round(fraction * 100) + '%';
+        }
+      }
+      function elapsedSeconds() {
+        return Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+      }
+      function tick() {
+        var base = total > 0
+          ? '解析中：第 ' + current + '/' + total + ' 页'
+          : '加载模型与准备中（首次约 1-3 分钟）';
+        showProgress(base + ' · 已进行 ' + elapsedSeconds() + ' 秒', total > 0 ? current / total : null);
+      }
+      clearDeepTimer();
+      if (typeof view.setInterval === 'function') state.deepTimer = view.setInterval(tick, 1000);
+      tick();
+      function onProgress(info) {
+        if (destroyed || generation !== contextGeneration) return;
+        if (!isObject(info)) return;
+        if (info.phase === 'parsing' && Number(info.total) > 0) {
+          current = Math.max(0, Number(info.current) || 0);
+          total = Math.max(current, Number(info.total));
+          tick();
+        } else if (info.phase === 'saving') {
+          current = 0;
+          total = 0;
+          showProgress('解析完成，正在保存结果… · 已进行 ' + elapsedSeconds() + ' 秒', null);
+        }
+      }
+
       Promise.resolve()
-        .then(function parse() { return adapter.deepParseWithMineru(attachmentKey); })
+        .then(function parse() { return adapter.deepParseWithMineru(attachmentKey, onProgress); })
         .then(function done(result) {
           if (destroyed || generation !== contextGeneration) return;
           var stats = result && result.stats ? result.stats : {};
           setStatus((result && result.cached ? '本文献此前已深度解析（' : '深度解析完成（')
             + (stats.textPages || '?') + '/' + (stats.pageCount || '?') + ' 页含文本'
-            + '）；后续提问将自动使用这份更完整的文本。');
+            + '，用时 ' + elapsedSeconds() + ' 秒）；后续提问将自动使用这份更完整的文本。');
         })
         .catch(function failed(error) {
           if (destroyed || generation !== contextGeneration) return;
@@ -1134,6 +1196,8 @@
           setStatus('');
         })
         .finally(function settled() {
+          clearDeepTimer();
+          if (refs.deepProgress) refs.deepProgress.hidden = true;
           if (destroyed || generation !== contextGeneration) return;
           state.deepParsing = false;
           renderControls();
@@ -1382,6 +1446,10 @@
       },
       focusQuestion() { refs.chatInput.focus(); },
       destroy() {
+        if (state.deepTimer !== null && typeof view.clearInterval === 'function') {
+          view.clearInterval(state.deepTimer);
+        }
+        state.deepTimer = null;
         destroyed = true;
         if (apiAbort) {
           try { apiAbort.abort(); } catch (_) { /* already settled */ }

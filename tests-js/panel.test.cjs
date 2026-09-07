@@ -1255,10 +1255,11 @@ test('存档保存或清空失败时明确提示，不误报已经写盘或已�
 test('深度解析：busy 状态锁定输入，完成后状态显示统计', async () => {
   const harness = makeRelayHarness();
   const adapter = makeAdapter(harness, {
-    deepParseWithMineru(attachmentKey) {
+    deepParseWithMineru(attachmentKey, onProgress) {
       this.parseCalls = this.parseCalls || [];
       this.parseCalls.push(attachmentKey);
       return new Promise((resolve) => {
+        setTimeout(() => onProgress({ phase: 'parsing', current: 1, total: 2 }), 10);
         setTimeout(() => resolve({
           cached: false,
           pages: [{ number: 1, text: 'parsed' }],
@@ -1272,14 +1273,21 @@ test('深度解析：busy 状态锁定输入，完成后状态显示统计', asy
   await settle();
 
   root.querySelector('[data-testid="quick-deep-parse"]').click();
-  // Busy immediately: input disabled while parsing.
+  // Busy immediately: input disabled while parsing, progress bar visible.
   assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, true);
-  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /深度解析中/);
+  assert.equal(root.querySelector('[data-testid="deep-progress"]').hidden, false);
+  assert.match(root.querySelector('.zrp-progress .zrp-hint').textContent, /加载模型与准备中.*已进行/);
+  assert.equal(root.querySelector('.zrp-progress-fill').className.includes('zrp-indeterminate'), true);
   // Double click is a no-op.
   root.querySelector('[data-testid="quick-deep-parse"]').click();
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.deepEqual(adapter.parseCalls, ['ATT-1']);
-  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /深度解析完成（2\/2 页含文本/);
+  assert.match(root.querySelector('[data-testid="deep-progress"] .zrp-hint').textContent, /解析中：第 1\/2 页/);
+  assert.equal(root.querySelector('.zrp-progress-fill').style.width, '50%');
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /深度解析完成（2\/2 页含文本.*用时/);
+  // Bar hides again after completion.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(root.querySelector('[data-testid="deep-progress"]').hidden, true);
   assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
   panel.destroy();
 });

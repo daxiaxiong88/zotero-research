@@ -650,3 +650,27 @@
   font-size: 0.92em;
   color: var(--zrp-accent, #2c5cc5);
 }
+
+/* Deep-parse progress bar */
+.zrp-progress { margin: 4px 0 2px; }
+.zrp-progress[hidden] { display: none; }
+.zrp-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(127, 127, 127, 0.20);
+  overflow: hidden;
+}
+.zrp-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--zrp-accent, #2c5cc5);
+  transition: width 0.3s ease;
+}
+.zrp-progress-fill.zrp-indeterminate {
+  width: 30%;
+  animation: zrp-progress-slide 1.2s infinite ease-in-out;
+}
+@keyframes zrp-progress-slide {
+  0% { margin-left: -30%; }
+  100% { margin-left: 100%; }
+}
