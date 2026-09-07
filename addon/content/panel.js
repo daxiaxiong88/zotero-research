@@ -1136,6 +1136,7 @@
       var startedAt = Date.now();
       var current = 0;
       var total = 0;
+      var stage = '';
       function clearDeepTimer() {
         if (state.deepTimer !== null && typeof view.clearInterval === 'function') {
           view.clearInterval(state.deepTimer);
@@ -1160,7 +1161,7 @@
       function tick() {
         var base = total > 0
           ? '解析中：第 ' + current + '/' + total + ' 页'
-          : '加载模型与准备中（首次约 1-3 分钟）';
+          : (stage || '加载模型与准备中');
         showProgress(base + ' · 已进行 ' + elapsedSeconds() + ' 秒', total > 0 ? current / total : null);
       }
       clearDeepTimer();
@@ -1172,6 +1173,9 @@
         if (info.phase === 'parsing' && Number(info.total) > 0) {
           current = Math.max(0, Number(info.current) || 0);
           total = Math.max(current, Number(info.total));
+          tick();
+        } else if (info.phase === 'stage' && info.stage) {
+          stage = String(info.stage);
           tick();
         } else if (info.phase === 'saving') {
           current = 0;

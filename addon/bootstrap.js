@@ -805,6 +805,10 @@ function zraCreateAddon(data) {
     let lastEmitted = '';
     const parseProgress = (chunk) => {
       progressTail = (progressTail + String(chunk)).slice(-4000);
+      // MinerU writes several tqdm stages; the page count is the truth for
+      // "how far through the document", while Predict is the long VLM
+      // inference pass over page crops. Track both so the bar never sits
+      // still through the minutes-long inference stage.
       const patterns = [
         /Processing pages:[^\r\n]*?(\d+)\s*\/\s*(\d+)/g,
         /Processed\s+(\d+)\s*\/\s*(\d+)\s*pages/g,
@@ -824,7 +828,30 @@ function zraCreateAddon(data) {
         lastEmitted = latest.current + '/' + latest.total;
         emitProgress({ phase: 'parsing', current: latest.current, total: latest.total });
       }
+      // Stage labels: last occurrence of any known stage in the tail wins.
+      const stageNames = {
+        'Loading checkpoint': '加载模型权重',
+        'Layout Output Parsing': '版面分析',
+        'Extract Preparation': '准备推理输入',
+        Predict: '模型推理',
+        'Post Processing': '整理结果',
+        'Processing pages': '写出页面',
+      };
+      let stage = null;
+      let stageAt = -1;
+      for (const [marker, label] of Object.entries(stageNames)) {
+        const at = progressTail.lastIndexOf(marker);
+        if (at > stageAt) {
+          stageAt = at;
+          stage = label;
+        }
+      }
+      if (stage && stage !== lastStage) {
+        lastStage = stage;
+        emitProgress({ phase: 'stage', stage });
+      }
     };
+    let lastStage = '';
     emitProgress({ phase: 'starting' });
     (async () => {
       try { while (true) { const chunk = await process.stdout.readString(); if (!chunk) break; parseProgress(chunk); } }
