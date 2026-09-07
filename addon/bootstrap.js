@@ -864,10 +864,14 @@ function zraCreateAddon(data) {
     const deadline = Date.now() + 15 * 60 * 1000;
     let exitCode = null;
     while (Date.now() < deadline) {
-      exitCode = await Promise.race([
+      const outcome = await Promise.race([
         process.wait(),
         new Promise(resolve => setTimeout(() => resolve(null), 2000)),
       ]);
+      // process.wait() resolves to {exitCode}, not a bare number.
+      exitCode = outcome === null
+        ? null
+        : (outcome && typeof outcome === 'object' ? outcome.exitCode : outcome);
       if (exitCode !== null) break;
     }
     const failParse = (message) => {
