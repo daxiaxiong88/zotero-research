@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Research 科研助手",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Zotero 10 网页 AI 阅读侧栏与页码证据。",
   "author": "Zotero Research contributors",
   "icons": { "48": "content/icon.svg", "96": "content/icon.svg" },

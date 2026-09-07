@@ -32,6 +32,168 @@
     return element;
   }
 
+  // ---------------------------------------------------------------------------
+  // LaTeX → Unicode: covers the simple math web AIs emit inline ($30^\circ$,
+  // \alpha_i, \frac{a}{b}). Anything still containing commands after the pass
+  // returns null and the caller renders the original in a styled raw span.
+  // ---------------------------------------------------------------------------
+
+  var LATEX_SYMBOLS = {
+    alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', varepsilon: 'ε',
+    zeta: 'ζ', eta: 'η', theta: 'θ', vartheta: 'ϑ', iota: 'ι', kappa: 'κ',
+    lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π', varpi: 'ϖ', rho: 'ρ',
+    varrho: 'ϱ', sigma: 'σ', varsigma: 'ς', tau: 'τ', upsilon: 'υ', phi: 'φ',
+    varphi: 'φ', chi: 'χ', psi: 'ψ', omega: 'ω',
+    Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π',
+    Sigma: 'Σ', Upsilon: 'Υ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
+    times: '×', cdot: '·', div: '÷', pm: '±', mp: '∓',
+    leq: '≤', le: '≤', geq: '≥', ge: '≥', neq: '≠', ne: '≠',
+    approx: '≈', equiv: '≡', sim: '∼', simeq: '≃', propto: '∝', infty: '∞',
+    sum: '∑', prod: '∏', int: '∫', partial: '∂', nabla: '∇',
+    in: '∈', notin: '∉', subset: '⊂', subseteq: '⊆', supset: '⊃', supseteq: '⊇',
+    cup: '∪', cap: '∩', emptyset: '∅', varnothing: '∅',
+    forall: '∀', exists: '∃', nexists: '∄', neg: '¬', land: '∧', lor: '∨',
+    rightarrow: '→', to: '→', leftarrow: '←', Rightarrow: '⇒', implies: '⇒',
+    iff: '⇔', leftrightarrow: '↔', mapsto: '↦',
+    ldots: '…', cdots: '⋯', dots: '…', vdots: '⋮',
+    angle: '∠', perp: '⊥', parallel: '∥', therefore: '∴', because: '∵',
+    prime: '′', circ: '∘', star: '⋆', ast: '∗',
+    oplus: '⊕', otimes: '⊗', odot: '⊙',
+    lceil: '⌈', rceil: '⌉', lfloor: '⌊', rfloor: '⌋',
+    degree: '°', percent: '%',
+  };
+
+  var SCRIPT_SUPER = {
+    '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶',
+    '7': '⁷', '8': '⁸', '9': '⁹', '+': '⁺', '-': '⁻', '=': '⁼',
+    '(': '⁽', ')': '⁾', 'n': 'ⁿ', 'i': 'ⁱ',
+  };
+  var SCRIPT_SUB = {
+    '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆',
+    '7': '₇', '8': '₈', '9': '₉', '+': '₊', '-': '₋', '=': '₌',
+    '(': '₍', ')': '₎', 'a': 'ₐ', 'e': 'ₑ', 'h': 'ₕ', 'i': 'ᵢ', 'j': 'ⱼ',
+    'k': 'ₖ', 'l': 'ₗ', 'm': 'ₘ', 'n': 'ₙ', 'o': 'ₒ', 'p': 'ₚ', 'r': 'ᵣ',
+    's': 'ₛ', 't': 'ₜ', 'u': 'ᵤ', 'v': 'ᵥ', 'x': 'ₓ',
+  };
+  var LATEX_ACCENTS = {
+    hat: '̂', bar: '̄', vec: '⃗',
+    tilde: '̃', dot: '̇', ddot: '̈',
+  };
+  var LATEX_BLACKBOARD = { R: 'ℝ', N: 'ℕ', Z: 'ℤ', Q: 'ℚ', C: 'ℂ' };
+
+  /** Convert ^{…}/^x and _{…}/_x; unmappable bodies fall back to ^(…) or _(…). */
+  function scriptPass(text, marker, table) {
+    var out = '';
+    var index = 0;
+    while (index < text.length) {
+      if (text[index] !== marker) { out += text[index]; index += 1; continue; }
+      var next = index + 1;
+      var body = null;
+      if (text[next] === '{') {
+        var depth = 1;
+        var cursor = next + 1;
+        while (cursor < text.length && depth > 0) {
+          if (text[cursor] === '{') depth += 1;
+          else if (text[cursor] === '}') depth -= 1;
+          cursor += 1;
+        }
+        if (depth === 0) { body = text.slice(next + 1, cursor - 1); index = cursor; }
+      } else if (next < text.length && /[^\s]/.test(text[next])) {
+        body = text[next];
+        index = next + 1;
+      }
+      if (body === null) { out += text[index]; index += 1; continue; }
+      var converted = '';
+      var mappable = true;
+      for (var position = 0; position < body.length; position += 1) {
+        var character = body[position];
+        if (table[character]) converted += table[character];
+        else if (character === ' ') converted += ' ';
+        else { mappable = false; break; }
+      }
+      if (mappable) out += converted;
+      else out += marker + '(' + body + ')';
+    }
+    return out;
+  }
+
+  /** Convert common LaTeX to readable Unicode; null when too complex. */
+  function latexToUnicode(input) {
+    var text = String(input || '').trim();
+    if (!text) return null;
+
+    // Sizing and spacing commands carry no meaning in plain text.
+    text = text.replace(/\\(?:left|right|big|Big|bigg|Bigg|bigl|bigr|Bigl|Bigr)\b/g, '');
+    text = text.replace(/\\[,;:!]|\\(?:quad|qquad)\b/g, ' ');
+
+    // Fractions, roots, accents, text wrappers — structural commands first.
+    for (var guard = 0; guard < 12 && /\\[dt]?frac\s*\{/.test(text); guard += 1) {
+      text = text.replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g,
+        function fraction(match, top, bottom) {
+          return (top.length <= 2 ? top : '(' + top + ')')
+            + '/' + (bottom.length <= 2 ? bottom : '(' + bottom + ')');
+        });
+    }
+    text = text.replace(/\\sqrt\s*\{([^{}]*)\}/g, function root(match, body) {
+      return '√(' + body + ')';
+    });
+    text = text.replace(/\\sqrt\b/g, '√');
+    text = text.replace(/\\(hat|bar|vec|tilde|dot|ddot)\s*\{([^{}]*)\}/g,
+      function accent(match, kind, body) {
+        return body + LATEX_ACCENTS[kind];
+      });
+    text = text.replace(
+      /\\(?:text|mathrm|mathbf|mathit|mathsf|operatorname|textbf|textit|bm)\s*\{([^{}]*)\}/g,
+      '$1');
+    text = text.replace(/\\mathbb\s*\{([^{}]*)\}/g, function blackboard(match, body) {
+      return LATEX_BLACKBOARD[body] || body;
+    });
+
+    // ^{\circ} / ^\circ becomes a plain degree sign before script handling.
+    text = text.replace(/\^\s*\{?\\circ\}?/g, '°');
+
+    // Named symbols and operators.
+    text = text.replace(/\\([A-Za-z]+)/g, function symbol(match, name) {
+      return Object.prototype.hasOwnProperty.call(LATEX_SYMBOLS, name)
+        ? LATEX_SYMBOLS[name]
+        : match;
+    });
+    // Escaped literals and leftover spacing.
+    text = text.replace(/\\([%&#{}_])/g, '$1');
+    text = text.replace(/\\[,;:!]/g, ' ');
+
+    // Superscripts then subscripts; unmappable bodies stay readable.
+    text = scriptPass(text, '^', SCRIPT_SUPER);
+    text = scriptPass(text, '_', SCRIPT_SUB);
+
+    // Grouping braces are meaningless once the structure is flattened.
+    text = text.replace(/[{}]/g, '');
+    // Anything still commanding (matrices, cases, align, …) is out of scope.
+    if (/\\[A-Za-z]/.test(text)) return null;
+    text = text.replace(/\s{2,}/g, ' ').trim();
+    return text || null;
+  }
+
+  /** Render one math segment: converted when possible, styled raw otherwise. */
+  function renderMathSpan(doc, parent, latex, display) {
+    var converted = latexToUnicode(latex);
+    if (converted !== null) {
+      parent.appendChild(create(doc, 'span',
+        display ? 'zrp-math zrp-math-block' : 'zrp-math zrp-math-inline', converted));
+      return;
+    }
+    parent.appendChild(create(doc, 'span',
+      display ? 'zrp-math-raw zrp-math-block' : 'zrp-math-raw zrp-math-inline',
+      (display ? '' : '$') + String(latex).trim() + (display ? '' : '$')));
+  }
+
+  /** Heuristic: a $…$ span is math when it looks like math, not currency. */
+  function looksLikeMath(content) {
+    if (!content || content.length > 400) return false;
+    if (/^\s|\s$/.test(content)) return false;
+    return /[\\^_{}]|\\/.test(content);
+  }
+
   // One combined inline pattern; group order matters (see renderInline).
   var INLINE = new RegExp(
     '(' + /\*\*([^*]+)\*\*/.source + ')'
@@ -46,8 +208,8 @@
     node.appendChild(node.ownerDocument.createTextNode(value));
   }
 
-  /** Inline pass: bold/italic/code/strike/links, all built as DOM nodes. */
-  function renderInline(doc, parent, source) {
+  /** Core inline pass: bold/italic/code/strike/links, all built as DOM nodes. */
+  function renderInlineCore(doc, parent, source) {
     var text = String(source || '');
     var cursor = 0;
     var match;
@@ -74,6 +236,21 @@
     if (cursor < text.length) appendText(parent, text.slice(cursor));
   }
 
+  /** Inline pass with $…$ math segments split out before Markdown rules. */
+  function renderInline(doc, parent, source) {
+    var text = String(source || '');
+    var math = /\$([^$\n]+)\$/g;
+    var cursor = 0;
+    var match;
+    while ((match = math.exec(text)) !== null) {
+      if (match.index > cursor) renderInlineCore(doc, parent, text.slice(cursor, match.index));
+      if (looksLikeMath(match[1])) renderMathSpan(doc, parent, match[1], false);
+      else appendText(parent, match[0]);
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < text.length) renderInlineCore(doc, parent, text.slice(cursor));
+  }
+
   function isTableDivider(line) {
     return /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(line) && line.indexOf('-') >= 0;
   }
@@ -83,7 +260,7 @@
       .map(function trim(cell) { return cell.trim(); });
   }
 
-  /** Block pass: fenced code, headings, lists, quotes, tables, rules, paragraphs. */
+  /** Block pass: math blocks, fenced code, headings, lists, quotes, tables, rules, paragraphs. */
   function renderMarkdown(doc, source) {
     var fragment = doc.createDocumentFragment();
     var lines = String(source || '').replace(/\r\n?/g, '\n').split('\n');
@@ -91,6 +268,25 @@
 
     while (index < lines.length) {
       var line = lines[index];
+
+      // Display math block: $$…$$ on one line or across lines.
+      if (/^\s*\$\$/.test(line)) {
+        var single = /^\s*\$\$(.+)\$\$\s*$/.exec(line);
+        if (single) {
+          renderMathSpan(doc, fragment, single[1], true);
+          index += 1;
+          continue;
+        }
+        var mathLines = [];
+        index += 1;
+        while (index < lines.length && lines[index].indexOf('$$') < 0) {
+          mathLines.push(lines[index]);
+          index += 1;
+        }
+        index += 1; // closing $$
+        renderMathSpan(doc, fragment, mathLines.join('\n'), true);
+        continue;
+      }
 
       // Fenced code block.
       var fence = /^\s*(```+|~~~+)\s*([\w+-]*)\s*$/.exec(line);
@@ -208,7 +404,7 @@
       var paragraph = create(doc, 'p', 'zrp-md-p');
       var first = true;
       while (index < lines.length && lines[index].trim()
-        && !/^\s*(```|~~~|#{1,4}\s|>|\|)/.test(lines[index])
+        && !/^\s*(```|~~~|#{1,4}\s|>|\||\$\$)/.test(lines[index])
         && !/^\s*[-*+]\s+/.test(lines[index])
         && !/^\s*\d+[.)]\s+/.test(lines[index])
         && !/^\s*([-*_])\s*(\1\s*){2,}$/.test(lines[index])) {
@@ -222,7 +418,11 @@
     return fragment;
   }
 
-  var api = { splitThinking: splitThinking, renderMarkdown: renderMarkdown };
+  var api = {
+    splitThinking: splitThinking,
+    renderMarkdown: renderMarkdown,
+    latexToUnicode: latexToUnicode,
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ZoteroResearchMarkdown = api;
 })(globalThis);
