@@ -649,7 +649,13 @@ function zraCreateAddon(data) {
   // MinerU deep parsing: manual-trigger, disk-cached page text per attachment.
   // ---------------------------------------------------------------------------
 
-  const mineruDirectory = () => PathUtils.join(sessionsDirectory(), '..', 'zotero-research-mineru');
+  // Same profile base as sessionsDirectory(), but joined directly:
+  // PathUtils.join rejects '..' components (NS_ERROR_FILE_UNRECOGNIZED_PATH).
+  function mineruDirectory() {
+    const base = Zotero.Profile?.dir
+      || Services.dirsvc.get('ProfD', Ci.nsIFile).path;
+    return PathUtils.join(base, 'zotero-research-mineru');
+  }
 
   async function ensureMineruDirectory() {
     const dir = mineruDirectory();
