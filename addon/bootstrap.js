@@ -57,6 +57,12 @@ function zraCreateAddon(data) {
   // Per-paper rolling chat sessions, persisted as JSON in the profile dir.
   // ---------------------------------------------------------------------------
 
+  const SESSION_FORMAT = 2;
+  const SESSION_MESSAGE_LIMIT = 500;
+  const SESSION_SOURCE_LIMIT = 24000;
+  const SESSION_EVIDENCE_LIMIT = 200;
+  const sessionQueues = new Map();
+
   function sessionsDirectory() {
     const base = Zotero.Profile?.dir
       || Services.dirsvc.get('ProfD', Ci.nsIFile).path;
@@ -70,49 +76,317 @@ function zraCreateAddon(data) {
     return dir;
   }
 
-  async function loadChatSession(itemKey) {
+  function reportSessionError(error) {
     try {
-      const path = PathUtils.join(sessionsDirectory(), itemKey + '.json');
-      if (!(await IOUtils.exists(path))) return null;
-      const raw = await Zotero.File.getContentsAsync(path);
+      if (typeof Zotero.logError === 'function') Zotero.logError(error);
+    } catch (_) {}
+  }
+
+  function sessionKey(itemKey) {
+    const key = String(itemKey || '');
+    // Item keys are a single legal filename component. Rejecting separators
+    // keeps a bad caller from making clear() touch another profile file.
+    if (!key || key === '.' || key === '..' || /[\\/\0]/.test(key)) {
+      throw new Error('非法的 Zotero itemKey。');
+    }
+    return key;
+  }
+
+  function sessionPaths(itemKey) {
+    const key = sessionKey(itemKey);
+    const directory = sessionsDirectory();
+    const path = PathUtils.join(directory, key + '.json');
+    return { key, path, backup: path + '.pre-v2.bak' };
+  }
+
+  function cloneSessionValue(value, seen = new Map()) {
+    if (value === null || typeof value !== 'object') return value;
+    if (seen.has(value)) throw new Error('会话数据不能包含循环引用。');
+    seen.set(value, true);
+    let result;
+    if (Array.isArray(value)) result = value.map(entry => cloneSessionValue(entry, seen));
+    else {
+      result = {};
+      for (const key of Object.keys(value)) result[key] = cloneSessionValue(value[key], seen);
+    }
+    seen.delete(value);
+    return result;
+  }
+
+  function boundedSessionText(value) {
+    const source = value === null || value === undefined ? '' : String(value);
+    return source.length <= SESSION_SOURCE_LIMIT
+      ? source
+      : source.slice(0, SESSION_SOURCE_LIMIT) + '\n[此处截断，后续内容未提供]';
+  }
+
+  function evidencePage(span) {
+    return span?.page === undefined || span?.page === null || span?.page === ''
+      ? '?' : String(span.page);
+  }
+
+  function historicalSourceContext(evidence) {
+    const lines = (Array.isArray(evidence) ? evidence : [])
+      .map(span => {
+        const text = span && span.text !== undefined && span.text !== null
+          ? String(span.text) : '';
+        return text.trim() ? '（第' + evidencePage(span) + '页）' + text : '';
+      })
+      .filter(Boolean);
+    if (!lines.length) return '';
+    return boundedSessionText(
+      '材料范围：历史证据摘录（原始任务范围未记录）\n' + lines.join('\n\n'),
+    );
+  }
+
+  function compactEvidence(evidence) {
+    if (!Array.isArray(evidence)) return [];
+    return evidence.map(span => {
+      const source = span && span.text !== undefined && span.text !== null
+        ? String(span.text) : '';
+      const compact = {};
+      // Keep only the fields the panel needs to identify and navigate to a
+      // source. Scores, fallback labels and other retrieval metadata can be
+      // regenerated and are intentionally not part of the archive.
+      for (const field of ['evidence_id', 'id', 'page', 'chunk_index', 'index', 'sequence']) {
+        if (span && span[field] !== undefined) compact[field] = cloneSessionValue(span[field]);
+      }
+      compact.text = source.slice(0, SESSION_EVIDENCE_LIMIT);
+      if (source.length > SESSION_EVIDENCE_LIMIT || span?.truncated === true) compact.truncated = true;
+      return compact;
+    });
+  }
+
+  function sessionMessageSnapshot(message) {
+    const source = message && typeof message === 'object' ? message : {};
+    const snapshot = {
+      role: cloneSessionValue(source.role),
+      content: cloneSessionValue(source.content),
+      sourceContext: boundedSessionText(source.sourceContext),
+      evidence: compactEvidence(source.evidence),
+    };
+    if (Object.prototype.hasOwnProperty.call(source, 'distill')) {
+      snapshot.distill = cloneSessionValue(source.distill);
+    }
+    if (Object.prototype.hasOwnProperty.call(source, 'distillRequest')) {
+      snapshot.distillRequest = cloneSessionValue(source.distillRequest);
+    }
+    // The panel may add a short explanation when history/material was
+    // narrowed. It is display/context data, so preserve it verbatim.
+    if (Object.prototype.hasOwnProperty.call(source, 'contextNotice')) {
+      snapshot.contextNotice = cloneSessionValue(source.contextNotice);
+    }
+    return snapshot;
+  }
+
+  function buildSessionSnapshot(itemKey, session) {
+    const key = sessionKey(itemKey);
+    const source = session && typeof session === 'object' ? session : {};
+    const input = Array.isArray(source.messages) ? source.messages : [];
+    // Bound the rolling transcript by message count only. Never use the
+    // compacted evidence size as a reason to drop a question/answer pair.
+    const keptInput = input.slice(-SESSION_MESSAGE_LIMIT);
+
+    // Legacy archives did not persist sourceContext. Reconstruct it from the
+    // assistant's full evidence before compactEvidence() has discarded text.
+    const restoredSources = new Map();
+    for (let index = 0; index < keptInput.length; index += 1) {
+      const user = keptInput[index] || {};
+      if (user.role !== 'user' || String(user.sourceContext || '').trim()) continue;
+      let assistant = null;
+      for (let next = index + 1; next < keptInput.length; next += 1) {
+        if (keptInput[next]?.role === 'user') break;
+        if (keptInput[next]?.role === 'assistant') {
+          assistant = keptInput[next];
+          break;
+        }
+      }
+      const restored = historicalSourceContext(assistant && assistant.evidence);
+      if (restored) restoredSources.set(index, restored);
+    }
+    const kept = keptInput.map((message, index) => {
+      const snapshot = sessionMessageSnapshot(message);
+      if (restoredSources.has(index)) snapshot.sourceContext = restoredSources.get(index);
+      return snapshot;
+    });
+
+    const payload = {
+      format: SESSION_FORMAT,
+      itemKey: key,
+      title: String(source.title || ''),
+      provider: String(source.provider || ''),
+      aiUrl: String(source.aiUrl || ''),
+      updatedAt: new Date().toISOString(),
+      messages: kept,
+    };
+    return cloneSessionValue(payload);
+  }
+
+  async function readSessionFile(paths) {
+    try {
+      if (!(await IOUtils.exists(paths.path))) return null;
+      const raw = await Zotero.File.getContentsAsync(paths.path);
       const data = JSON.parse(raw);
       if (!data || !Array.isArray(data.messages)) return null;
       return data;
     } catch (error) {
-      Zotero.logError(error);
+      reportSessionError(error);
       return null;
     }
   }
 
-  async function saveChatSession(itemKey, session) {
+  function isCompleteSessionJSON(raw) {
     try {
-      await ensureSessionsDirectory();
-      const path = PathUtils.join(sessionsDirectory(), itemKey + '.json');
-      const payload = {
-        itemKey,
-        title: String(session.title || ''),
-        provider: String(session.provider || ''),
-        aiUrl: String(session.aiUrl || ''),
-        updatedAt: new Date().toISOString(),
-        // Bound the rolling session so a long history cannot grow the file forever.
-        messages: (session.messages || []).slice(-500),
-      };
-      await Zotero.File.putContentsAsync(path, JSON.stringify(payload));
-      return true;
-    } catch (error) {
-      Zotero.logError(error);
+      const data = JSON.parse(raw);
+      return !!data && typeof data === 'object' && Array.isArray(data.messages);
+    } catch (_) {
       return false;
     }
   }
 
-  async function clearChatSession(itemKey) {
-    try {
-      const path = PathUtils.join(sessionsDirectory(), itemKey + '.json');
-      if (await IOUtils.exists(path)) await IOUtils.remove(path);
-      return true;
-    } catch (_) {
-      return false;
+  async function backupLegacyFile(paths) {
+    const hasBackup = await IOUtils.exists(paths.backup);
+    const raw = await Zotero.File.getContentsAsync(paths.path);
+    let current;
+    try { current = JSON.parse(raw); } catch (_) { current = null; }
+    if (current && current.format === SESSION_FORMAT) return;
+    if (hasBackup) {
+      // An existing backup is never overwritten. Verify it before allowing a
+      // retry after a partial/failed backup write to replace the old archive.
+      const saved = await Zotero.File.getContentsAsync(paths.backup);
+      if (!isCompleteSessionJSON(saved)) throw new Error('现有迁移备份不是完整会话 JSON。');
+      return;
     }
+    // Do not use a read/modify/write JSON round trip: the backup must retain
+    // the exact contents returned for the old archive.
+    await Zotero.File.putContentsAsync(paths.backup, raw);
+    const saved = await Zotero.File.getContentsAsync(paths.backup);
+    if (saved !== raw) throw new Error('迁移备份回读与旧存档不一致。');
+  }
+
+  async function writeSessionSnapshot(payload) {
+    const paths = sessionPaths(payload.itemKey);
+    await ensureSessionsDirectory();
+    if (await IOUtils.exists(paths.path)) await backupLegacyFile(paths);
+    await Zotero.File.putContentsAsync(paths.path, JSON.stringify(payload));
+    return true;
+  }
+
+  async function removeSessionFiles(itemKey) {
+    const paths = sessionPaths(itemKey);
+    let ok = true;
+    for (const path of [paths.path, paths.backup]) {
+      try {
+        if (await IOUtils.exists(path)) await IOUtils.remove(path);
+      } catch (error) {
+        reportSessionError(error);
+        ok = false;
+      }
+    }
+    return ok;
+  }
+
+  function resolveSessionEntry(entry, result) {
+    for (const resolve of entry.waiters.splice(0)) {
+      try { resolve(result); } catch (_) {}
+    }
+  }
+
+  async function drainSessionQueue(key, queue) {
+    try {
+      while (queue.entries.length) {
+        const entry = queue.entries.shift();
+        let result;
+        try {
+          if (entry.type === 'save') result = await writeSessionSnapshot(entry.payload);
+          else if (entry.type === 'clear') result = await removeSessionFiles(key);
+          else result = await readSessionFile(sessionPaths(key));
+        } catch (error) {
+          reportSessionError(error);
+          result = entry.type === 'load' ? null : false;
+        }
+        resolveSessionEntry(entry, result);
+      }
+    } finally {
+      queue.running = false;
+      queue.drainPromise = null;
+      if (!queue.entries.length && sessionQueues.get(key) === queue) sessionQueues.delete(key);
+    }
+  }
+
+  function startSessionDrain(key, queue) {
+    if (queue.running) return;
+    queue.running = true;
+    queue.drainPromise = drainSessionQueue(key, queue);
+  }
+
+  function enqueueSessionOperation(itemKey, type, payload) {
+    const key = sessionKey(itemKey);
+    let queue = sessionQueues.get(key);
+    if (!queue) {
+      queue = { entries: [], running: false, drainPromise: null };
+      sessionQueues.set(key, queue);
+    }
+    return new Promise(resolve => {
+      if (type === 'save') {
+        const tail = queue.entries[queue.entries.length - 1];
+        if (tail?.type === 'save') {
+          // A pending save is superseded, but all callers still settle with
+          // the result of the one write that represents their queue interval.
+          tail.payload = payload;
+          tail.waiters.push(resolve);
+        } else {
+          queue.entries.push({ type, payload, waiters: [resolve] });
+        }
+      } else if (type === 'clear') {
+        // Clear is a barrier. Drop only saves that have not started and are
+        // immediately before this barrier; saves after it remain after clear.
+        for (let index = queue.entries.length - 1; index >= 0; index -= 1) {
+          const entry = queue.entries[index];
+          if (entry.type !== 'save') break;
+          queue.entries.splice(index, 1);
+          resolveSessionEntry(entry, false);
+        }
+        queue.entries.push({ type, waiters: [resolve] });
+      } else {
+        queue.entries.push({ type, waiters: [resolve] });
+      }
+      startSessionDrain(key, queue);
+    });
+  }
+
+  async function flushSessionQueues() {
+    // Await queue promises instead of polling. A stop call does not create
+    // new panel work, but re-check after the await in case another item was
+    // enqueued by a callback already on the event loop.
+    while (true) {
+      const pending = Array.from(sessionQueues.values())
+        .map(queue => queue.drainPromise)
+        .filter(Boolean);
+      if (!pending.length) return;
+      await Promise.all(pending);
+    }
+  }
+
+  async function loadChatSession(itemKey) {
+    if (!alive) return null;
+    try { return await enqueueSessionOperation(itemKey, 'load'); }
+    catch (error) { reportSessionError(error); return null; }
+  }
+
+  async function saveChatSession(itemKey, session) {
+    if (!alive) return false;
+    let payload;
+    try { payload = buildSessionSnapshot(itemKey, session); }
+    catch (error) { reportSessionError(error); return false; }
+    try { return await enqueueSessionOperation(payload.itemKey, 'save', payload); }
+    catch (error) { reportSessionError(error); return false; }
+  }
+
+  async function clearChatSession(itemKey) {
+    if (!alive) return false;
+    try { return await enqueueSessionOperation(itemKey, 'clear'); }
+    catch (error) { reportSessionError(error); return false; }
   }
 
   /**
@@ -769,6 +1043,7 @@ function zraCreateAddon(data) {
       try { Services.obs.removeObserver(reconnectObserver, ZRA_TOPIC); } catch (_) {}
       for (const record of records.values()) record.panel?.destroy();
       records.clear();
+      await flushSessionQueues();
       if (sectionID) Zotero.ItemPaneManager.unregisterSection(sectionID);
       if (preferenceID) Zotero.PreferencePanes.unregister(preferenceID);
       try { delete Zotero.Server.Endpoints[RELAY_ENDPOINT_PATH]; } catch (_) {}

@@ -183,6 +183,7 @@
       pendingTaskId: null,
       queueing: false,
       apiBusy: false,
+      restoring: false,
       attachPdf: false,
       fontSize: 'm',
       messages: [],
@@ -208,6 +209,7 @@
             content: m.content,
             sourceContext: m.sourceContext || '',
             evidence: m.evidence || [],
+            contextNotice: m.contextNotice || '',
             // Keep the distillation flags: restored documents must stay
             // writable to a note and copyable.
             distill: Boolean(m.distill),
@@ -215,14 +217,20 @@
           };
         });
       if (!messages.length) return;
+      var generation = contextGeneration;
+      function saveFailed() {
+        if (!destroyed && generation === contextGeneration) {
+          setError('本机存档保存失败，当前问答仍在侧栏；请检查磁盘状态后重试。');
+        }
+      }
       try {
-        adapter.saveChatSession(state.context.item_key, {
+        Promise.resolve(adapter.saveChatSession(state.context.item_key, {
           title: (state.context && state.context.title) || '',
           provider: state.provider,
           aiUrl: sessionMeta.aiUrl || '',
           messages: messages,
-        });
-      } catch (_) { /* persistence is best-effort */ }
+        })).then(function saved(ok) { if (ok === false) saveFailed(); }, saveFailed);
+      } catch (_) { saveFailed(); }
     }
 
     function distillMarkdown(index) {
@@ -494,7 +502,7 @@
       root.appendChild(chatSection);
 
       var bottomActions = createElement(document, 'div', { className: 'zrp-bottom-actions' });
-      bottomActions.appendChild(createElement(document, 'span', { className: 'zrp-hint' }, '回车发送 · Ctrl/⌘+回车换行 · 点击证据页码跳回 PDF'));
+      bottomActions.appendChild(createElement(document, 'span', { className: 'zrp-hint' }, '回车发送 · Ctrl/⌘+回车换行 · 输入框可 Ctrl+V 粘贴截图 · 选文卡片页码可跳回 PDF'));
       root.appendChild(bottomActions);
     }
 
@@ -522,7 +530,7 @@
 
     function renderControls() {
       var hasContext = Boolean(state.context && state.context.attachment_key);
-      var busy = state.queueing || Boolean(state.pendingTaskId) || state.apiBusy;
+      var busy = state.restoring || state.queueing || Boolean(state.pendingTaskId) || state.apiBusy;
       Array.prototype.forEach.call(refs.quickActions.querySelectorAll('button'), function setQuickState(button) {
         button.disabled = !hasContext || busy;
         if (button.getAttribute('data-web-only') === 'true') button.hidden = isApiMode();
@@ -610,6 +618,7 @@
           article.appendChild(createElement(document, 'div', { className: 'zrp-hint' },
             message.notice || '正在生成…'));
         }
+        if (message.contextNotice) article.appendChild(createElement(document, 'div', { className: 'zrp-hint' }, message.contextNotice));
         if (message.error) article.appendChild(createElement(document, 'div', { className: 'zrp-error-inline' }, message.error));
         if (message.distill && !message.pending && !message.error && message.content) {
           var distillRow = createElement(document, 'div', { className: 'zrp-row zrp-distill-row' });
@@ -667,9 +676,7 @@
             var sources = user.sourceContext
               || (legacySources ? '材料范围：历史证据摘录（原始任务范围未记录）\n' + legacySources : '');
             pairs.push([
-              { role: 'user', content: text(user.content)
-                + (sources ? '\n\n当轮参考材料记录：\n【参考材料开始】\n' + boundedText(sources, 24000)
-                  + '\n【参考材料结束】' : '') },
+              { role: 'user', content: text(user.content), sourceContext: sources },
               { role: 'assistant', content: markdownApi.splitThinking(message.content).answer },
             ]);
           }
@@ -679,17 +686,68 @@
       return pairs;
     }
 
-    function boundedHistory(pairs, budget, maxPairs) {
+    function boundedHistory(pairs, prompt, maxPairs, web) {
+      var limit = web ? MATERIAL_CHAR_LIMIT : HISTORY_CHAR_LIMIT;
       var kept = pairs.slice(-maxPairs);
-      var size = function pairSize(pair) { return pair[0].content.length + pair[1].content.length; };
-      var total = kept.reduce(function sum(n, pair) { return n + size(pair); }, 0);
-      while (kept.length && total > Math.max(0, budget)) total -= size(kept.shift());
-      var omitted = pairs.length - kept.length;
-      return {
-        pairs: kept,
-        notice: '对话范围：本轮携带 ' + kept.length + ' 轮完整问答'
-          + (omitted ? '，已省略 ' + omitted + ' 轮较早或超出预算的问答，不代表全部阅读记录。' : '。'),
-      };
+      function assemble(sourceLimit, measureOnly) {
+        var reduced = false;
+        var history = [];
+        var historyLength = 0;
+        kept.forEach(function addPair(pair) {
+          var suffix = '';
+          var sources = text(pair[0].sourceContext);
+          if (sources) {
+            if (sources.length > sourceLimit) reduced = true;
+            suffix = sourceLimit > 0
+              ? '\n\n当轮参考材料记录：\n【参考材料开始】\n' + boundedText(sources, sourceLimit) + '\n【参考材料结束】'
+              : '\n\n[当轮参考材料因预算省略，本轮无法直接核对这部分原文。]';
+          }
+          historyLength += pair[0].content.length + suffix.length + pair[1].content.length;
+          if (!measureOnly) history.push({ role: 'user', content: pair[0].content + suffix }, { role: 'assistant', content: pair[1].content });
+        });
+        var omitted = pairs.length - kept.length;
+        var notice = '对话范围：本轮携带 ' + kept.length + ' 轮完整问答'
+          + (omitted ? '，已省略 ' + omitted + ' 轮较早或超出预算的问答，不代表全部阅读记录。' : '。')
+          + (reduced ? '历史参考材料已按预算缩减，用户问题与回答未截断。' : '');
+        var webText = '';
+        var ending = '\n\n' + notice;
+        if (web) {
+          ending += '\n\n本次阅读对话（仅作为学习记录，不把 AI 说法自动视为原文事实）：\n';
+          historyLength += kept.length * ('我：'.length + '\n\nAI：'.length) + Math.max(0, kept.length - 1) * 2;
+          var exchanges = [];
+          for (var i = 0; i < history.length; i += 2) {
+            exchanges.push('我：' + history[i].content + '\n\nAI：' + history[i + 1].content);
+          }
+          if (!measureOnly) webText = prompt + ending + exchanges.join('\n\n');
+        } else if (!measureOnly) history.push({ role: 'user', content: prompt + ending });
+        return {
+          messages: history, text: webText, keptPairs: kept.length,
+          notice: notice, changed: Boolean(omitted || reduced),
+          characters: measureOnly ? prompt.length + ending.length + historyLength
+            : (web ? webText.length : history.reduce(function sum(n, m) { return n + m.content.length; }, 0)),
+        };
+      }
+      var result = assemble(24000, true);
+      if (result.characters <= limit) return assemble(24000, false);
+      // Try reducing only reference material before dropping any full exchange.
+      result = assemble(0, true);
+      while (kept.length && result.characters > limit) {
+        kept.shift();
+        result = assemble(0, true);
+      }
+      if (result.characters > limit) throw new Error('本轮输入过长，请拆分问题或材料后再发送。');
+      var low = 0;
+      var high = 24000;
+      while (low < high) {
+        var middle = Math.ceil((low + high) / 2);
+        var candidate = assemble(middle, true);
+        if (candidate.characters <= limit) low = middle;
+        else high = middle - 1;
+      }
+      // Serialize once after sizing, then verify the exact final payload.
+      result = assemble(low, false);
+      if (result.characters > limit) throw new Error('本轮输入过长，请拆分问题或材料后再发送。');
+      return result;
     }
 
     function findAssistantMessage(taskId) {
@@ -730,7 +788,7 @@
     }
 
     function sendMessage(message, options) {
-      if (destroyed || state.queueing || state.pendingTaskId || state.apiBusy) return;
+      if (destroyed || state.restoring || state.queueing || state.pendingTaskId || state.apiBusy) return;
       if (!state.context || !state.context.attachment_key) {
         setError('请先在 Zotero 中打开一篇 PDF 文献。');
         return;
@@ -834,11 +892,10 @@
             return;
           }
           if (distill) {
-            var reading = boundedHistory(readingPairs(outgoing, true), MATERIAL_CHAR_LIMIT - prompt.length - 512, 250);
-            prompt += '\n\n' + reading.notice + '\n\n本次阅读对话（仅作为学习记录，不把 AI 说法自动视为原文事实）：\n'
-              + reading.pairs.map(function exchange(pair) {
-                return '我：' + pair[0].content + '\n\nAI：' + pair[1].content;
-              }).join('\n\n');
+            var reading = boundedHistory(readingPairs(outgoing, true), prompt, 250, true);
+            if (!reading.keptPairs) throw new Error('单轮对话过长，无法在预算内保留完整问答，请分段沉淀。');
+            prompt = reading.text;
+            assistant.contextNotice = reading.changed ? reading.notice : '';
           }
           var taskMessages = [{ text: prompt }];
           if (image) {
@@ -889,11 +946,11 @@
       }
       // Preserve whole exchanges, with sources but without repeated task guides
       // or hidden thinking. Distillation uses this same history exactly once.
-      var prior = boundedHistory(readingPairs(outgoing, assistant.distill), HISTORY_CHAR_LIMIT - prompt.length - 512,
-        assistant.distill ? 250 : HISTORY_PAIR_LIMIT);
-      var history = [];
-      prior.pairs.forEach(function addPair(pair) { history.push(pair[0], pair[1]); });
-      history.push({ role: 'user', content: prompt + '\n\n' + prior.notice });
+      var prior = boundedHistory(readingPairs(outgoing, assistant.distill), prompt,
+        assistant.distill ? 250 : HISTORY_PAIR_LIMIT, false);
+      if (assistant.distill && !prior.keptPairs) throw new Error('单轮对话过长，无法在预算内保留完整问答，请分段沉淀。');
+      var history = prior.messages;
+      assistant.contextNotice = prior.changed ? prior.notice : '';
       state.queueing = false;
       state.apiBusy = true;
       renderMessages();
@@ -988,6 +1045,7 @@
 
     function clearChat() {
       contextGeneration += 1;
+      state.restoring = false;
       if (apiAbort) {
         try { apiAbort.abort(); } catch (_) { /* already settled */ }
         apiAbort = null;
@@ -999,9 +1057,18 @@
       sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
       refs.webaiResume.hidden = true;
       // Drop the on-disk transcript too, or switching papers brings it back.
+      var generation = contextGeneration;
+      function clearFailed() {
+        if (!destroyed && generation === contextGeneration) {
+          setError('本机存档清空失败；重新打开文献后可重试清空。');
+          setStatus('侧栏已清空，但本机存档未清除。');
+        }
+      }
+      var clearing = null;
       if (state.context && state.context.item_key
         && adapter && typeof adapter.clearChatSession === 'function') {
-        try { adapter.clearChatSession(state.context.item_key); } catch (_) { /* best-effort */ }
+        try { clearing = Promise.resolve(adapter.clearChatSession(state.context.item_key)); }
+        catch (_) { clearing = Promise.resolve(false); }
       }
       setError('');
       renderMessages();
@@ -1009,6 +1076,7 @@
         // Web pages keep their own conversation; only a fresh page truly resets it.
         setStatus('已清空本次记录（含本机存档）；网页 AI 中的旧对话仍在，点「打开网页」换一个新对话即可彻底重来。');
       }
+      if (clearing) clearing.then(function cleared(ok) { if (ok === false) clearFailed(); }, clearFailed);
     }
 
     function runQuick(command) {
@@ -1190,9 +1258,11 @@
 
     function restoreSession(itemKey) {
       if (!adapter || typeof adapter.loadChatSession !== 'function') return;
-      Promise.resolve(adapter.loadChatSession(itemKey))
+      var generation = contextGeneration;
+      state.restoring = true;
+      Promise.resolve().then(function load() { return adapter.loadChatSession(itemKey); })
         .then(function accept(data) {
-          if (destroyed || !state.context || state.context.item_key !== itemKey) return;
+          if (destroyed || generation !== contextGeneration || !state.context || state.context.item_key !== itemKey) return;
           if (!data || !data.messages || !data.messages.length) return;
           sessionMeta.aiUrl = String(data.aiUrl || '');
           sessionMeta.updatedAt = String(data.updatedAt || '');
@@ -1202,6 +1272,7 @@
               content: String(m.content || ''),
               sourceContext: boundedText(m.sourceContext || '', 24000),
               evidence: Array.isArray(m.evidence) ? m.evidence : [],
+              contextNotice: text(m.contextNotice),
               distill: Boolean(m.distill),
               distillRequest: Boolean(m.distillRequest),
             };
@@ -1215,7 +1286,12 @@
           refs.webaiResume.hidden = isApiMode() || !sessionMeta.aiUrl;
           renderMessages();
         })
-        .catch(function restoreError() { /* a broken session file is not fatal */ });
+        .catch(function restoreError() { /* a broken session file is not fatal */ })
+        .finally(function restored() {
+          if (destroyed || generation !== contextGeneration) return;
+          state.restoring = false;
+          renderControls();
+        });
     }
 
     return {
@@ -1234,6 +1310,7 @@
         else if (!state.selection || state.selection.attachment_key !== state.context.attachment_key) state.selection = null;
         if (changed) {
           contextGeneration += 1;
+          state.restoring = false;
           if (apiAbort) {
             try { apiAbort.abort(); } catch (_) { /* already settled */ }
             apiAbort = null;

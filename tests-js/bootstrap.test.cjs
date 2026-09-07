@@ -220,3 +220,340 @@ test('retrieveCurrentPageEvidence reads the reader page and scopes evidence to i
   assert.equal(await adapter.retrieveCurrentPageEvidence('PDFTEST1'), null);
   await h.context.shutdown({}, 4);
 });
+
+function sessionHarness(options = {}) {
+  const files = new Map(Object.entries(options.files || {}));
+  const writes = [];
+  const removes = [];
+  const profile = 'C:\\fake-zotero-profile';
+  const pathFor = (key, suffix) => `${profile}\\zotero-research-sessions\\${key}${suffix}`;
+  let writeCount = 0;
+  let blockedWrite = null;
+  let failNextWrite = false;
+  let failNextMainWrite = false;
+  let failBackupWrite = false;
+  let corruptBackupWrite = false;
+  let failRead = false;
+
+  const h = runtime();
+  h.context.Zotero.Profile = { dir: profile };
+  h.context.PathUtils = { join: (...parts) => parts.join('\\') };
+  h.context.IOUtils = {
+    exists: async (name) => files.has(name),
+    makeDirectory: async () => {},
+    remove: async (name) => {
+      removes.push(name);
+      files.delete(name);
+    },
+  };
+  h.context.Zotero.File.getContentsAsync = async (name) => {
+    if (failRead) throw new Error('fixture read failed');
+    if (!files.has(name)) throw new Error('fixture missing file');
+    return files.get(name);
+  };
+  h.context.Zotero.File.putContentsAsync = async (name, value) => {
+    writes.push({ name, value });
+    writeCount += 1;
+    if (failNextWrite) {
+      failNextWrite = false;
+      throw new Error('fixture write failed');
+    }
+    if (failNextMainWrite && name.endsWith('.json') && !name.endsWith('.pre-v2.bak')) {
+      failNextMainWrite = false;
+      throw new Error('fixture main write failed');
+    }
+    if (failBackupWrite && name.endsWith('.pre-v2.bak')) throw new Error('fixture backup failed');
+    const currentBlock = blockedWrite;
+    if (currentBlock && (!currentBlock.path || currentBlock.path === name)
+      && name.endsWith('.json') && !name.endsWith('.pre-v2.bak')) {
+      currentBlock.startedResolve();
+      await currentBlock.promise;
+    }
+    files.set(name, corruptBackupWrite && name.endsWith('.pre-v2.bak') ? value + '\ncorrupt' : value);
+  };
+
+  const originalStart = h.context.startup;
+  return {
+    h,
+    files,
+    writes,
+    removes,
+    pathFor,
+    get writeCount() { return writeCount; },
+    failNextWrite() { failNextWrite = true; },
+    failNextMainWrite() { failNextMainWrite = true; },
+    failBackupWrite(value = true) { failBackupWrite = value; },
+    corruptBackupWrite(value = true) { corruptBackupWrite = value; },
+    failRead(value = true) { failRead = value; },
+    blockNextMainWrite(itemKey = null) {
+      let release;
+      let startedResolve;
+      const promise = new Promise(resolve => { release = resolve; });
+      const started = new Promise(resolve => { startedResolve = resolve; });
+      blockedWrite = { path: itemKey ? pathFor(itemKey, '.json') : null, promise, startedResolve };
+      const unblock = () => { blockedWrite = null; release(); };
+      unblock.started = started;
+      return unblock;
+    },
+    async start() {
+      await originalStart({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+      let adapter;
+      h.context.ZoteroResearchPanel.mount = (_body, value) => {
+        adapter = value;
+        return { setContext() {}, destroy() {} };
+      };
+      const doc = {
+        defaultView: {}, createElementNS: () => ({}), documentElement: { appendChild() {} },
+        getElementById: () => null, querySelector: () => null,
+      };
+      const body = { ownerDocument: doc, appendChild() {}, querySelector: () => null, querySelectorAll: () => [] };
+      h.registrations.section.onRender({ body, doc, item: { id: 42 } });
+      return adapter;
+    },
+  };
+}
+
+test('session storage migrates legacy evidence into sourceContext before compacting it', async () => {
+  const fixture = sessionHarness();
+  const adapter = await fixture.start();
+  const legacy = {
+    itemKey: 'LEGACY01', title: 'Legacy', provider: 'gemini', aiUrl: '', updatedAt: 'old',
+    messages: [
+      { role: 'user', content: 'What is this?', distill: false, distillRequest: false },
+      { role: 'assistant', content: 'Answer', contextNotice: '历史范围已缩减', distill: false, evidence: [{
+        evidence_id: 'p3:c1', page: 3, chunk_index: 1, score: 9,
+        text: '原始证据'.repeat(120), retrieval_fallback: true,
+      }] },
+    ],
+  };
+  const main = fixture.pathFor('LEGACY01', '.json');
+  const raw = JSON.stringify(legacy);
+  fixture.files.set(main, raw);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await adapter.loadChatSession('LEGACY01'))), legacy);
+  assert.equal(fixture.writes.length, 0, 'load must not migrate or write');
+  assert.equal(await adapter.saveChatSession('LEGACY01', legacy), true);
+  const saved = JSON.parse(fixture.files.get(main));
+  assert.equal(saved.format, 2);
+  assert.match(saved.messages[0].sourceContext, /历史证据摘录/);
+  assert.match(saved.messages[0].sourceContext, /原始证据原始证据/);
+  assert.equal(saved.messages[1].evidence[0].text.length, 200);
+  assert.equal(saved.messages[1].evidence[0].truncated, true);
+  assert.equal(saved.messages[1].evidence[0].evidence_id, 'p3:c1');
+  assert.equal(saved.messages[1].evidence[0].page, 3);
+  assert.equal(saved.messages[1].evidence[0].chunk_index, 1);
+  assert.equal(saved.messages[1].evidence[0].score, undefined);
+  assert.equal(saved.messages[1].evidence[0].retrieval_fallback, undefined);
+  assert.equal(saved.messages[1].contextNotice, '历史范围已缩减');
+  assert.equal(await adapter.clearChatSession('LEGACY01'), true);
+  assert.equal(fixture.files.has(main), false);
+  assert.equal(fixture.files.has(fixture.pathFor('LEGACY01', '.json.pre-v2.bak')), false);
+  await fixture.h.context.shutdown({}, 4);
+});
+
+test('legacy backup preserves exact bytes once and backup failure leaves old file untouched', async () => {
+  const legacy = JSON.stringify({ messages: [{ role: 'user', content: 'old' }] });
+  const fixture = sessionHarness();
+  const main = fixture.pathFor('BACKUP01', '.json');
+  const backup = fixture.pathFor('BACKUP01', '.json.pre-v2.bak');
+  fixture.files.clear();
+  fixture.files.set(main, legacy);
+  const adapter = await fixture.start();
+
+  assert.equal(await adapter.saveChatSession('BACKUP01', { messages: [{ role: 'user', content: 'new' }] }), true);
+  assert.equal(fixture.files.get(backup), legacy);
+  const backupWrites = fixture.writes.filter(write => write.name === backup);
+  assert.equal(backupWrites.length, 1);
+  assert.equal(await adapter.saveChatSession('BACKUP01', { messages: [{ role: 'user', content: 'newer' }] }), true);
+  assert.equal(fixture.writes.filter(write => write.name === backup).length, 1);
+  assert.equal(fixture.files.get(backup), legacy);
+
+  const different = sessionHarness();
+  const differentMain = different.pathFor('BACKUP03', '.json');
+  const differentBackup = different.pathFor('BACKUP03', '.json.pre-v2.bak');
+  const previousLegacy = JSON.stringify({ messages: [{ role: 'user', content: 'previous-old' }] });
+  const currentLegacy = JSON.stringify({ messages: [{ role: 'user', content: 'current-old' }] });
+  different.files.set(differentMain, currentLegacy);
+  different.files.set(differentBackup, previousLegacy);
+  const differentAdapter = await different.start();
+  assert.equal(await differentAdapter.saveChatSession('BACKUP03', { messages: [{ role: 'user', content: 'new' }] }), true);
+  assert.equal(different.files.get(differentBackup), previousLegacy);
+
+  const damaged = sessionHarness();
+  const damagedMain = damaged.pathFor('BACKUP04', '.json');
+  const damagedBackup = damaged.pathFor('BACKUP04', '.json.pre-v2.bak');
+  damaged.files.set(damagedMain, legacy);
+  damaged.files.set(damagedBackup, 'not-json');
+  const damagedAdapter = await damaged.start();
+  assert.equal(await damagedAdapter.saveChatSession('BACKUP04', { messages: [{ role: 'user', content: 'new' }] }), false);
+  assert.equal(damaged.files.get(damagedMain), legacy);
+  damaged.files.set(damagedBackup, JSON.stringify({ format: 2 }));
+  assert.equal(await damagedAdapter.saveChatSession('BACKUP04', { messages: [{ role: 'user', content: 'newer' }] }), false);
+  assert.equal(damaged.files.get(damagedMain), legacy);
+
+  const corrupt = sessionHarness();
+  const corruptMain = corrupt.pathFor('BACKUP05', '.json');
+  const corruptBackup = corrupt.pathFor('BACKUP05', '.json.pre-v2.bak');
+  corrupt.files.set(corruptMain, legacy);
+  const corruptAdapter = await corrupt.start();
+  corrupt.corruptBackupWrite();
+  assert.equal(await corruptAdapter.saveChatSession('BACKUP05', { messages: [{ role: 'user', content: 'new' }] }), false);
+  assert.equal(corrupt.files.get(corruptMain), legacy);
+  assert.notEqual(corrupt.files.get(corruptBackup), legacy);
+
+  const retry = sessionHarness();
+  const retryMain = retry.pathFor('BACKUP06', '.json');
+  const retryBackup = retry.pathFor('BACKUP06', '.json.pre-v2.bak');
+  retry.files.set(retryMain, legacy);
+  const retryAdapter = await retry.start();
+  retry.failNextMainWrite();
+  assert.equal(await retryAdapter.saveChatSession('BACKUP06', { messages: [{ role: 'user', content: 'first' }] }), false);
+  assert.equal(retry.files.get(retryMain), legacy);
+  assert.equal(retry.files.get(retryBackup), legacy);
+  assert.equal(await retryAdapter.saveChatSession('BACKUP06', { messages: [{ role: 'user', content: 'second' }] }), true);
+  assert.equal(retry.files.get(retryBackup), legacy);
+  assert.equal(retry.writes.filter(write => write.name === retryBackup).length, 1);
+
+  const failed = sessionHarness();
+  const failedMain = failed.pathFor('BACKUP02', '.json');
+  failed.files.set(failedMain, legacy);
+  const failedAdapter = await failed.start();
+  failed.failBackupWrite();
+  assert.equal(await failedAdapter.saveChatSession('BACKUP02', { messages: [{ role: 'user', content: 'new' }] }), false);
+  assert.equal(failed.files.get(failedMain), legacy);
+  await fixture.h.context.shutdown({}, 4);
+  await different.h.context.shutdown({}, 4);
+  await damaged.h.context.shutdown({}, 4);
+  await corrupt.h.context.shutdown({}, 4);
+  await retry.h.context.shutdown({}, 4);
+  await failed.h.context.shutdown({}, 4);
+});
+
+test('session storage keeps all 500 messages while reducing evidence payload and retaining sourceContext', async () => {
+  const fixture = sessionHarness();
+  const adapter = await fixture.start();
+  const messages = Array.from({ length: 500 }, (_unused, index) => ({
+    role: index % 2 ? 'assistant' : 'user',
+    content: (index % 2 ? 'answer-' : 'question-') + index + ' '.repeat(40),
+    sourceContext: index % 2 ? '' : '材料范围：第' + index + '页\n' + 'source '.repeat(80),
+    evidence: index % 2 ? [{ evidence_id: 'p1:c1', page: 1, chunk_index: 1,
+      score: 4, text: 'evidence '.repeat(120) }] : [],
+    distill: index % 7 === 0,
+    distillRequest: index % 11 === 0,
+  }));
+  const before = Buffer.byteLength(JSON.stringify({ messages }), 'utf8');
+  assert.equal(await adapter.saveChatSession('VOLUME01', { title: 'Volume', messages }), true);
+  const raw = fixture.files.get(fixture.pathFor('VOLUME01', '.json'));
+  const saved = JSON.parse(raw);
+  const after = Buffer.byteLength(raw, 'utf8');
+  assert.equal(saved.messages.length, 500);
+  assert.equal(saved.messages[0].content, messages[0].content);
+  assert.equal(saved.messages[499].content, messages[499].content);
+  assert.equal(saved.messages[0].sourceContext, messages[0].sourceContext);
+  assert.ok(after < before, `expected compacted UTF-8 bytes: ${before} -> ${after}`);
+  await fixture.h.context.shutdown({}, 4);
+});
+
+test('per-item queue serializes writes, coalesces pending saves, and clear is a barrier', async () => {
+  const fixture = sessionHarness();
+  const adapter = await fixture.start();
+  const release = fixture.blockNextMainWrite();
+  const saveA = adapter.saveChatSession('QUEUE001', { messages: [{ role: 'user', content: 'A' }] });
+  await release.started;
+  const saveB = adapter.saveChatSession('QUEUE001', { messages: [{ role: 'user', content: 'B' }] });
+  const saveC = adapter.saveChatSession('QUEUE001', { messages: [{ role: 'user', content: 'C' }] });
+  release();
+  assert.equal(await saveA, true);
+  assert.equal(await saveB, true);
+  assert.equal(await saveC, true);
+  assert.equal(JSON.parse(fixture.files.get(fixture.pathFor('QUEUE001', '.json'))).messages[0].content, 'C');
+  assert.equal(fixture.writes.filter(write => write.name === fixture.pathFor('QUEUE001', '.json')).length, 2);
+
+  const snapshotGate = fixture.blockNextMainWrite();
+  const mutable = {
+    messages: [{ role: 'assistant', content: 'before', contextNotice: 'keep this', evidence: [{
+      evidence_id: 'p1:c1', page: 1, chunk_index: 1, text: 'x'.repeat(250),
+    }] }],
+  };
+  const snapshotSave = adapter.saveChatSession('QUEUE001-SNAPSHOT', mutable);
+  await snapshotGate.started;
+  mutable.messages[0].content = 'after';
+  mutable.messages[0].contextNotice = 'mutated';
+  mutable.messages[0].evidence[0].text = 'changed';
+  snapshotGate();
+  assert.equal(await snapshotSave, true);
+  const immutable = JSON.parse(fixture.files.get(fixture.pathFor('QUEUE001-SNAPSHOT', '.json')));
+  assert.equal(immutable.messages[0].content, 'before');
+  assert.equal(immutable.messages[0].contextNotice, 'keep this');
+  assert.equal(immutable.messages[0].evidence[0].text, 'x'.repeat(200));
+
+  const releaseA = fixture.blockNextMainWrite();
+  const first = adapter.saveChatSession('QUEUE002', { messages: [{ role: 'user', content: 'A' }] });
+  await releaseA.started;
+  const clear = adapter.clearChatSession('QUEUE002');
+  const afterClear = adapter.saveChatSession('QUEUE002', { messages: [{ role: 'user', content: 'B' }] });
+  releaseA();
+  assert.equal(await first, true);
+  assert.equal(await clear, true);
+  assert.equal(await afterClear, true);
+  assert.equal(JSON.parse(fixture.files.get(fixture.pathFor('QUEUE002', '.json'))).messages[0].content, 'B');
+
+  const releaseOld = fixture.blockNextMainWrite();
+  const oldSave = adapter.saveChatSession('QUEUE003', { messages: [{ role: 'user', content: 'old' }] });
+  await releaseOld.started;
+  const barrier = adapter.clearChatSession('QUEUE003');
+  const waitingLoad = adapter.loadChatSession('QUEUE003');
+  releaseOld();
+  assert.equal(await oldSave, true);
+  assert.equal(await barrier, true);
+  assert.equal(await waitingLoad, null);
+  await fixture.h.context.shutdown({}, 4);
+});
+
+test('session queues are independent across items and continue after read/write failures', async () => {
+  const fixture = sessionHarness();
+  const adapter = await fixture.start();
+  const parallelGate = fixture.blockNextMainWrite('PARALLEL-A');
+  const parallelA = adapter.saveChatSession('PARALLEL-A', { messages: [{ role: 'user', content: 'A' }] });
+  await parallelGate.started;
+  const parallelB = adapter.saveChatSession('PARALLEL-B', { messages: [{ role: 'user', content: 'B' }] });
+  assert.equal(await parallelB, true);
+  assert.equal(JSON.parse(fixture.files.get(fixture.pathFor('PARALLEL-B', '.json'))).messages[0].content, 'B');
+  parallelGate();
+  assert.equal(await parallelA, true);
+
+  assert.equal(await adapter.saveChatSession('ITEMA001', { messages: [{ role: 'user', content: 'A' }] }), true);
+  assert.equal(await adapter.saveChatSession('ITEMB001', { messages: [{ role: 'user', content: 'B' }] }), true);
+  assert.equal(await adapter.clearChatSession('ITEMA001'), true);
+  assert.equal(await adapter.loadChatSession('ITEMA001'), null);
+  assert.equal((await adapter.loadChatSession('ITEMB001')).messages[0].content, 'B');
+  assert.equal(fixture.files.has(fixture.pathFor('ITEMB001', '.json')), true);
+
+  fixture.failNextWrite();
+  assert.equal(await adapter.saveChatSession('ITEMB001', { messages: [{ role: 'user', content: 'failed' }] }), false);
+  assert.equal(await adapter.saveChatSession('ITEMB001', { messages: [{ role: 'user', content: 'recovered' }] }), true);
+  assert.equal((await adapter.loadChatSession('ITEMB001')).messages[0].content, 'recovered');
+  fixture.failRead();
+  assert.equal(await adapter.loadChatSession('ITEMB001'), null);
+  fixture.failRead(false);
+  assert.equal(await adapter.saveChatSession('ITEMB001', { messages: [{ role: 'user', content: 'after-read-failure' }] }), true);
+  await fixture.h.context.shutdown({}, 4);
+});
+
+test('shutdown waits for an in-flight session write without polling', async () => {
+  const fixture = sessionHarness();
+  const adapter = await fixture.start();
+  const release = fixture.blockNextMainWrite();
+  const save = adapter.saveChatSession('STOP001', { messages: [{ role: 'user', content: 'queued' }] });
+  let stopped = false;
+  const shutdown = fixture.h.context.shutdown({}, 4).then(() => { stopped = true; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(stopped, false);
+  assert.equal(await adapter.saveChatSession('STOP001', { messages: [{ role: 'user', content: 'late-save' }] }), false);
+  assert.equal(await adapter.clearChatSession('STOP001'), false);
+  assert.equal(await adapter.loadChatSession('STOP001'), null);
+  release();
+  assert.equal(await save, true);
+  await shutdown;
+  assert.equal(stopped, true);
+});

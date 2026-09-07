@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_VERSION = "0.6.2"
+PACKAGE_VERSION = "0.6.3"
 EXPECTED_ADDON_ID = "zotero-research@local.invalid"
 EXPECTED_ZOTERO_MIN_VERSION = "10.0"
 EXPECTED_ZOTERO_MAX_VERSION = "10.0.*"
@@ -331,7 +331,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="XPI output path (default: dist/zotero-research-0.4.6.xpi)",
+        help=f"XPI output path (default: dist/zotero-research-{PACKAGE_VERSION}.xpi)",
     )
     return parser
 

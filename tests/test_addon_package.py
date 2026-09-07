@@ -123,6 +123,26 @@ def test_build_addon_is_byte_for_byte_deterministic(tmp_path: Path) -> None:
     assert first_output.read_bytes() == second_output.read_bytes()
 
 
+def test_build_addon_preserves_previous_release_and_sidecars(tmp_path: Path) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    output_dir.mkdir()
+    previous = {}
+    for suffix in ("", ".sha256", ".manifest.json"):
+        path = output_dir / f"zotero-research-previous-stable.xpi{suffix}"
+        previous[path] = f"original previous release {suffix}".encode()
+        path.write_bytes(previous[path])
+
+    result = build_addon(
+        addon_dir=addon_dir, output=output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+    )
+
+    assert result.xpi_path.is_file()
+    for path, original in previous.items():
+        assert path.read_bytes() == original
+
+
 def test_build_addon_preserves_declared_main_update_url(tmp_path: Path) -> None:
     addon_dir, output = _valid_inputs(tmp_path)
     manifest_path = addon_dir / "manifest.json"

@@ -1064,3 +1064,164 @@ test('选文独占材料：不再附检索片段；清除按钮同步清掉选�
   assert.deepEqual(cleared, ['ATT-1']);
   panel.destroy();
 });
+
+for (const mode of ['api', 'web']) {
+  test(`${mode} 蒸馏单轮过长时不发空历史，原问答和输入控件保留`, async () => {
+    const harness = makeRelayHarness();
+    let apiCalls = 0;
+    const longAnswer = 'A'.repeat(mode === 'api' ? 160000 : 70000);
+    const adapter = makeAdapter(harness, {
+      loadChatSession: async () => ({ messages: [
+        { role: 'user', content: 'UNIQUE-QUESTION' }, { role: 'assistant', content: longAnswer },
+      ] }),
+      getAPIConfig: () => ({ protocol: 'openai', baseUrl: 'https://example.invalid', model: 'test' }),
+      callModelAPI: async () => { apiCalls += 1; return { text: 'Should not run' }; },
+    });
+    const { dom, root, panel } = setupWithMarkdown(adapter);
+    panel.setContext(CONTEXT);
+    await settle();
+    if (mode === 'api') {
+      const provider = root.querySelector('[data-testid="webai-provider"]');
+      provider.value = 'api'; provider.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    }
+    root.querySelector('[data-testid="quick-distill"]').click();
+    await settle();
+    assert.equal(apiCalls, 0);
+    assert.equal(harness.relay.calls.length, 0);
+    assert.match(root.querySelector('[data-testid="error"]').textContent, /单轮对话过长.*分段沉淀/);
+    assert.equal(root.querySelectorAll('.zrp-message').length, 2);
+    assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
+    assert.ok(root.textContent.includes('UNIQUE-QUESTION'));
+    panel.destroy();
+  });
+
+  test(`${mode} 蒸馏先缩减辅助原文，保留完整问答并满足最终文本预算`, async () => {
+    const harness = makeRelayHarness();
+    let request;
+    const answer = 'A'.repeat(mode === 'api' ? 130000 : 45000) + 'COMPLETE-ANSWER-END';
+    const question = 'COMPLETE-USER-QUESTION';
+    const source = 'SOURCE-START\n' + 'S'.repeat(23900);
+    const adapter = makeAdapter(harness, {
+      loadChatSession: async () => ({ messages: [
+        { role: 'user', content: question, sourceContext: source }, { role: 'assistant', content: answer },
+      ] }),
+      getAPIConfig: () => ({ protocol: 'openai', baseUrl: 'https://example.invalid', model: 'test' }),
+      callModelAPI: async value => { request = value; return { text: 'Distilled' }; },
+    });
+    const { dom, root, panel } = setupWithMarkdown(adapter);
+    panel.setContext(CONTEXT);
+    await settle();
+    if (mode === 'api') {
+      const provider = root.querySelector('[data-testid="webai-provider"]');
+      provider.value = 'api'; provider.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    }
+    root.querySelector('[data-testid="quick-distill"]').click();
+    await settle();
+    const outgoing = mode === 'api' ? request.messages.map(m => m.content).join('') : harness.relay.calls[0].request.messages[0].text;
+    assert.ok(outgoing.includes(question));
+    assert.ok(outgoing.includes(answer), 'the entire answer must survive, not only its tail');
+    assert.match(outgoing, /本轮携带 1 轮完整问答/);
+    assert.match(outgoing, /参考材料.*缩减/);
+    assert.ok(outgoing.length <= (mode === 'api' ? 150000 : 60000));
+    assert.ok(root.textContent.includes('参考材料'));
+    if (mode === 'api') {
+      assert.equal(request.messages.length, 3);
+      for (const message of request.messages) assert.deepEqual(Object.keys(message).sort(), ['content', 'role']);
+    }
+    panel.destroy();
+  });
+}
+
+test('网页新会话蒸馏携带本地记录，计入每轮分隔符后仍不超过 60000 字符', async () => {
+  const harness = makeRelayHarness();
+  const messages = Array.from({ length: 250 }, (_, i) => [
+    { role: 'user', content: ('QUESTION-' + i + '-').padEnd(30, 'Q') },
+    { role: 'assistant', content: 'A'.repeat(200) },
+  ]).flat();
+  const adapter = makeAdapter(harness, { loadChatSession: async () => ({ messages }) });
+  const { root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+  harness.relay.emit({ type: 'session', connected: true, ai: 'Gemini', url: 'https://gemini.google.com/app/fresh' });
+  root.querySelector('[data-testid="quick-distill"]').click();
+  await settle();
+  const sent = harness.relay.calls[0].request.messages[0].text;
+  assert.ok(sent.length <= 60000, 'count the fully serialized web prompt including per-exchange separators');
+  assert.match(sent, /QUESTION-249-/);
+  assert.match(sent, /本次阅读对话/);
+  assert.doesNotMatch(sent, /携带 0 轮/);
+  panel.destroy();
+});
+
+test('旧存档恢复完成之前暂不发送，避免新对话覆盖尚未读取的记录', async () => {
+  const harness = makeRelayHarness();
+  let finishLoad;
+  const adapter = makeAdapter(harness, {
+    loadChatSession: () => new Promise(resolve => { finishLoad = resolve; }),
+  });
+  const { root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+  assert.equal(root.querySelector('[data-testid="webai-chat-send"]').disabled, true);
+  root.querySelector('[data-testid="webai-chat-input"]').value = 'Do not send yet';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  assert.equal(harness.relay.calls.length, 0);
+  finishLoad({ messages: [{ role: 'user', content: 'RESTORED-QUESTION' }, { role: 'assistant', content: 'RESTORED-ANSWER' }] });
+  await settle();
+  assert.equal(root.querySelector('[data-testid="webai-chat-send"]').disabled, false);
+  assert.match(root.textContent, /RESTORED-ANSWER/);
+  root.querySelector('[data-testid="quick-distill"]').click();
+  await settle();
+  assert.match(harness.relay.calls[0].request.messages[0].text, /RESTORED-QUESTION/);
+  panel.destroy();
+});
+
+test('切换文献后迟到的旧读取不能把已清空的当前记录复活', async () => {
+  const harness = makeRelayHarness();
+  let finishOldLoad;
+  let calls = 0;
+  const adapter = makeAdapter(harness, {
+    loadChatSession: key => {
+      if (key !== CONTEXT.item_key) return Promise.resolve(null);
+      calls += 1;
+      if (calls === 1) return new Promise(resolve => { finishOldLoad = resolve; });
+      return Promise.resolve({ messages: [{ role: 'user', content: 'CURRENT-QUESTION' }, { role: 'assistant', content: 'CURRENT-ANSWER' }] });
+    },
+    clearChatSession: async () => true,
+  });
+  const { root, panel } = setupWithMarkdown(adapter);
+  panel.setContext(CONTEXT);
+  await settle();
+  panel.setContext({ ...CONTEXT, item_key: 'ITEM-2', attachment_key: 'ATT-2' });
+  await settle();
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="webai-clear"]').click();
+  finishOldLoad({ messages: [{ role: 'user', content: 'STALE-QUESTION' }, { role: 'assistant', content: 'STALE-ANSWER' }] });
+  await settle();
+  assert.equal(root.querySelectorAll('.zrp-message').length, 0);
+  assert.doesNotMatch(root.textContent, /STALE-/);
+  assert.equal(root.querySelector('[data-testid="webai-chat-send"]').disabled, false);
+  panel.destroy();
+});
+
+test('存档保存或清空失败时明确提示，不误报已经写盘或已清除文件', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setupWithMarkdown(makeAdapter(harness, {
+    saveChatSession: async () => false,
+    clearChatSession: async () => { throw new Error('fixture disk error'); },
+  }));
+  panel.setContext(CONTEXT);
+  root.querySelector('[data-testid="webai-chat-input"]').value = 'Keep my question';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: 'Keep my answer' });
+  await settle();
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /存档保存失败/);
+  assert.ok(root.textContent.includes('Keep my answer'));
+  root.querySelector('[data-testid="webai-clear"]').click();
+  await settle();
+  assert.match(root.querySelector('[data-testid="error"]').textContent, /存档清空失败/);
+  assert.match(root.querySelector('[data-testid="webai-chat-status"]').textContent, /本机存档未清除/);
+  panel.destroy();
+});
