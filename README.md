@@ -14,9 +14,9 @@
 - 分任务阅读提示词：翻译逐段保留原文，问答先回答再解释，公式解释变量、单位与假设。全文概览优先取完整提取文本，超过材料预算时改用标明范围的跨页摘录。
 - API 直连的后续问答会携带此前提供的原文和完整问答对；不会重复发送本轮问题。材料截断和历史裁剪均在提示词中标明。
 
-## 架构（v0.4 起与旧版不同）
+## 架构
 
-    Zotero 插件（本进程）
+    Zotero 插件
       ├─ 侧栏面板：快捷命令 / 输入框 / 选文 / 页码证据
       ├─ 中继存储：任务队列 + 会话管理 + 流式回答
       ├─ 证据检索：Zotero.PDFWorker 提取全文 + 内置 BM25
@@ -42,11 +42,6 @@ MinerU 深度解析已兼容 Zotero 10 的 `{exitCode}` 子进程返回格式，
 
 存档改为只保留一份追问原文，证据副本精简为页码和短摘要；旧档首次重新保存前留迁移备份，每篇文献的读取、保存和清空按顺序执行。
 
-### 从 0.4.0 / 0.4.1 更新
-
-- 必须同时更新 XPI 和油猴脚本，并刷新 AI 网页。旧脚本缺少 Zotero 10 要求的 `X-Zotero-Connector-API-Version: 3` 请求头，会被 Zotero 在进入插件前断开连接。
-- 侧栏“打开网页”会让新打开的页面接管连接；已有对话请在该对话页使用油猴菜单“连接 Zotero”，继续沿用网页上下文。
-- 连接切换或主动断开会结束已领取的任务，并显示重试提示，不会自动重复发送问题。
 
 ## 安全边界
 
@@ -60,11 +55,5 @@ MinerU 深度解析已兼容 Zotero 10 的 `{exitCode}` 子进程返回格式，
 ## MCP（可选，供 Codex）
 
 `zotero-research-mcp` 提供 8 个只读工具：search_items、get_item_context、extract_pdf、retrieve_evidence、generate_reading_card、analyze_paper、locate_quote、health_check。无模型配置时 analyze 返回带页码的证据摘录。安装：`uv pip install -e .`，命令 `zotero-research-mcp`（stdio）。
-
-## 开发
-
-- Python 测试：`uv run python -m pytest -o addopts='' -q`（另跑 mypy strict + ruff）
-- 前端/油猴测试：`node --test tests-js/*.test.cjs`
-- 打包 XPI：`.venv-zotero10\Scripts\python.exe scripts/build_addon.py`
 
 详细使用说明见 [docs/USAGE_ZOTERO10.md](docs/USAGE_ZOTERO10.md)。
