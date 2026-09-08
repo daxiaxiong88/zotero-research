@@ -625,7 +625,9 @@
   padding: 0 3px;
   border-radius: 3px;
   background: rgba(127, 127, 127, 0.10);
-  white-space: nowrap;
+  /* A long LaTeX span must break like text: nowrap lets one formula stretch
+   * the whole sidebar (MinerU answers embed long derivations inline). */
+  overflow-wrap: anywhere;
 }
 
 .zrp-math-raw.zrp-math-inline {
@@ -673,4 +675,14 @@
 @keyframes zrp-progress-slide {
   0% { margin-left: -30%; }
   100% { margin-left: 100%; }
+}
+
+/* MinerU text can embed very long unbroken runs (URLs, LaTeX, table HTML):
+ * the markdown layer must always be allowed to break them at any character. */
+.zrp-md,
+.zrp-md .zrp-md-p,
+.zrp-md .zrp-md-li,
+.zrp-md .zrp-md-td,
+.zrp-md .zrp-md-quote {
+  overflow-wrap: anywhere;
 }
