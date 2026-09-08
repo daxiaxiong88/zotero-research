@@ -2,6 +2,12 @@
 
 一个面向 **Zotero 10** 的论文阅读侧边栏。你可以一边阅读 PDF，一边把当前页、选中文字或全文材料交给浏览器中的 Gemini、DeepSeek、ChatGPT、Kimi、Claude、Google AI Studio，也可以直接连接兼容 OpenAI / Anthropic 协议的模型 API。AI 的回答会自动回到 Zotero，并在同一篇论文下保留连续对话。
 
+## 效果演示
+
+<video src="docs/assets/zotero-promo.mp4" controls preload="metadata"></video>
+
+*完整的问答、公式渲染与页码跳转演示；视频无法播放时请直接阅读下方说明。*
+
 ## 它能做什么
 
 - **在 Zotero 内直接对话**：无需来回复制问题和回答，网页 AI 的输出会流式显示在右侧栏。
