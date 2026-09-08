@@ -14,9 +14,9 @@
 - 分任务阅读提示词：翻译逐段保留原文，问答先回答再解释，公式解释变量、单位与假设。全文概览优先取完整提取文本，超过材料预算时改用标明范围的跨页摘录。
 - API 直连的后续问答会携带此前提供的原文和完整问答对；不会重复发送本轮问题。材料截断和历史裁剪均在提示词中标明。
 
-## 架构（v0.4 起与旧版不同）
+## 架构
 
-    Zotero 插件（本进程）
+    Zotero 插件
       ├─ 侧栏面板：快捷命令 / 输入框 / 选文 / 页码证据
       ├─ 中继存储：任务队列 + 会话管理 + 流式回答
       ├─ 证据检索：Zotero.PDFWorker 提取全文 + 内置 BM25
@@ -34,19 +34,12 @@ Python 部分只保留只读 MCP 服务器（供 Codex 等客户端检索证据�
 4. 打开 Gemini、DeepSeek 等网页 AI；脚本自动连接 Zotero，右下角显示「已连接，等待 Zotero 消息」。
 5. 在 Zotero 打开一篇带 PDF 的文献，点击快捷命令或直接提问。
 
-从 0.6.2 更新到 0.7.8 只需更新 XPI；本次没有修改油猴脚本、API 配置或新增设置项；构建脚本会把上一个发布包自动留作 `dist/zotero-research-previous-stable.xpi` 用于回滚。更早版本的油猴脚本仍请更新到 1.0.8：1.0.5 之前的版本在后台标签页存在发送延迟（需切回页面才发出），1.0.3 之前的版本缺少图片投递。提示词结构、材料范围与验收边界见 [提示词设计说明](docs/PROMPT_DESIGN.md)。
-
-0.7.7 优先压缩历史参考材料，再按完整问答裁剪。若单轮本身过长、没有任何完整问答能纳入蒸馏，则明确提示分段，不再发送空历史请求；实际覆盖范围会随结果显示。网页蒸馏继续携带本地记录，不要求旧网页对话仍然存在。
+提示词结构、材料范围与验收边界见 [提示词设计说明](docs/PROMPT_DESIGN.md)。
 
 MinerU 深度解析已兼容 Zotero 10 的 `{exitCode}` 子进程返回格式，成功任务不会再误报 `退出码 [object Object]`。0.7.7 起会把长文件名 PDF 临时复制为短名后解析，绕过 MinerU 3.4.x 在未启用 Windows 长路径时的图片写出失败；原附件名称和内容不变。复杂论文只在连续 15 分钟没有任何输出时终止，并设置 60 分钟总上限，不会再因总耗时刚超过 15 分钟而误杀。真正的非零退出会显示 MinerU 任务 JSON 中的底层错误（例如显存不足或缺少依赖）。0.7.8 将 MinerU 的持久缓存与临时运行目录改到 Zotero 数据目录下的 `zotero-research-mineru/`；旧版配置目录中的有效缓存会在首次读取时安全迁移，写入新位置成功后才删除旧文件。
 
 存档改为只保留一份追问原文，证据副本精简为页码和短摘要；旧档首次重新保存前留迁移备份，每篇文献的读取、保存和清空按顺序执行。
 
-### 从 0.4.0 / 0.4.1 更新
-
-- 必须同时更新 XPI 和油猴脚本，并刷新 AI 网页。旧脚本缺少 Zotero 10 要求的 `X-Zotero-Connector-API-Version: 3` 请求头，会被 Zotero 在进入插件前断开连接。
-- 侧栏“打开网页”会让新打开的页面接管连接；已有对话请在该对话页使用油猴菜单“连接 Zotero”，继续沿用网页上下文。
-- 连接切换或主动断开会结束已领取的任务，并显示重试提示，不会自动重复发送问题。
 
 ## 安全边界
 
@@ -60,11 +53,5 @@ MinerU 深度解析已兼容 Zotero 10 的 `{exitCode}` 子进程返回格式，
 ## MCP（可选，供 Codex）
 
 `zotero-research-mcp` 提供 8 个只读工具：search_items、get_item_context、extract_pdf、retrieve_evidence、generate_reading_card、analyze_paper、locate_quote、health_check。无模型配置时 analyze 返回带页码的证据摘录。安装：`uv pip install -e .`，命令 `zotero-research-mcp`（stdio）。
-
-## 开发
-
-- Python 测试：`uv run python -m pytest -o addopts='' -q`（另跑 mypy strict + ruff）
-- 前端/油猴测试：`node --test tests-js/*.test.cjs`
-- 打包 XPI：`.venv-zotero10\Scripts\python.exe scripts/build_addon.py`
 
 详细使用说明见 [docs/USAGE_ZOTERO10.md](docs/USAGE_ZOTERO10.md)。
