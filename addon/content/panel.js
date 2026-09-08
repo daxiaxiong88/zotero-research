@@ -295,7 +295,7 @@
     var root = createElement(document, 'section', {
       className: 'zrp-panel',
       'data-zrp-root': 'true',
-      'aria-label': 'Zotero 网页 AI 阅读助手',
+      'aria-label': 'Zotero AI 科研阅读助手',
     });
     body.appendChild(root);
 
@@ -376,8 +376,8 @@
       var header = createElement(document, 'header', { className: 'zrp-header' });
       var brand = createElement(document, 'div', { className: 'zrp-brand-line' });
       brand.appendChild(createElement(document, 'span', { className: 'zrp-gemini-mark', 'aria-hidden': 'true' }, '✦'));
-      brand.appendChild(createElement(document, 'h1', { className: 'zrp-brand' }, '网页 AI'));
-      brand.appendChild(createElement(document, 'span', { className: 'zrp-brand-caption' }, 'Zotero 阅读助手'));
+      brand.appendChild(createElement(document, 'h1', { className: 'zrp-brand' }, 'Zotero AI'));
+      brand.appendChild(createElement(document, 'span', { className: 'zrp-brand-caption' }, '科研阅读助手'));
       addButton(brand, 'settings', '⚙', 'settings', 'zrp-icon-button');
       header.appendChild(brand);
       var sizeRow = createElement(document, 'div', { className: 'zrp-size-row' });
@@ -443,7 +443,7 @@
       var chatHeader = createElement(document, 'div', { className: 'zrp-chat-header' });
       var chatName = createElement(document, 'div', { className: 'zrp-chat-name' });
       chatName.appendChild(createElement(document, 'span', { className: 'zrp-gemini-dot', 'aria-hidden': 'true' }, '✦'));
-      chatName.appendChild(createElement(document, 'strong', null, '网页 AI'));
+      chatName.appendChild(createElement(document, 'strong', null, 'AI 对话'));
       chatHeader.appendChild(chatName);
       refs.webaiProvider = createElement(document, 'select', {
         className: 'zrp-provider-select', 'data-testid': 'webai-provider', 'aria-label': '网页 AI 提供方',

@@ -1517,7 +1517,7 @@ function zraCreateAddon(data) {
 }
 
 async function startup(data, _reason) {
-  for (const name of ['native.js', 'relay.js', 'markdown.js', 'panel.js']) {
+  for (const name of ['native.js', 'relay.js', 'katex.min.js', 'markdown.js', 'panel.js']) {
     Services.scriptloader.loadSubScript(data.rootURI + 'content/' + name, globalThis, 'UTF-8');
   }
   ZoteroResearchAddon = zraCreateAddon(data);

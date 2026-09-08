@@ -92,6 +92,15 @@ const CONTEXT = {
   library_id: 7,
 };
 
+test('侧栏使用清晰的产品名和对话区名称', () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setup(makeAdapter(harness));
+  assert.equal(root.querySelector('.zrp-brand').textContent, 'Zotero AI');
+  assert.equal(root.querySelector('.zrp-brand-caption').textContent, '科研阅读助手');
+  assert.equal(root.querySelector('.zrp-chat-name strong').textContent, 'AI 对话');
+  panel.destroy();
+});
+
 test('未连接网页时状态提示安装油猴脚本；连接后显示提供方', async () => {
   const harness = makeRelayHarness();
   const { root, panel } = setup(makeAdapter(harness));

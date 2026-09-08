@@ -620,7 +620,7 @@
 .zrp-image-chip[hidden] { display: none; }
 .zrp-image-chip .zrp-hint { color: var(--zrp-accent, #2c5cc5); }
 
-/* LaTeX math spans: converted Unicode when possible, styled raw otherwise */
+/* LaTeX math: native MathML from bundled KaTeX, with readable fallbacks. */
 .zrp-math-inline {
   padding: 0 3px;
   border-radius: 3px;
@@ -628,6 +628,26 @@
   /* A long LaTeX span must break like text: nowrap lets one formula stretch
    * the whole sidebar (MinerU answers embed long derivations inline). */
   overflow-wrap: anywhere;
+}
+
+.zrp-math-rendered.zrp-math-inline {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0 2px;
+  background: transparent;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: -0.3em;
+  scrollbar-width: thin;
+}
+
+.zrp-math-rendered .katex {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.zrp-math-rendered math {
+  font-family: "Cambria Math", "STIX Two Math", "Latin Modern Math", serif;
 }
 
 .zrp-math-raw.zrp-math-inline {
@@ -651,6 +671,13 @@
   font-family: Consolas, monospace;
   font-size: 0.92em;
   color: var(--zrp-accent, #2c5cc5);
+}
+
+.zrp-math-rendered.zrp-math-block {
+  max-width: 100%;
+  box-sizing: border-box;
+  text-align: center;
+  scrollbar-width: thin;
 }
 
 /* Deep-parse progress bar */

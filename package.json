@@ -5,6 +5,7 @@
     "test:js": "node --test tests-js/*.test.cjs"
   },
   "devDependencies": {
-    "jsdom": "^26.1.0"
+    "jsdom": "^26.1.0",
+    "katex": "^0.18.7"
   }
 }
