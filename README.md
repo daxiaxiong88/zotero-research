@@ -4,7 +4,7 @@
 
 ## 效果演示
 
-<video src="docs/assets/zotero-promo.mp4" controls preload="metadata"></video>
+<video src="https://github.com/user-attachments/assets/10eed7ee-1096-41f4-a54a-b4f40a553c52" controls preload="metadata" muted></video>
 
 *完整的问答、公式渲染与页码跳转演示；视频无法播放时请直接阅读下方说明。*
 
