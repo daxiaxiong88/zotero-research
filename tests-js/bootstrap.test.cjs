@@ -581,3 +581,296 @@ test('mineru content_list 转分页文本：表格拍平、公式保留 LaTeX', 
   assert.equal(h.context.Zotero.Prefs.get('researchAssistant.mineruExecutable'), '');
   assert.equal(h.context.Zotero.Prefs.get('researchAssistant.mineruModelPath'), '');
 });
+
+test('MinerU stages a short PDF name, accepts wait objects, and surfaces nested task errors', async () => {
+  const h = runtime();
+  const executable = 'D:\\Research\\ChatGPT\\.venv\\Scripts\\mineru.exe';
+  const modelPath = 'D:\\Zotero\\MinerU';
+  const pdfPath = 'D:\\fixture\\Seismic Foundation Model (SFM) a new generation deep learning model in geophysics.pdf';
+  const writes = [];
+  const calls = [];
+  const copies = [];
+  const stderrChunks = [];
+  const storedFiles = new Map();
+  const removedPaths = [];
+  let failWritePath = null;
+  let removalBlock = null;
+  let exitOutcome = { exitCode: 0 };
+  let lastModified = 1234;
+  let removed = false;
+  h.context.zraHash = (value) => 'mineru-fixture-' + JSON.parse(value)[2];
+  h.context.Zotero.Profile = { dir: 'C:\\fake-zotero-profile' };
+  h.context.Zotero.DataDirectory = { dir: 'D:\\fake-zotero-data' };
+  h.context.Zotero.logError = () => {};
+  h.context.Zotero.Prefs.get = (key) => ({
+    'researchAssistant.mineruExecutable': executable,
+    'researchAssistant.mineruModelPath': modelPath,
+  })[key] || '';
+  const item = {
+    id: 42, key: 'MINERU01', libraryID: 1, attachmentContentType: 'application/pdf',
+    isAttachment: () => true, isFileAttachment: () => true,
+    getFilePathAsync: async () => pdfPath,
+  };
+  h.context.Zotero.Items = { getByLibraryAndKey: () => item };
+  h.context.Zotero.Libraries.get = () => ({ editable: true });
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => ({ text: 'source text', extractedPages: 1, totalPages: 1 }),
+  };
+  h.context.PathUtils = {
+    join: (...parts) => path.win32.join(...parts),
+    parent: (value) => path.win32.dirname(value),
+    filename: (value) => path.win32.basename(value),
+  };
+  h.context.IOUtils = {
+    exists: async (value) => value === executable || value === modelPath || storedFiles.has(value),
+    makeDirectory: async () => {},
+    stat: async (value) => value === pdfPath
+      ? ({ size: 1024, lastModified }) : ({ isDir: false }),
+    getChildren: async (directory) => [path.win32.join(directory, 'fixture_content_list.json')],
+    copy: async (source, destination) => { copies.push([source, destination]); },
+    remove: async (value) => {
+      if (removalBlock) {
+        const block = removalBlock;
+        removalBlock = null;
+        block.startedResolve();
+        await block.promise;
+      }
+      removed = true;
+      removedPaths.push(value);
+      storedFiles.delete(value);
+    },
+  };
+  h.context.Zotero.File.putContentsAsync = async (name, value) => {
+    writes.push([name, value]);
+    if (name === failWritePath) throw new Error('fixture migration write failed');
+    storedFiles.set(name, value);
+  };
+  h.context.Zotero.File.getContentsAsync = async (name) => {
+    if (storedFiles.has(name)) return storedFiles.get(name);
+    assert.match(name, /_content_list\.json$/);
+    return JSON.stringify([{ type: 'text', page_idx: 0, text: 'Parsed text' }]);
+  };
+  const fakeProcess = {
+    stdout: { readString: async () => '' },
+    stderr: { readString: async () => stderrChunks.shift() || '' },
+    wait: async () => exitOutcome,
+    kill: async () => assert.fail('successful MinerU process must not be killed'),
+  };
+  h.context.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: { call: async (options) => { calls.push(options); return fakeProcess; } },
+    }),
+  };
+
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  let adapter;
+  h.context.ZoteroResearchPanel.mount = (_body, value) => {
+    adapter = value;
+    return { setContext() {}, destroy() {} };
+  };
+  const doc = {
+    defaultView: {}, createElementNS: () => ({}), documentElement: { appendChild() {} },
+    getElementById: () => null, querySelector: () => null,
+  };
+  const body = { ownerDocument: doc, appendChild() {}, querySelector: () => null, querySelectorAll: () => [] };
+  h.registrations.section.onRender({ body, doc, item: { id: 42 } });
+
+  const result = await adapter.deepParseWithMineru('MINERU01');
+  assert.equal(result.pages[0].text, 'Parsed text');
+  assert.equal(result.stats.pageCount, 1);
+  const stagedInput = calls[0].arguments[1];
+  const outputDirectory = calls[0].arguments[3];
+  assert.equal(path.win32.basename(stagedInput), 'input.pdf');
+  assert.equal(path.win32.dirname(stagedInput), outputDirectory);
+  assert.deepEqual(copies, [[pdfPath, stagedInput]], 'long source name is staged under a short name');
+  assert.deepEqual(Array.from(calls[0].arguments), ['-p', stagedInput, '-o', outputDirectory, '-b', 'vlm-engine']);
+  assert.equal(writes.length, 2, 'writes the local config and the parsed-text cache');
+  assert.equal(writes[1][0], 'D:\\fake-zotero-data\\zotero-research-mineru\\MINERU01.json');
+  assert.equal(removed, true, 'successful run directory is cleaned');
+
+  // A genuine process failure should show the useful final error line instead
+  // of reducing every failure to the same model/GPU guess.
+  lastModified = 5678;
+  exitOutcome = { exitCode: 7 };
+  stderrChunks.push(
+    'FileNotFoundError: [Errno 2] No such file or directory: C:\\Temp\\images\\x.jpg\n'
+      + '- task#1 failed: ' + 'outer status '.repeat(40)
+      + JSON.stringify({ status: 'failed', error: '[Errno 2] No such file or directory: C:\\Temp\\images\\x.jpg' }) + '\n',
+    '',
+  );
+  let releaseRemoval;
+  let removalStartedResolve;
+  const removalStarted = new Promise(resolve => { removalStartedResolve = resolve; });
+  removalBlock = {
+    promise: new Promise(resolve => { releaseRemoval = resolve; }),
+    startedResolve: removalStartedResolve,
+  };
+  let failureSettled = false;
+  const failedParse = adapter.deepParseWithMineru('MINERU02');
+  failedParse.catch(() => { failureSettled = true; });
+  await removalStarted;
+  await Promise.resolve();
+  const settledBeforeCleanup = failureSettled;
+  releaseRemoval();
+  await assert.rejects(
+    failedParse,
+    /MinerU 退出码 7：\[Errno 2\] No such file or directory: C:\\Temp\\images\\x\.jpg/,
+  );
+  assert.equal(settledBeforeCleanup, false,
+    'parse failure is not returned until temporary-run cleanup completes');
+
+  // A long but active run must be allowed past the old 15-minute wall-clock
+  // limit. Model each output chunk as one minute of useful work, then finish
+  // successfully after 20 minutes.
+  lastModified = 91011;
+  let fakeNow = 0;
+  class FakeDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [fakeNow])); }
+    static now() { return fakeNow; }
+  }
+  h.context.Date = FakeDate;
+  let timerHook = null;
+  h.context.setTimeout = (resolve, delay) => {
+    fakeNow += delay;
+    if (timerHook) timerHook();
+    queueMicrotask(resolve);
+    return 1;
+  };
+  let activeTicks = 0;
+  let pendingRead = null;
+  let activeFinished = false;
+  exitOutcome = new Promise(() => {});
+  fakeProcess.wait = () => exitOutcome;
+  fakeProcess.stdout.readString = () => {
+    if (activeFinished) return Promise.resolve('');
+    return new Promise(resolve => { pendingRead = resolve; });
+  };
+  timerHook = () => {
+    if (fakeNow % (60 * 1000) === 0 && pendingRead) {
+      const resolveRead = pendingRead;
+      pendingRead = null;
+      activeTicks += 1;
+      queueMicrotask(() => resolveRead('Predict: ' + activeTicks + '/20\n'));
+    }
+    if (fakeNow >= 20 * 60 * 1000 && !activeFinished) {
+      activeFinished = true;
+    }
+  };
+  let activeKilled = false;
+  fakeProcess.kill = async () => { activeKilled = true; };
+  await assert.rejects(
+    adapter.deepParseWithMineru('MINERU03'),
+    /MinerU 已连续 15 分钟没有输出，已终止/,
+  );
+  assert.equal(activeTicks, 20);
+  assert.equal(activeKilled, true);
+  assert.ok(fakeNow >= 35 * 60 * 1000,
+    '20 minutes of heartbeats defer the idle timeout until 15 minutes after the last output');
+
+  // A genuinely silent process is still terminated after 15 minutes.
+  lastModified = 121314;
+  fakeNow = 0;
+  timerHook = null;
+  fakeProcess.stdout.readString = async () => '';
+  let killed = false;
+  exitOutcome = new Promise(() => {});
+  fakeProcess.kill = async () => { killed = true; };
+  await assert.rejects(
+    adapter.deepParseWithMineru('MINERU04'),
+    /MinerU 已连续 15 分钟没有输出，已终止/,
+  );
+  assert.equal(killed, true, 'silent MinerU process is terminated');
+
+  // Even a noisy process cannot occupy the GPU indefinitely: heartbeats keep
+  // the idle timer fresh, but the absolute 60-minute ceiling still wins.
+  lastModified = 141516;
+  fakeNow = 0;
+  let maximumPendingRead = null;
+  let maximumStopped = false;
+  exitOutcome = new Promise(() => {});
+  fakeProcess.wait = () => exitOutcome;
+  fakeProcess.stdout.readString = () => maximumStopped
+    ? Promise.resolve('')
+    : new Promise(resolve => { maximumPendingRead = resolve; });
+  timerHook = () => {
+    if (fakeNow % (60 * 1000) === 0 && maximumPendingRead) {
+      const resolveRead = maximumPendingRead;
+      maximumPendingRead = null;
+      queueMicrotask(() => resolveRead('Predict: still active\n'));
+    }
+  };
+  let maximumKilled = false;
+  fakeProcess.kill = async () => {
+    maximumKilled = true;
+    maximumStopped = true;
+    if (maximumPendingRead) {
+      const resolveRead = maximumPendingRead;
+      maximumPendingRead = null;
+      resolveRead('');
+    }
+  };
+  await assert.rejects(
+    adapter.deepParseWithMineru('MINERU07'),
+    /MinerU 解析超过 60 分钟，已终止/,
+  );
+  assert.equal(maximumKilled, true);
+  assert.ok(fakeNow >= 60 * 60 * 1000 && fakeNow < 61 * 60 * 1000,
+    'absolute timeout stops a continuously active process at roughly 60 minutes');
+  timerHook = null;
+
+  // A valid cache from the former profile location is returned immediately,
+  // copied to the Zotero data directory, and removed only after that succeeds.
+  lastModified = 151617;
+  const legacyPath = 'C:\\fake-zotero-profile\\zotero-research-mineru\\MINERU05.json';
+  const migratedPath = 'D:\\fake-zotero-data\\zotero-research-mineru\\MINERU05.json';
+  storedFiles.set(legacyPath, JSON.stringify({
+    stamp: 'mineru-fixture-151617',
+    pages: [{ number: 1, text: 'Legacy parsed text' }],
+    stats: { pageCount: 1, textPages: 1, parsedAt: '2026-09-08T00:00:00.000Z' },
+  }));
+  const callsBeforeMigration = calls.length;
+  const migrated = await adapter.deepParseWithMineru('MINERU05');
+  assert.equal(migrated.cached, true);
+  assert.equal(migrated.pages[0].text, 'Legacy parsed text');
+  assert.equal(calls.length, callsBeforeMigration, 'migration avoids re-running MinerU');
+  assert.equal(storedFiles.has(migratedPath), true, 'legacy cache is copied to the data directory');
+  assert.equal(storedFiles.has(legacyPath), false, 'legacy cache is removed after a successful copy');
+  assert.ok(removedPaths.includes(legacyPath));
+
+  lastModified = 171819;
+  const retainedLegacyPath = 'C:\\fake-zotero-profile\\zotero-research-mineru\\MINERU06.json';
+  const failedMigrationPath = 'D:\\fake-zotero-data\\zotero-research-mineru\\MINERU06.json';
+  storedFiles.set(retainedLegacyPath, JSON.stringify({
+    stamp: 'mineru-fixture-171819',
+    pages: [{ number: 1, text: 'Retained legacy text' }],
+    stats: { pageCount: 1, textPages: 1, parsedAt: '2026-09-08T00:00:00.000Z' },
+  }));
+  failWritePath = failedMigrationPath;
+  const retained = await adapter.deepParseWithMineru('MINERU06');
+  assert.equal(retained.pages[0].text, 'Retained legacy text');
+  assert.equal(storedFiles.has(retainedLegacyPath), true,
+    'legacy cache survives when the new location cannot be written');
+  assert.equal(storedFiles.has(failedMigrationPath), false);
+
+  // Zotero installations without a configured data directory retain the
+  // profile fallback for config, runs and the persistent parsed cache.
+  h.context.Zotero.DataDirectory = undefined;
+  lastModified = 191920;
+  failWritePath = null;
+  exitOutcome = { exitCode: 0 };
+  fakeProcess.wait = async () => exitOutcome;
+  fakeProcess.stdout.readString = async () => '';
+  fakeProcess.kill = async () => assert.fail('successful fallback run must not be killed');
+  const writesBeforeFallback = writes.length;
+  const callsBeforeFallback = calls.length;
+  const fallbackResult = await adapter.deepParseWithMineru('MINERU08');
+  assert.equal(fallbackResult.pages[0].text, 'Parsed text');
+  const fallbackCall = calls[callsBeforeFallback];
+  const profileMineruRoot = 'C:\\fake-zotero-profile\\zotero-research-mineru';
+  assert.ok(fallbackCall.arguments[3].startsWith(profileMineruRoot + '\\runs\\'));
+  assert.deepEqual(writes.slice(writesBeforeFallback).map(entry => entry[0]), [
+    profileMineruRoot + '\\mineru-tools.json',
+    profileMineruRoot + '\\MINERU08.json',
+  ]);
+  await h.context.shutdown({}, 4);
+});

@@ -649,22 +649,41 @@ function zraCreateAddon(data) {
   // MinerU deep parsing: manual-trigger, disk-cached page text per attachment.
   // ---------------------------------------------------------------------------
 
-  // Same profile base as sessionsDirectory(), but joined directly:
-  // PathUtils.join rejects '..' components (NS_ERROR_FILE_UNRECOGNIZED_PATH).
-  function mineruDirectory() {
-    const base = Zotero.Profile?.dir
+  // Keep potentially numerous parsed-paper caches beside Zotero's data on the
+  // user's chosen drive, rather than silently consuming the OS profile drive.
+  function zoteroProfileDirectory() {
+    return Zotero.Profile?.dir
       || Services.dirsvc.get('ProfD', Ci.nsIFile).path;
+  }
+
+  function mineruDirectory() {
+    const base = Zotero.DataDirectory?.dir
+      || zoteroProfileDirectory();
     return PathUtils.join(base, 'zotero-research-mineru');
+  }
+
+  function legacyMineruDirectory() {
+    return PathUtils.join(zoteroProfileDirectory(), 'zotero-research-mineru');
+  }
+
+  async function ensureDirectory(dir) {
+    if (!(await IOUtils.exists(dir))) {
+      await IOUtils.makeDirectory(dir, { createAncestors: true });
+    }
   }
 
   async function ensureMineruDirectory() {
     const dir = mineruDirectory();
-    if (!(await IOUtils.exists(dir))) await IOUtils.makeDirectory(dir, { createAncestors: true });
+    await ensureDirectory(dir);
     return dir;
   }
 
   function mineruCachePath(attachmentKey) {
     return PathUtils.join(mineruDirectory(), attachmentKey + '.json');
+  }
+
+  function legacyMineruCachePath(attachmentKey) {
+    return PathUtils.join(legacyMineruDirectory(), attachmentKey + '.json');
   }
 
   /** Flatten a MinerU table_body HTML string into readable row text. */
@@ -711,9 +730,8 @@ function zraCreateAddon(data) {
     return pages;
   }
 
-  async function readMineruCache(attachmentKey, stamp) {
+  async function readMineruCacheAt(path, stamp) {
     try {
-      const path = mineruCachePath(attachmentKey);
       if (!(await IOUtils.exists(path))) return null;
       const raw = await Zotero.File.getContentsAsync(path);
       const data = JSON.parse(raw);
@@ -721,6 +739,29 @@ function zraCreateAddon(data) {
       if (!data || data.stamp !== stamp || !Array.isArray(data.pages)) return null;
       return data;
     } catch (_) {
+      return null;
+    }
+  }
+
+  async function readMineruCache(attachmentKey, stamp) {
+    try {
+      const currentPath = mineruCachePath(attachmentKey);
+      const current = await readMineruCacheAt(currentPath, stamp);
+      if (current) return current;
+
+      // Version 0.7.7 and earlier wrote these files under the Zotero profile
+      // on the OS drive. Read a valid legacy entry once, persist it beside the
+      // Zotero data directory, then remove only the migrated file.
+      const legacyPath = legacyMineruCachePath(attachmentKey);
+      if (legacyPath === currentPath) return null;
+      const legacy = await readMineruCacheAt(legacyPath, stamp);
+      if (!legacy) return null;
+      if (await writeMineruCache(attachmentKey, legacy)) {
+        try { await IOUtils.remove(legacyPath); } catch (_) {}
+      }
+      return legacy;
+    } catch (_) {
+      // Cache availability must never block Zotero's built-in PDF extraction.
       return null;
     }
   }
@@ -774,26 +815,59 @@ function zraCreateAddon(data) {
     const path = await info.item.getFilePathAsync();
     const outputDirectory = PathUtils.join(mineruDirectory(), 'runs',
       info.stamp.slice(0, 16) + '-' + String(Date.now()));
-    if (!(await IOUtils.exists(PathUtils.parent(outputDirectory)))) {
-      await IOUtils.makeDirectory(outputDirectory, { createAncestors: true });
-    }
-
-    const { Subprocess } = ChromeUtils.importESModule('resource://gre/modules/Subprocess.sys.mjs');
-    const environment = {
-      MINERU_TOOLS_CONFIG_JSON: configPath,
-      MINERU_MODEL_SOURCE: 'local',
-      HF_HUB_OFFLINE: '1',
-      HF_HUB_DISABLE_TELEMETRY: '1',
-      TRANSFORMERS_OFFLINE: '1',
-      HF_DATASETS_OFFLINE: '1',
-      PYTHONUTF8: '1',
-      PYTHONIOENCODING: 'utf-8',
+    await ensureDirectory(outputDirectory);
+    const cleanupRun = async () => {
+      let cleanupError = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await IOUtils.remove(outputDirectory, { recursive: true });
+          return;
+        } catch (error) {
+          cleanupError = error;
+          if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+      try {
+        if (cleanupError && typeof Zotero.logError === 'function') Zotero.logError(cleanupError);
+      } catch (_) {}
     };
-    const process = await Subprocess.call({
-      command: executable,
-      arguments: ['-p', path, '-o', outputDirectory, '-b', 'vlm-engine'],
-      environment, environmentAppend: true, stdout: 'pipe', stderr: 'pipe',
-    });
+    const failParse = (message) => { throw new Error(message); };
+
+    try {
+      // MinerU 3.4.x embeds the input stem in a deep temporary output path.
+      // Long paper titles can push that path over Windows MAX_PATH, causing a
+      // late FileNotFoundError after inference has already finished. Stage the
+      // unchanged PDF under a short name inside this disposable directory.
+      const stagedInput = PathUtils.join(outputDirectory, 'input.pdf');
+      try {
+        await IOUtils.copy(path, stagedInput);
+      } catch (error) {
+        const detail = error && error.message ? String(error.message) : String(error || '未知错误');
+        failParse('MinerU 无法准备短路径 PDF 副本：' + detail);
+      }
+
+      const { Subprocess } = ChromeUtils.importESModule('resource://gre/modules/Subprocess.sys.mjs');
+      const environment = {
+        MINERU_TOOLS_CONFIG_JSON: configPath,
+        MINERU_MODEL_SOURCE: 'local',
+        HF_HUB_OFFLINE: '1',
+        HF_HUB_DISABLE_TELEMETRY: '1',
+        TRANSFORMERS_OFFLINE: '1',
+        HF_DATASETS_OFFLINE: '1',
+        PYTHONUTF8: '1',
+        PYTHONIOENCODING: 'utf-8',
+      };
+      let process;
+      try {
+        process = await Subprocess.call({
+          command: executable,
+          arguments: ['-p', stagedInput, '-o', outputDirectory, '-b', 'vlm-engine'],
+          environment, environmentAppend: true, stdout: 'pipe', stderr: 'pipe',
+        });
+      } catch (error) {
+        const detail = error && error.message ? String(error.message) : String(error || '未知错误');
+        failParse('无法启动 MinerU：' + detail);
+      }
     // MinerU writes tqdm-style progress ("Processing pages: 3/10") and a
     // final "Processed N/M pages" to its logs; parse the page counts out of
     // the rolling tail and hand them to the panel progress bar.
@@ -802,9 +876,23 @@ function zraCreateAddon(data) {
       try { onProgress(info); } catch (_) { /* progress is advisory */ }
     };
     let progressTail = '';
+    let diagnosticTail = '';
     let lastEmitted = '';
+    // Complex VLM papers can legitimately take well over 15 minutes. Treat
+    // output from either pipe as a heartbeat: terminate only after a long
+    // period with no output, while retaining a generous absolute ceiling for
+    // a process that emits noise forever without completing.
+    const startedAt = Date.now();
+    let lastOutputAt = startedAt;
+    const idleTimeoutMs = 15 * 60 * 1000;
+    const maxRuntimeMs = 60 * 60 * 1000;
     const parseProgress = (chunk) => {
-      progressTail = (progressTail + String(chunk)).slice(-4000);
+      const chunkText = String(chunk || '');
+      if (chunkText) lastOutputAt = Date.now();
+      progressTail = (progressTail + chunkText).slice(-4000);
+      // Keep only a short tail for an actionable failure message. MinerU can
+      // emit many megabytes of progress output for a long paper.
+      diagnosticTail = (diagnosticTail + chunkText).slice(-12000);
       // MinerU writes several tqdm stages; the page count is the truth for
       // "how far through the document", while Predict is the long VLM
       // inference pass over page crops. Track both so the bar never sits
@@ -851,44 +939,113 @@ function zraCreateAddon(data) {
         emitProgress({ phase: 'stage', stage });
       }
     };
+    const failureDetail = () => {
+      const lines = diagnosticTail
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean);
+      let detail = '';
+      // MinerU's CLI ends with a long task-status line whose JSON contains the
+      // real server exception. Pull that field out before the UI truncates the
+      // outer status text.
+      for (const line of lines.slice().reverse()) {
+        const objectStart = line.indexOf('{');
+        if (objectStart < 0) continue;
+        try {
+          const status = JSON.parse(line.slice(objectStart));
+          if (status && typeof status.error === 'string' && status.error.trim()) {
+            detail = status.error;
+            break;
+          }
+        } catch (_) { /* not a standalone task-status object */ }
+      }
+      if (!detail) {
+        detail = lines.slice().reverse().find(line =>
+          /(?:FileNotFoundError|RuntimeError|ValueError|TypeError|OSError|ImportError|ModuleNotFoundError|OutOfMemoryError):/i.test(line),
+        ) || '';
+      }
+      if (!detail) {
+        detail = lines.slice().reverse().find(line =>
+          /error|exception|traceback|cuda|out of memory|not found|no module named|failed|unsupported|invalid|cannot|could not/i.test(line),
+        ) || '';
+      }
+      detail = detail
+        .replace(/^.*?\|\s*(?:ERROR|CRITICAL)\s*\|.*?\s-\s*/i, '')
+        .replace(/^(?:FileNotFoundError|RuntimeError|ValueError|TypeError|OSError|ImportError|ModuleNotFoundError|OutOfMemoryError):\s*/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return detail.length > 360 ? detail.slice(0, 360) + '…' : detail;
+    };
     let lastStage = '';
     emitProgress({ phase: 'starting' });
-    (async () => {
+    const stdoutTask = (async () => {
       try { while (true) { const chunk = await process.stdout.readString(); if (!chunk) break; parseProgress(chunk); } }
       catch (_) {}
     })();
-    (async () => {
+    const stderrTask = (async () => {
       try { while (true) { const chunk = await process.stderr.readString(); if (!chunk) break; parseProgress(chunk); } }
       catch (_) {}
     })();
-    const deadline = Date.now() + 15 * 60 * 1000;
-    let exitCode = null;
+    const deadline = startedAt + maxRuntimeMs;
+    const waitPromise = (async () => {
+      try { return { ok: true, outcome: await process.wait() }; }
+      catch (error) { return { ok: false, error }; }
+    })();
+    const pollSentinel = {};
+    let completed = false;
+    let outcome = null;
+    let timeoutReason = 'maximum';
     while (Date.now() < deadline) {
-      const outcome = await Promise.race([
-        process.wait(),
-        new Promise(resolve => setTimeout(() => resolve(null), 2000)),
+      if (Date.now() - lastOutputAt >= idleTimeoutMs) {
+        timeoutReason = 'idle';
+        break;
+      }
+      const current = await Promise.race([
+        waitPromise,
+        new Promise(resolve => setTimeout(() => resolve(pollSentinel), 2000)),
       ]);
-      // process.wait() resolves to {exitCode}, not a bare number.
-      exitCode = outcome === null
-        ? null
-        : (outcome && typeof outcome === 'object' ? outcome.exitCode : outcome);
-      if (exitCode !== null) break;
+      if (current !== pollSentinel) {
+        if (!current.ok) {
+          try { await process.kill(0); } catch (_) {}
+          const detail = current.error && current.error.message
+            ? String(current.error.message) : String(current.error || '未知错误');
+          failParse('等待 MinerU 子进程失败：' + detail);
+        }
+        outcome = current.outcome;
+        completed = true;
+        break;
+      }
     }
-    const failParse = (message) => {
-      // Never leave a multi-MB run directory behind on a failed parse.
-      IOUtils.remove(outputDirectory, { recursive: true }).catch(() => {});
-      throw new Error(message);
-    };
-    if (exitCode === null) {
+    if (!completed) {
       try { await process.kill(0); } catch (_) {}
-      failParse('MinerU 解析超时（超过 15 分钟），已终止。');
+      // Give stdout/stderr handles a bounded window to close before finally
+      // removes the run directory; this avoids intermittent Windows leftovers.
+      await Promise.race([
+        Promise.allSettled([stdoutTask, stderrTask]),
+        new Promise(resolve => setTimeout(resolve, 5000)),
+      ]);
+      failParse(timeoutReason === 'idle'
+        ? 'MinerU 已连续 15 分钟没有输出，已终止。'
+        : 'MinerU 解析超过 60 分钟，已终止。');
+    }
+    // wait() resolves only after the child exits, so both pipes should now
+    // reach EOF. Await them before selecting the final useful error line.
+    await Promise.allSettled([stdoutTask, stderrTask]);
+    // Zotero 10 resolves wait() as {exitCode}; retaining bare-number support
+    // also keeps the adapter testable and compatible with older runtimes.
+    const exitCode = outcome && typeof outcome === 'object' ? outcome.exitCode : outcome;
+    if (!Number.isInteger(exitCode)) {
+      failParse('MinerU 子进程返回了无法识别的退出状态；请更新 Zotero 或插件后重试。');
     }
     if (exitCode !== 0) {
-      failParse('MinerU 退出码 ' + exitCode + '：请检查模型目录和显卡状态后重试。');
+      const detail = failureDetail();
+      failParse('MinerU 退出码 ' + exitCode + '：'
+        + (detail || '未捕获到具体错误，请检查模型目录、显存和 MinerU 安装。'));
     }
 
-    // Locate the content_list JSON produced under <output>/<stem>/vlm/.
-    const stem = PathUtils.filename(path).replace(/\.pdf$/i, '');
+    // Locate the content_list JSON produced under <output>/input/vlm/.
     let contentPath = null;
     const queue = [outputDirectory];
     while (queue.length && !contentPath) {
@@ -920,11 +1077,16 @@ function zraCreateAddon(data) {
       textPages: pages.length,
       parsedAt: new Date().toISOString(),
     };
-    await writeMineruCache(attachmentKey, { stamp: info.stamp, pages, stats });
+    if (!(await writeMineruCache(attachmentKey, { stamp: info.stamp, pages, stats }))) {
+      failParse('MinerU 解析成功，但无法写入持久缓存。请检查 Zotero 数据目录权限。');
+    }
     pdfTextCache.set(info.stamp, pages);
-    // Best-effort cleanup of the run directory; the archive keeps the text.
-    try { await IOUtils.remove(outputDirectory, { recursive: true }); } catch (_) {}
     return { pages, cached: false, stats };
+    } finally {
+      // All exits—success, parse failure, wait failure and timeout—converge on
+      // one awaited cleanup path. Cache files live outside this run directory.
+      await cleanupRun();
+    }
   }
 
   async function pdfPages(attachmentKey) {
