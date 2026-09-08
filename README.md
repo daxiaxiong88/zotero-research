@@ -50,7 +50,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 uv run python scripts/build_addon.py
 ```
 
-生成的安装包位于 `dist/zotero-research-0.8.0.xpi`。
+生成的安装包位于 `dist/zotero-research-0.8.1.xpi`。
 
 ### 2. 安装网页连接脚本
 
@@ -134,11 +134,15 @@ API 模式支持在发送时附带整篇 PDF；是否能处理附件取决于所
 
 0.8.0 起插件内置离线 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`。请确认已安装 0.8.0 或更高版本；语法不完整的公式会保留原文，避免错误排版。
 
+0.8.1 修复了长块级公式在 Zotero 侧栏中撑宽整段对话的问题；公式本身过宽时可在公式区域内横向滚动，普通正文仍会随侧栏宽度自动换行。
+
 ## 开发与测试
 
 ```powershell
 npm install
 npm run test:js
+npx playwright install firefox
+npm run test:gecko
 uv run python -m pytest
 uv run ruff check .
 uv run --isolated --python 3.11 python -m mypy

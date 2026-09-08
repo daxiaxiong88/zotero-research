@@ -2,9 +2,11 @@
   "name": "zotero-research-panel",
   "private": true,
   "scripts": {
-    "test:js": "node --test tests-js/*.test.cjs"
+    "test:js": "node --test tests-js/*.test.cjs",
+    "test:gecko": "playwright test tests-browser/sidebar-layout.spec.cjs --browser=firefox --workers=1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "jsdom": "^26.1.0",
     "katex": "^0.18.7"
   }

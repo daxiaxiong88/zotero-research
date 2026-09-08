@@ -674,7 +674,12 @@
 }
 
 .zrp-math-rendered.zrp-math-block {
+  /* Firefox otherwise exposes MathML's unbreakable min-content width through
+   * Zotero's nested flex sections and makes the entire sidebar wider. */
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
+  contain: inline-size;
   box-sizing: border-box;
   text-align: center;
   scrollbar-width: thin;
