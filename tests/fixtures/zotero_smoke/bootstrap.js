@@ -31,6 +31,13 @@ async function prepareFixture() {
       || actual !== PathUtils.normalize(fixtureConfig.dataDirectory)) {
       throw new Error('Refusing fixture creation: isolated data-directory marker mismatch');
     }
+    if (fixtureConfig.profileDirectory) {
+      const profileFile = Services.dirsvc.get('ProfD', Ci.nsIFile);
+      const profile = PathUtils.normalize(profileFile.path);
+      if (profile !== PathUtils.normalize(fixtureConfig.profileDirectory)) {
+        throw new Error('Refusing fixture creation: isolated profile-directory marker mismatch');
+      }
+    }
     await Zotero.uiReadyPromise;
     const library = Zotero.Libraries.get(Zotero.Libraries.userLibraryID);
     await writeFixtureReport({

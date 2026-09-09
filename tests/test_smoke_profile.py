@@ -20,7 +20,7 @@ def test_smoke_profile_uses_only_new_synthetic_data_and_isolated_config(
 ) -> None:
     source = tmp_path / "research.xpi"
     executable = tmp_path / "bridge.exe"
-    executable.write_bytes(b"test executable, never launched")
+    executable.write_bytes(b"retired bridge executable, never launched")
     original_config = {"bridgeExecutable": "original", "workingDirectory": "real-repository"}
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr(
@@ -34,21 +34,23 @@ def test_smoke_profile_uses_only_new_synthetic_data_and_isolated_config(
     assert root.is_relative_to(tmp_path / "artifacts")
     assert root.name.startswith("zotero-smoke-")
     assert 1 <= port <= 65535 and port != 23119
+    assert (root / "profile").is_dir()
     assert (root / "data").is_dir()
     preferences = (root / "profile" / "user.js").read_text(encoding="utf-8")
     assert json.dumps(str(root / "data")) in preferences
+    assert '"extensions.zotero.researchAssistant.apiBaseUrl", ""' in preferences
+    assert '"extensions.zotero.researchAssistant.apiKey", ""' in preferences
+    assert '"extensions.zotero.researchAssistant.mineruExecutable", ""' in preferences
     assert '"extensions.zoteroWinWordIntegration.skipInstallation", true' in preferences
     assert '"extensions.zoteroOpenOfficeIntegration.skipInstallation", true' in preferences
     assert f'"extensions.zotero.httpServer.port", {port}' in preferences
     with zipfile.ZipFile(root / "profile" / "extensions" / f"{PLUGIN_ID}.xpi") as archive:
-        assert json.loads(archive.read("config.json")) == {
-            "bridgeExecutable": str(executable),
-            "workingDirectory": str(root),
-        }
+        assert "config.json" not in archive.namelist()
     with zipfile.ZipFile(source) as archive:
         assert json.loads(archive.read("config.json")) == original_config
     with zipfile.ZipFile(root / "profile" / "extensions" / f"{FIXTURE_ID}.xpi") as archive:
         fixture = json.loads(archive.read("fixture.json"))
+        assert fixture["profileDirectory"] == str(root / "profile")
         assert fixture["dataDirectory"] == str(root / "data")
         assert fixture["reportPath"] == str(root / "fixture-report.json")
         assert fixture["nativeChecks"] is native_checks

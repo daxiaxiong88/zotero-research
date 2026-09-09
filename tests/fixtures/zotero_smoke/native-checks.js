@@ -1,131 +1,258 @@
-/* TEST ONLY: exercised exclusively inside the guarded synthetic profile. No UI automation,
- * real model or external service is used.
- * Load the packaged production code in a separate Gecko sandbox; do not register another UI.
+/* TEST ONLY: exercised exclusively inside the guarded synthetic profile.
+ * No model, browser page, network request, GPU parser, or Python bridge is
+ * started. The current packaged production code is loaded into a Gecko
+ * sandbox with cloned registries so the installed addon registration remains
+ * untouched.
  */
 async function runSyntheticNativeChecks(paper, pdf) {
   const id = 'zotero-research@local.invalid';
+  const relayPath = '/zotero-research/relay';
   const stage = (nativeStep) => writeFixtureReport({ nativeStep });
-  const check = (value, message) => { if (!value) throw new Error('Synthetic check: ' + message); };
-  const rejected = async (promise, message) => {
-    let failed = false;
-    try { await promise; } catch (_) { failed = true; }
-    check(failed, message);
+  const check = (value, message) => {
+    if (!value) throw new Error('Synthetic native check: ' + message);
   };
-  const scope = new Components.utils.Sandbox(Services.scriptSecurityManager.getSystemPrincipal(), {
-    sandboxName: 'zotero-research-synthetic-native-checks',
-    wantGlobalProperties: ['ChromeUtils', 'TextEncoder', 'XMLHttpRequest'],
+  const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const waitFor = async (read, message, timeout = 10000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const value = await read();
+      if (value) return value;
+      await sleep(100);
+    }
+    throw new Error('Timed out waiting for ' + message);
+  };
+
+  const scope = new Components.utils.Sandbox(
+    Services.scriptSecurityManager.getSystemPrincipal(),
+    {
+      sandboxName: 'zotero-research-synthetic-native-checks',
+      wantGlobalProperties: [
+        'AbortController', 'ChromeUtils', 'DOMParser', 'fetch', 'TextDecoder', 'TextEncoder',
+        'URL', 'XMLHttpRequest',
+      ],
+    },
+  );
+  Object.assign(scope, {
+    Zotero,
+    Services,
+    IOUtils,
+    PathUtils,
+    Components,
+    Cc,
+    Ci,
+    setTimeout,
+    clearTimeout,
   });
-  Object.assign(scope, { Zotero, Services, IOUtils, PathUtils, setTimeout, clearTimeout });
-  let bridge;
-  let controller;
+  scope.self = scope;
+
+  let addon;
+  let panel;
+  let body;
   try {
-    await stage('load packaged production code');
-    for (const resource of ['bootstrap.js', 'content/native.js', 'content/bridge-client.js']) {
+    await stage('load current packaged production code');
+    const bootstrapURI = String(await Zotero.Plugins.resolveURI(id, 'bootstrap.js'));
+    const rootURI = bootstrapURI.endsWith('bootstrap.js')
+      ? bootstrapURI.slice(0, -'bootstrap.js'.length)
+      : String(await Zotero.Plugins.resolveURI(id, ''));
+    for (const resource of [
+      'content/native.js',
+      'content/relay.js',
+      'content/katex.min.js',
+      'content/markdown.js',
+      'content/panel.js',
+      'bootstrap.js',
+    ]) {
       const uri = await Zotero.Plugins.resolveURI(id, resource);
       Services.scriptloader.loadSubScript(uri, scope, 'UTF-8');
     }
-    check(scope.zraHash('synthetic').length === 64, 'Gecko SHA-256 adapter');
-    const config = JSON.parse(await Zotero.File.getResourceAsync(await Zotero.Plugins.resolveURI(id, 'config.json')));
-    const { Subprocess } = ChromeUtils.importESModule('resource://gre/modules/Subprocess.sys.mjs');
-    const serverID = () => Zotero.Server.LocalAPI.getServerID();
-    bridge = scope.ZoteroResearchBridge.createBridgeClient({
-      serverID, request: scope.zraRequest, setTimeout, clearTimeout,
-      launch: async () => {
-        const child = await Subprocess.call({
-          command: config.bridgeExecutable, arguments: [], workdir: config.workingDirectory,
-          environment: { PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }, environmentAppend: true,
-          stderr: 'pipe',
-        });
-        (async () => { try { while (await child.stderr.readString()) {} } catch (_) {} })();
-        return {
-          read: () => child.stdout.readString(),
-          stop: async () => {
-            await child.stdin.close();
-            let timer;
-            await Promise.race([child.wait(), new Promise((resolve) => { timer = setTimeout(resolve, 2000); })]);
-            clearTimeout(timer);
-            if (child.exitCode === null) await child.kill(0);
-          },
-        };
+    check(typeof scope.zraCreateAddon === 'function', 'current bootstrap loaded');
+    check(typeof scope.ZoteroResearchNative?.createHighlightController === 'function',
+      'current native adapter loaded');
+    check(typeof scope.ZoteroResearchRelay?.createRelayStore === 'function',
+      'current relay adapter loaded');
+    check(typeof scope.ZoteroResearchPanel?.mount === 'function',
+      'current sidebar adapter loaded');
+    check(typeof scope.ZoteroResearchMarkdown?.renderMarkdown === 'function',
+      'current Markdown adapter loaded');
+    check(typeof scope.AbortController === 'function', 'sandbox AbortController global');
+    check(typeof scope.fetch === 'function', 'sandbox fetch global');
+    check(typeof scope.TextDecoder === 'function', 'sandbox TextDecoder global');
+    check(typeof scope.TextEncoder === 'function', 'sandbox TextEncoder global');
+
+    const registrations = { sections: [], preferences: [], reader: null };
+    const shadowReader = Object.create(Zotero.Reader);
+    shadowReader.registerEventListener = (name, listener) => {
+      registrations.reader = { name, listener };
+    };
+    shadowReader.unregisterEventListener = () => {};
+    const shadowServer = Object.create(Zotero.Server);
+    shadowServer.Endpoints = Object.create(null);
+    const shadowZotero = Object.create(Zotero);
+    shadowZotero.ItemPaneManager = {
+      registerSection(options) {
+        registrations.sections.push(options);
+        return 'synthetic-section-id';
       },
+      unregisterSection(idValue) {
+        registrations.unregisteredSection = idValue;
+      },
+    };
+    shadowZotero.PreferencePanes = {
+      register: async (options) => {
+        registrations.preferences.push(options);
+        return 'synthetic-preference-id';
+      },
+      unregister(idValue) {
+        registrations.unregisteredPreference = idValue;
+      },
+    };
+    shadowZotero.Server = shadowServer;
+    shadowZotero.Reader = shadowReader;
+    shadowZotero.getMainWindows = () => [];
+    scope.Zotero = shadowZotero;
+
+    const packagedMount = scope.ZoteroResearchPanel.mount;
+    scope.ZoteroResearchPanel.mount = (target, adapter) => {
+      registrations.adapter = adapter;
+      panel = packagedMount(target, adapter);
+      return panel;
+    };
+    addon = scope.zraCreateAddon({ id, rootURI, version: Zotero.version });
+    await addon.start();
+    check(registrations.sections.length === 1, 'current ItemPaneManager section registered in sandbox');
+    const section = registrations.sections[0];
+    check(section.pluginID === id && typeof section.onRender === 'function'
+      && typeof section.onAsyncRender === 'function', 'current sidebar section lifecycle');
+    check(registrations.preferences.length === 1, 'current preferences registration captured');
+    check(registrations.reader?.name === 'renderTextSelectionPopup',
+      'current reader selection hook captured');
+
+    await stage('real Gecko DOM sidebar Markdown and MathML');
+    const hiddenWindow = Services.appShell?.hiddenDOMWindow;
+    const document = hiddenWindow?.document || Zotero.getMainWindow().document;
+    body = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+    body.setAttribute('data-zra-synthetic-sidebar', 'true');
+    const props = {
+      doc: document,
+      body,
+      item: paper,
+      tabType: 'library',
+      refresh: () => {},
+    };
+    section.onInit(props);
+    section.onRender(props);
+    check(panel && registrations.adapter, 'production panel mounted with captured adapter');
+    check(body.querySelector('[data-zrp-root="true"]'), 'real Gecko sidebar root mounted');
+    const apiConfig = registrations.adapter.getAPIConfig();
+    check(apiConfig && !apiConfig.baseUrl && !apiConfig.model && !apiConfig.apiKey,
+      'isolated profile has no external model configuration');
+
+    await registrations.adapter.clearChatSession(paper.key);
+    await registrations.adapter.saveChatSession(paper.key, {
+      title: paper.getField('title'),
+      provider: 'gemini',
+      aiUrl: '',
+      messages: [
+        {
+          role: 'user', content: 'Synthetic question', sourceContext: '', evidence: [],
+        },
+        {
+          role: 'assistant',
+          content: 'Synthetic answer with inline $x^2$ and display $$\\frac{a}{b}$$.',
+          sourceContext: '材料范围：合成 PDF',
+          evidence: [{ page: 1, text: 'Synthetic evidence' }],
+        },
+      ],
     });
-    await stage('local bridge health');
-    const health = await bridge.rpc('health');
-    check(health.zotero.version === Zotero.version && health.zotero.server_id === serverID(), 'bridge identity');
-    check(!health.models.local && !health.models.external, 'no inherited real model configuration');
-    await stage('synthetic item context and evidence');
-    const context = await bridge.rpc('item_context', { item_key: paper.key });
-    check(context.item.key === paper.key && context.attachments.some((item) => item.key === pdf.key), 'synthetic item context');
-    const evidence = await bridge.rpc('evidence', { attachment_key: pdf.key, query: 'simulated treatment endpoint' });
-    check(evidence.evidence.some((entry) => entry.page === 1 && entry.text.includes('twelve percent')), 'page-linked evidence');
-    const analysisModes = [];
-    const quote = 'The simulated treatment improved the endpoint by twelve percent.';
-    for (const mode of ['reading', 'question', 'review', 'explain', 'translate']) {
-      await stage('no-model analysis: ' + mode);
-      const result = await bridge.rpc('analyze', {
-        item_key: paper.key, attachment_key: pdf.key, mode,
-        question: 'What does this synthetic scenario test?',
-        ...(['translate', 'explain'].includes(mode) ? { selected_text: quote, selection_page: 1 } : {}),
-      });
-      check(result.mode === 'evidence_only' && result.evidence.length > 0, mode + ' explicit no-model result');
-      analysisModes.push(mode);
-    }
-    await stage('exact locator and native highlight preview');
-    const location = await bridge.rpc('locate', { attachment_key: pdf.key, page: 1, quote });
-    check(location.status === 'exact' && location.rects.length > 0, 'exact PDF locator');
-    controller = scope.ZoteroResearchNative.createHighlightController({
-      serverID, digest: async (text) => scope.zraHash(text),
-      token: () => Services.uuid.generateUUID().toString(),
-      annotationKey: () => Zotero.DataObjectUtilities.generateKey(),
-      locate: (args) => bridge.rpc('locate', args),
-      attachment: async (key) => {
-        check(key === pdf.key, 'only the generated PDF is writable');
-        const file = await pdf.getFilePathAsync();
-        const stat = await IOUtils.stat(file);
-        return {
-          key: pdf.key, id: pdf.id, libraryID: pdf.libraryID, parentKey: paper.key,
-          editable: Zotero.Libraries.get(pdf.libraryID).editable === true,
-          isPDF: true,
-          stamp: scope.zraHash(JSON.stringify([file, stat.size, stat.lastModified])),
-        };
-      },
-      save: async (info, data) => {
-        check(info.key === pdf.key, 'native annotation target still synthetic');
-        const queue = new Zotero.Notifier.Queue();
-        let saved;
-        try { saved = await Zotero.Annotations.saveFromJSON(pdf, data, { notifierQueue: queue }); }
-        finally { await Zotero.Notifier.commit(queue); }
-        const reader = Zotero.Reader.getByTabID(Zotero.getMainWindow().Zotero_Tabs.selectedID);
-        check(reader && reader.itemID === pdf.id, 'synthetic reader is current');
-        await reader.setAnnotations([saved]);
-        return saved;
-      },
+    // Let the real section lifecycle set context after the archive exists, so
+    // its asynchronous restore path is the one being exercised.
+    await section.onAsyncRender(props);
+    const math = await waitFor(
+      () => body.querySelector('[data-testid="webai-chat-message-1"] math'),
+      'restored sidebar MathML',
+    );
+    check(math.namespaceURI === 'http://www.w3.org/1998/Math/MathML',
+      'sidebar formula is native MathML');
+    check(body.querySelector('[data-testid="webai-chat-message-1"]'),
+      'sidebar restored saved chat message');
+
+    const clearButton = body.querySelector('[data-zrp-action="webai-clear"]');
+    check(clearButton, 'sidebar clear-chat action');
+    clearButton.dispatchEvent(new document.defaultView.MouseEvent('click', {
+      bubbles: true, button: 0, detail: 1,
+    }));
+    const profileDir = Zotero.Profile?.dir
+      || Services.dirsvc.get('ProfD', Ci.nsIFile).path;
+    const sessionPath = PathUtils.join(
+      profileDir, 'zotero-research-sessions', paper.key + '.json',
+    );
+    await waitFor(async () => !(await IOUtils.exists(sessionPath)), 'chat archive clear');
+    check(!body.querySelector('[data-testid="webai-chat-message-0"]'),
+      'sidebar chat messages cleared');
+    check(await registrations.adapter.loadChatSession(paper.key) === null,
+      'cleared chat does not restore');
+    await stage('chat save restore clear');
+
+    await stage('Zotero PDF current-page and full-text extraction');
+    await Zotero.Reader.open(pdf.id, { pageIndex: 0 });
+    const currentPage = await waitFor(
+      () => registrations.adapter.retrieveCurrentPageEvidence(pdf.key),
+      'current reader page extraction',
+      15000,
+    );
+    check(currentPage.page === 1 && currentPage.spans.some(
+      (span) => String(span.text).includes('twelve percent'),
+    ), 'current page evidence is physical page 1');
+    const fullText = await registrations.adapter.retrieveOverviewEvidence(pdf.key);
+    check(fullText.kind === 'full-text', 'full PDF text is labelled full-text');
+    check(fullText.spans.some(
+      (span) => span.page === 1 && String(span.text).includes('twelve percent'),
+    ), 'full-text extraction contains page 1');
+    check(fullText.spans.some(
+      (span) => span.page === 2 && String(span.text).includes('twenty-four'),
+    ), 'full-text extraction contains page 2');
+
+    await stage('local relay connect poll update disconnect');
+    const endpointConstructor = shadowServer.Endpoints[relayPath];
+    check(typeof endpointConstructor === 'function', 'relay endpoint registered locally');
+    const endpoint = new endpointConstructor();
+    const relayRequest = async (data) => {
+      const response = await endpoint.init({ headers: {}, data });
+      check(response[0] === 200, 'relay response status');
+      return JSON.parse(response[2]);
+    };
+    const sessionSecret = 'synthetic-native-session-1234';
+    const connected = await relayRequest({
+      action: 'connect', sessionSecret, ai: 'synthetic-no-network', url: 'https://synthetic.invalid/',
     });
-    const before = pdf.getAnnotations().length;
-    const highlight = await controller.prepare({ attachment_key: pdf.key, page: 1, quote });
-    check(pdf.getAnnotations().length === before, 'highlight preview is read-only');
-    await rejected(controller.commit(highlight, false), 'highlight confirmation enforced');
-    // This test-generated annotation is the sole deliberate change after fixture creation.
-    await stage('native synthetic highlight save and replay guard');
-    const created = await controller.commit(highlight, true);
-    const annotation = Zotero.Items.getByLibraryAndKey(pdf.libraryID, created.annotation_key);
-    check(annotation.annotationText === quote && annotation.parentID === pdf.id, 'native annotation persisted');
-    const position = JSON.parse(annotation.annotationPosition);
-    check(position.pageIndex === 0 && JSON.stringify(position.rects) === JSON.stringify(location.rects), 'native PDF coordinates preserved');
-    await rejected(controller.commit(highlight, true), 'highlight replay denied');
-    check(pdf.getAnnotations().length === before + 1, 'exactly one synthetic annotation');
+    check(connected.status === 'connected', 'relay connect');
+    const taskID = registrations.adapter.relay.enqueueTask({
+      messages: [{ text: 'synthetic relay request; no web page is opened' }],
+      meta: { source: 'native-smoke' },
+    });
+    const polled = await relayRequest({ action: 'poll', sessionSecret });
+    check(polled.task?.id === taskID, 'relay poll delivered queued task');
+    const updated = await relayRequest({
+      action: 'update', sessionSecret, id: taskID,
+      text: 'synthetic relay response', isDone: true,
+    });
+    check(updated.ok === true, 'relay update');
+    const disconnected = await relayRequest({ action: 'disconnect', sessionSecret });
+    check(disconnected.status === 'disconnected', 'relay disconnect');
+
     return {
-      status: 'passed', bridge: 'Gecko Subprocess + production XHR',
-      analysisModes, modelExecution: 'not configured; evidence-only checked',
-      evidence: 'physical page 1',
-      highlight: 'one native annotation; exact PDF coordinates; replay rejected',
-      annotationKey: annotation.key,
+      status: 'passed',
+      production: 'current packaged XPI loaded in Gecko sandbox; original registries untouched',
+      section: 'Zotero 10 ItemPaneManager section captured and rendered',
+      sidebar: 'real Gecko DOM panel restored Markdown with native MathML',
+      pdf: 'current physical page 1 and full two-page text extracted by Zotero.PDFWorker',
+      chat: 'save, restore, and clear archive verified in isolated profile',
+      relay: 'local connect/poll/update/disconnect verified; no web request',
+      modelExecution: 'not configured or invoked; no GPU/Python bridge',
     };
   } finally {
-    controller?.destroy();
-    await bridge?.close();
-    // Some Zotero builds wrap the sandbox for loadSubScript; cleanup must not mask
-    // the actual integration failure. This synthetic process exits after testing.
+    try { await addon?.stop(); } catch (_) {}
+    try { body?.remove(); } catch (_) {}
     try { Components.utils.nukeSandbox(scope); } catch (_) {}
   }
 }

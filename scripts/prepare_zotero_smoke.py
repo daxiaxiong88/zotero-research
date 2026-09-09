@@ -26,15 +26,21 @@ FIXTURE_ID = "zotero-research-smoke@local.invalid"
 def prepare(
     xpi: Path,
     artifact_directory: Path,
-    bridge_executable: Path,
+    bridge_executable: Path | None = None,
     *,
     include_research: bool = True,
     native_checks: bool = False,
 ) -> tuple[Path, int]:
+    """Create a disposable Zotero profile and synthetic two-page PDF.
+
+    ``bridge_executable`` remains an accepted compatibility argument for old
+    callers, but the current addon has no Python bridge and the value is never
+    resolved, copied, launched, or written into the generated XPI.
+    """
     if native_checks and not include_research:
         raise ValueError("Native integration checks require the research addon")
+    del bridge_executable
     xpi = xpi.resolve(strict=True)
-    bridge_executable = bridge_executable.resolve(strict=True)
     artifact_directory.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="zotero-smoke-", dir=artifact_directory.resolve()))
     profile = root / "profile"
@@ -57,6 +63,15 @@ def prepare(
         "extensions.zotero.firstRunGuidance": False,
         "extensions.zotero.automaticScraperUpdates": False,
         "extensions.zotero.sync.autoSync": False,
+        # The native smoke must never inherit a model, API key, or local GPU
+        # parser from a user's profile. These are profile-local defaults for
+        # the disposable run only.
+        "extensions.zotero.researchAssistant.apiProtocol": "auto",
+        "extensions.zotero.researchAssistant.apiBaseUrl": "",
+        "extensions.zotero.researchAssistant.apiModel": "",
+        "extensions.zotero.researchAssistant.apiKey": "",
+        "extensions.zotero.researchAssistant.mineruExecutable": "",
+        "extensions.zotero.researchAssistant.mineruModelPath": "",
         # Do not let a fresh test profile install/replace the user's Word/LibreOffice add-ins.
         "extensions.zoteroWinWordIntegration.skipInstallation": True,
         "extensions.zoteroOpenOfficeIntegration.skipInstallation": True,
@@ -97,19 +112,16 @@ def prepare(
             if manifest.get("applications", {}).get("zotero", {}).get("id") != PLUGIN_ID:
                 raise ValueError("Expected the research plugin, not an arbitrary extension")
             for entry in source.infolist():
-                content = source.read(entry.filename)
+                # ``config.json`` belonged to the retired Python bridge. Do
+                # not carry it into a smoke profile even when an old XPI is
+                # supplied; current production code reads only Zotero prefs.
                 if entry.filename == "config.json":
-                    content = json.dumps(
-                        {
-                            "bridgeExecutable": str(bridge_executable),
-                            # No .env here: real model keys/config must not affect this test.
-                            "workingDirectory": str(root),
-                        }
-                    ).encode("utf-8")
-                destination.writestr(entry, content)
+                    continue
+                destination.writestr(entry, source.read(entry.filename))
 
     fixture_source = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "zotero_smoke"
     fixture_config = {
+        "profileDirectory": str(profile),
         "dataDirectory": str(data),
         "pdfPath": str(pdf_path),
         "reportPath": str(root / "fixture-report.json"),
@@ -156,7 +168,12 @@ def launch(zotero_executable: Path, root: Path, port: int) -> subprocess.Popen[b
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--xpi", type=Path, required=True)
-    parser.add_argument("--bridge-executable", type=Path, required=True)
+    parser.add_argument(
+        "--bridge-executable",
+        type=Path,
+        default=None,
+        help="Deprecated compatibility option; accepted but never launched or copied",
+    )
     parser.add_argument("--artifacts", type=Path, default=Path("artifacts"))
     parser.add_argument(
         "--zotero-executable", type=Path, default=Path(r"C:\Program Files\Zotero\zotero.exe")
@@ -166,7 +183,7 @@ def main() -> int:
     parser.add_argument(
         "--native-checks",
         action="store_true",
-        help="Verify the production bridge and write one highlight in the generated PDF only",
+        help="Run the current production-code Zotero 10 native smoke in the isolated profile",
     )
     args = parser.parse_args()
     root, port = prepare(
