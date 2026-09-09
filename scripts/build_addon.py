@@ -387,8 +387,7 @@ def _read_manifest(path: Path) -> dict[str, Any]:
             "manifest applications.zotero.strict_max_version must be "
             f"{EXPECTED_ZOTERO_MAX_VERSION!r}, got {maximum!r}"
         )
-    update_url = zotero.get("update_url")
-    if not _is_nonempty_text(update_url):
+    if "update_url" in zotero and not _is_nonempty_text(zotero["update_url"]):
         raise PackageError(
             "manifest applications.zotero.update_url must be a non-empty string"
         )

@@ -250,6 +250,20 @@ def test_build_addon_preserves_declared_main_update_url(tmp_path: Path) -> None:
     )
 
 
+def test_build_addon_allows_omitted_update_url(tmp_path: Path) -> None:
+    addon_dir, output = _valid_inputs(tmp_path)
+    manifest_path = addon_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["applications"]["zotero"]["update_url"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = build_addon(addon_dir=addon_dir, output=output)
+
+    with zipfile.ZipFile(result.xpi_path) as archive:
+        packaged_manifest = json.loads(archive.read("manifest.json"))
+    assert "update_url" not in packaged_manifest["applications"]["zotero"]
+
+
 def _valid_inputs(tmp_path: Path) -> tuple[Path, Path]:
     addon_dir = tmp_path / "addon"
     _make_addon_tree(addon_dir)
