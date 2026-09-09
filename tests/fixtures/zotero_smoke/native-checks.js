@@ -37,7 +37,6 @@ async function runSyntheticNativeChecks(paper, pdf) {
     Services,
     IOUtils,
     PathUtils,
-    Components,
     Cc,
     Ci,
     setTimeout,
@@ -128,8 +127,9 @@ async function runSyntheticNativeChecks(paper, pdf) {
       'current reader selection hook captured');
 
     await stage('real Gecko DOM sidebar Markdown and MathML');
-    const hiddenWindow = Services.appShell?.hiddenDOMWindow;
-    const document = hiddenWindow?.document || Zotero.getMainWindow().document;
+    // hiddenDOMWindow is unavailable on Windows Zotero. This is already a
+    // disposable synthetic profile; use its real chrome document instead.
+    const document = Zotero.getMainWindow().document;
     body = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
     body.setAttribute('data-zra-synthetic-sidebar', 'true');
     const props = {

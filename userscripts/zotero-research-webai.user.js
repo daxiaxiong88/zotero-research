@@ -1212,21 +1212,20 @@
         || inputs[0];
     }
 
-    /** Attachment-ish node counts, globally and around the composer. */
+    /** Baseline previews in the same region as the mutation observer. */
     attachmentSnapshot() {
-      const global = document.querySelectorAll(
-        'img[src^="blob:"], img[src^="data:"], [class*="attachment" i], [class*="file-preview" i], [class*="upload-preview" i]',
-      ).length;
-      const input = this.findUsable(this.config.input.text.selector)
-        || document.querySelector('textarea, [contenteditable="true"]');
-      const scope = input && (input.closest('form, [class*="chat" i], [class*="composer" i], [class*="input" i]') || input.parentElement);
-      const composer = scope ? scope.querySelectorAll('img, [class*="attach" i], [class*="file" i]').length : 0;
-      return { global, composer };
+      const scope = this.composerWatchScope();
+      const selector = scope === document.body
+        ? 'img[src^="blob:"], img[src^="data:"], [class*="attachment" i], [class*="file-preview" i], [class*="upload-preview" i]'
+        : 'img, [class*="attach" i], [class*="file" i]';
+      return { scope, count: scope.querySelectorAll(selector).length };
     }
 
     registeredSince(before) {
       const now = this.attachmentSnapshot();
-      return now.global > before.global || now.composer > before.composer;
+      // An unrelated history image or a replaced conversation's old previews
+      // must not turn an unacknowledged file event into a successful upload.
+      return now.scope === before.scope && now.count > before.count;
     }
 
     /** Poll for an upload indicator until the deadline. */

@@ -593,6 +593,42 @@ test('body-scoped 图片确认忽略无关段落和图片 src 变化，只接受
   api.window.close();
 });
 
+test('attachment snapshot stays inside the composer instead of accepting unrelated page previews', async (t) => {
+  const api = setup('https://gemini.google.com/app',
+    '<!doctype html><body><form id="composer"><textarea></textarea></form><aside></aside></body>');
+  t.after(() => api.window.close());
+  const connector = api.connector;
+  const before = connector.attachmentSnapshot();
+  const signal = connector.startMutationWatch();
+  t.after(() => signal.stop());
+  const unrelated = api.window.document.createElement('img');
+  unrelated.src = 'blob:unrelated-history-preview';
+  api.window.document.querySelector('aside').appendChild(unrelated);
+  await new Promise(resolve => api.window.setTimeout(resolve, 0));
+  assert.equal(signal(), false);
+  assert.equal(connector.registeredSince(before), false,
+    'the snapshot fallback must not bypass the scoped mutation observer');
+  const attachment = api.window.document.createElement('img');
+  attachment.src = 'blob:new-composer-attachment';
+  api.window.document.querySelector('form').appendChild(attachment);
+  assert.equal(connector.registeredSince(before), true);
+});
+
+test('attachment snapshot does not treat a different composer and its old previews as an upload', (t) => {
+  const api = setup('https://gemini.google.com/app',
+    '<!doctype html><body><form><textarea></textarea></form></body>');
+  t.after(() => api.window.close());
+  const before = api.connector.attachmentSnapshot();
+  api.window.document.querySelector('form').remove();
+  const form = api.window.document.createElement('form');
+  form.appendChild(api.window.document.createElement('textarea'));
+  const oldPreview = api.window.document.createElement('img');
+  oldPreview.src = 'blob:old-other-conversation';
+  form.appendChild(oldPreview);
+  api.window.document.body.appendChild(form);
+  assert.equal(api.connector.registeredSince(before), false);
+});
+
 test('ChatGPT enters generating state before the response section appears', async (t) => {
   const dom = new JSDOM(
     '<!doctype html><body><main id="main"></main>'

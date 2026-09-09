@@ -112,6 +112,9 @@ async function startup(data) {
       },
     };
     Services.console.registerListener(fixtureConsoleObserver);
+    for (const message of Services.console.getMessageArray?.() || []) {
+      fixtureConsoleObserver.observe(message);
+    }
     Zotero.uiReadyPromise.then(() => prepareFixture()).catch(() => {});
   } catch (error) {
     await writeFixtureReport({ status: 'fixture_failed', message: String(error.message || error) });

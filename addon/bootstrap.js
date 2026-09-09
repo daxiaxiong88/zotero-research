@@ -1027,6 +1027,7 @@ function zraCreateAddon(data) {
       if (legacyPath === currentPath) return null;
       const legacy = await readMineruCacheAt(legacyPath, stamp);
       if (!legacy) return null;
+      if (!alive) return legacy;
       if (await writeMineruCache(attachmentKey, legacy)) {
         try { await IOUtils.remove(legacyPath); } catch (_) {}
       }
@@ -1065,6 +1066,7 @@ function zraCreateAddon(data) {
    * up by pdfPages() for every later question.
    */
   async function runMineruParse(attachmentKey, info, onProgress) {
+    if (!alive) throw new Error('MinerU 已因插件关闭而取消。');
     const executable = String(Zotero.Prefs.get('researchAssistant.mineruExecutable') || '').trim();
     const modelPath = String(Zotero.Prefs.get('researchAssistant.mineruModelPath') || '').trim();
     if (!executable || !modelPath) {
@@ -1132,6 +1134,7 @@ function zraCreateAddon(data) {
       };
       let process;
       try {
+        if (!alive) failParse('MinerU 已因插件关闭而取消。');
         process = await Subprocess.call({
           command: executable,
           arguments: ['-p', stagedInput, '-o', outputDirectory, '-b', 'vlm-engine'],
@@ -1303,6 +1306,7 @@ function zraCreateAddon(data) {
     let outcome = null;
     let timeoutReason = 'maximum';
     while (Date.now() < deadline) {
+      if (!alive) { timeoutReason = 'shutdown'; break; }
       if (Date.now() - lastOutputAt >= idleTimeoutMs) {
         timeoutReason = 'idle';
         break;
@@ -1316,6 +1320,7 @@ function zraCreateAddon(data) {
       ]);
       if (pollTimer !== null) clearTimeout(pollTimer);
       if (current !== pollSentinel) {
+        if (!alive) { timeoutReason = 'shutdown'; break; }
         if (!current.ok) {
           await terminateProcess();
           await drainPipes();
@@ -1333,13 +1338,14 @@ function zraCreateAddon(data) {
       // Give stdout/stderr handles a bounded window to close before finally
       // removes the run directory; this avoids intermittent Windows leftovers.
       await drainPipes();
-      failParse(timeoutReason === 'idle'
-        ? 'MinerU 已连续 15 分钟没有输出，已终止。'
-        : 'MinerU 解析超过 60 分钟，已终止。');
+      failParse(timeoutReason === 'shutdown' ? 'MinerU 已因插件关闭而取消。'
+        : timeoutReason === 'idle' ? 'MinerU 已连续 15 分钟没有输出，已终止。'
+          : 'MinerU 解析超过 60 分钟，已终止。');
     }
     // wait() resolves only after the child exits, so both pipes should now
     // reach EOF. Await them before selecting the final useful error line.
     await drainPipes();
+    if (!alive) failParse('MinerU 已因插件关闭而取消。');
     // Zotero 10 resolves wait() as {exitCode}; retaining bare-number support
     // also keeps the adapter testable and compatible with older runtimes.
     const exitCode = outcome && typeof outcome === 'object' ? outcome.exitCode : outcome;
@@ -1386,6 +1392,7 @@ function zraCreateAddon(data) {
       textPages: pages.length,
       parsedAt: new Date().toISOString(),
     };
+    if (!alive) failParse('MinerU 已因插件关闭而取消。');
     if (!(await writeMineruCache(attachmentKey, { stamp: info.stamp, pages, stats }))) {
       failParse('MinerU 解析成功，但无法写入持久缓存。请检查 Zotero 数据目录权限。');
     }
@@ -1399,9 +1406,12 @@ function zraCreateAddon(data) {
   }
 
   async function deepParseWithMineru(attachmentKey, onProgress) {
+    if (!alive) throw new Error('MinerU 已因插件关闭而取消。');
     const info = await attachment(attachmentKey);
+    if (!alive) throw new Error('MinerU 已因插件关闭而取消。');
     const jobKey = String(info.key || attachmentKey) + '\0' + info.stamp;
     const cached = await readMineruCache(attachmentKey, info.stamp);
+    if (!alive) throw new Error('MinerU 已因插件关闭而取消。');
     if (cached) {
       rememberPdfPages(info.stamp, cached.pages);
       return { pages: cached.pages, cached: true, stats: cached.stats };
@@ -1502,8 +1512,14 @@ function zraCreateAddon(data) {
       if (!reader) return null;
       const opened = Zotero.Items.get(reader.itemID);
       if (!opened || opened.key !== attachmentKey) return null;
-      const viewState = reader._internalReader && reader._internalReader._lastViewState;
-      const pageIndex = viewState ? viewState.pageIndex : null;
+      // Zotero 10's reader keeps focused-view stats in _state, not
+      // _lastViewState. Respect split-view focus instead of always using left.
+      const internal = reader._internalReader || reader;
+      const state = internal._state;
+      const viewStats = state?.primary === false ? state.secondaryViewStats : state?.primaryViewStats;
+      const viewState = state?.primary === false ? state.secondaryViewState : state?.primaryViewState;
+      const pageIndex = Number.isInteger(viewStats?.pageIndex) ? viewStats.pageIndex
+        : Number.isInteger(viewState?.pageIndex) ? viewState.pageIndex : internal._lastViewState?.pageIndex;
       return Number.isInteger(pageIndex) && pageIndex >= 0 ? pageIndex + 1 : null;
     } catch (_) {
       return null;
@@ -1844,6 +1860,17 @@ function zraCreateAddon(data) {
     },
     async stop() {
       alive = false;
+      // Existing jobs notice shutdown in their bounded process-wait loop.
+      // Never leave a disabled plugin holding a GPU process indefinitely.
+      if (mineruJobs.size) {
+        let stopTimer;
+        try {
+          await Promise.race([
+            Promise.allSettled(Array.from(mineruJobs.values(), job => job.promise)),
+            new Promise(resolve => { stopTimer = setTimeout(resolve, 15000); }),
+          ]);
+        } finally { if (stopTimer !== undefined) clearTimeout(stopTimer); }
+      }
       relayStore?.destroy();
       Zotero.Reader.unregisterEventListener('renderTextSelectionPopup', selectionListener);
       try { Services.obs.removeObserver(reconnectObserver, ZRA_TOPIC); } catch (_) {}

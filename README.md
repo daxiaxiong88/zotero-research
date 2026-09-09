@@ -160,3 +160,5 @@ uv run python scripts/build_addon.py
 ```
 
 更完整的操作细节见 [Zotero 10 使用指南](docs/USAGE_ZOTERO10.md)。
+
+本次修复、已执行的测试及尚需真实网页验收的项目见 [0.8.3 发布前检查](docs/RELEASE_AUDIT.md)。

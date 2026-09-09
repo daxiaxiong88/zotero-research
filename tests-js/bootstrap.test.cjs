@@ -193,7 +193,9 @@ test('retrieveCurrentPageEvidence reads the reader page and scopes evidence to i
   h.context.Zotero.PDFWorker = {
     getFullText: async () => ({ text: 'p1\fp2\fp3\fp4\fCurrent page text', extractedPages: 5, totalPages: 5 }),
   };
-  const reader = { itemID: 42, _internalReader: { _lastViewState: { pageIndex: 4 } } };
+  const reader = { itemID: 42, _internalReader: { _state: {
+    primary: true, primaryViewStats: { pageIndex: 4 }, secondaryViewStats: { pageIndex: 0 },
+  } } };
   h.context.Zotero.getMainWindow = () => ({ Zotero_Tabs: { selectedID: 'tab-1' } });
   h.context.Zotero.Reader.getByTabID = () => reader;
   await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
@@ -214,6 +216,10 @@ test('retrieveCurrentPageEvidence reads the reader page and scopes evidence to i
   assert.equal(scoped.spans.length, 1);
   assert.equal(scoped.spans[0].page, 5);
   assert.match(scoped.spans[0].text, /Current page text/);
+
+  reader._internalReader._state.primary = false;
+  assert.equal((await adapter.retrieveCurrentPageEvidence('PDFTEST1')).page, 1,
+    'split reader uses the focused secondary view');
 
   // A reader showing a different attachment yields no scoped evidence.
   reader.itemID = 99;
@@ -1202,4 +1208,57 @@ test('MinerU timeout remains bounded when kill and output pipes never settle', a
   assert.equal(closedStdout, 1);
   assert.equal(closedStderr, 1);
   await h.context.shutdown({}, 4);
+});
+
+test('MinerU initialization finishing after shutdown cannot spawn a process', async () => {
+  const h = runtime();
+  const fixture = configureMineruFixture(h);
+  let releaseFile;
+  let started;
+  const lookup = new Promise(resolve => { started = resolve; });
+  fixture.item.getFilePathAsync = () => { started(); return new Promise(resolve => { releaseFile = resolve; }); };
+  let spawned = 0;
+  h.context.ChromeUtils = { importESModule: () => ({ Subprocess: {
+    call: async () => { spawned++; throw new Error('unexpected spawn'); },
+  } }) };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const parse = mountMineruAdapter(h).deepParseWithMineru('MINERU10');
+  const rejected = assert.rejects(parse, /插件关闭/);
+  await lookup;
+  await h.context.shutdown({}, 4);
+  fixture.item.getFilePathAsync = async () => fixture.pdfPath;
+  releaseFile(fixture.pdfPath);
+  await rejected;
+  assert.equal(spawned, 0);
+});
+
+test('MinerU shutdown terminates a running process and awaits its directory cleanup', async () => {
+  const h = runtime();
+  configureMineruFixture(h);
+  let started;
+  let killed = 0;
+  let cleaned = 0;
+  const spawned = new Promise(resolve => { started = resolve; });
+  const pendingReads = [];
+  const pipe = () => ({ readString: () => new Promise(resolve => pendingReads.push(resolve)) });
+  h.context.ChromeUtils = { importESModule: () => ({ Subprocess: {
+    call: async () => {
+      started();
+      return {
+        stdout: pipe(), stderr: pipe(), wait: () => new Promise(() => {}),
+        kill: async () => { killed++; pendingReads.splice(0).forEach(resolve => resolve('')); },
+      };
+    },
+  } }) };
+  h.context.IOUtils.remove = async () => { cleaned++; };
+  h.context.setTimeout = (fn, ms) => ms >= 15000 ? setTimeout(fn, ms) : setTimeout(fn, 0);
+  h.context.clearTimeout = clearTimeout;
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const parse = mountMineruAdapter(h).deepParseWithMineru('MINERU10');
+  const rejected = assert.rejects(parse, /插件关闭/);
+  await spawned;
+  await h.context.shutdown({}, 4);
+  await rejected;
+  assert.equal(killed, 1);
+  assert.equal(cleaned, 1);
 });
