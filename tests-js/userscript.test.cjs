@@ -74,7 +74,7 @@ test('parseChatGPT assembles SSE deltas and honors [DONE]', () => {
   assert.equal(parsed.done, true);
 });
 
-test('parseChatGPT keeps a longer snapshot when a later frame is truncated', () => {
+test('parseChatGPT treats the latest message snapshot as authoritative', () => {
   const api = setup('https://chatgpt.com/');
   const raw = [
     `data: ${JSON.stringify({
@@ -96,8 +96,22 @@ test('parseChatGPT keeps a longer snapshot when a later frame is truncated', () 
   ].join('\n');
 
   const parsed = api.parseChatGPT(raw);
-  assert.equal(parsed.text, '完整回答第一段\n第二段及结尾');
+  assert.equal(parsed.text, '完整回答第一段');
   assert.equal(parsed.done, true);
+});
+
+test('parseChatGPT append patches preserve repeated deltas', () => {
+  const api = setup('https://chatgpt.com/');
+  const raw = [
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'append', v: 'ha' }] })}`,
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'append', v: 'ha' }] })}`,
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'append', v: 'a' }] })}`,
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'append', v: 'a' }] })}`,
+    'data: [DONE]',
+    '',
+  ].join('\n');
+
+  assert.equal(api.parseChatGPT(raw).text, 'hahaaa');
 });
 
 test('parseChatGPT applies replace and append patch operations', () => {
@@ -112,6 +126,18 @@ test('parseChatGPT applies replace and append patch operations', () => {
   const parsed = api.parseChatGPT(raw);
   assert.equal(parsed.text, '替换后的正文，还有结尾');
   assert.equal(parsed.done, true);
+});
+
+test('parseChatGPT remove patch clears the target before reading its value', () => {
+  const api = setup('https://chatgpt.com/');
+  const raw = [
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'replace', v: '正文' }] })}`,
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'remove' }] })}`,
+    'data: [DONE]',
+    '',
+  ].join('\n');
+
+  assert.equal(api.parseChatGPT(raw).text, '');
 });
 
 test('parseChatGPT removes internal citation markers from the visible answer', () => {
@@ -247,14 +273,15 @@ test('network fallback does not replace a complete SSE answer with a shorter DOM
   assert.equal(connector.doneSignal, true);
 });
 
-test('network data wins over stale DOM fallback even when the DOM text is longer', () => {
+test('network source adopts short replacements and permanently outranks stale DOM', () => {
   const api = setup('https://chatgpt.com/');
   const connector = api.connector;
   connector.isRunning = true;
   connector.onNewData('DOM 上一轮很长的旧回答。', false, 'dom');
-  connector.onNewData('SSE 当前回答', false, 'network');
-  connector.onNewData('DOM 截断', false, 'dom');
-  assert.equal(connector.accumulatedText, 'SSE 当前回答');
+  connector.onNewData('SSE 当前回答，完整版本', false, 'network');
+  connector.onNewData('SSE 短 replace', false, 'network');
+  connector.onNewData('DOM 截断但更长的旧回答。', false, 'dom');
+  assert.equal(connector.accumulatedText, 'SSE 短 replace');
   api.window.close();
 });
 
@@ -538,6 +565,30 @@ test('图片确认忽略 body 和 composer 的 class 动画变动', async () => 
   composer.classList.add('upload-animation');
   await new Promise((resolve) => api.window.setTimeout(resolve, 0));
   assert.equal(signal(), false, 'class-only animation is not an upload acknowledgement');
+  signal.stop();
+  api.window.close();
+});
+
+test('body-scoped 图片确认忽略无关段落和图片 src 变化，只接受附件语义节点', async () => {
+  const api = setup(
+    'https://gemini.google.com/app',
+    '<!doctype html><body><input type="file" id="f">'
+      + '<div id="unrelated"><img id="other" src="blob:old"></div></body>',
+  );
+  const connector = api.connector;
+  const body = api.window.document.body;
+  const unrelated = api.window.document.getElementById('unrelated');
+  const other = api.window.document.getElementById('other');
+  const signal = connector.startMutationWatch();
+  unrelated.appendChild(api.window.document.createElement('p'));
+  other.setAttribute('src', 'blob:changed');
+  await new Promise((resolve) => api.window.setTimeout(resolve, 0));
+  assert.equal(signal(), false, 'unrelated body mutations are not upload confirmation');
+  const attachment = api.window.document.createElement('div');
+  attachment.className = 'attachment-preview';
+  body.appendChild(attachment);
+  await new Promise((resolve) => api.window.setTimeout(resolve, 0));
+  assert.equal(signal(), true, 'attachment-like body node confirms upload');
   signal.stop();
   api.window.close();
 });

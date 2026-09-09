@@ -156,17 +156,21 @@
       if (!data) continue;
       const message = data.message;
       const snapshot = chatGPTSnapshotText(message);
-      if (snapshot !== null) response = mergeStreamText(response, snapshot);
+      if (snapshot !== null) response = snapshot;
       if (chatGPTFrameDone(data, message)) done = true;
       const patches = Array.isArray(data.v)
         ? data.v : (data.p || data.path ? [data] : []);
       for (const patch of patches) {
         const path = patch?.p ?? patch?.path;
         if (path !== '/message/content/parts/0') continue;
+        const operation = String(patch?.o ?? patch?.op ?? '').toLowerCase();
+        if (operation === 'remove' || operation === 'delete') {
+          response = '';
+          continue;
+        }
         const value = chatGPTPatchValue(patch);
         if (value === null) continue;
-        const operation = String(patch?.o ?? patch?.op ?? '').toLowerCase();
-        if (operation === 'remove' || operation === 'delete') response = '';
+        if (operation === 'append' || operation === 'add') response += value;
         else if (operation === 'replace' || operation === 'set' || operation === 'snapshot') response = value;
         else response = mergeStreamText(response, value);
       }
@@ -767,20 +771,20 @@
       const nextText = this.config.name === 'ChatGPT'
         ? stripChatGPTInternalCitations(rawText) : rawText;
       const networkData = source === 'network';
+      if (source === 'dom' && this.lastDataSource === 'network') return;
       if (networkData && this.config.output?.type === 'network') this.stopDomWatcher();
-      // Network SSE is authoritative when it has already yielded a longer
-      // answer. A visible-DOM fallback can briefly expose the previous or a
-      // truncated turn; never let that shorter snapshot erase received text.
-      const stableText = networkData && this.lastDataSource !== 'network'
-        ? (nextText || this.accumulatedText)
+      // Network parsers return the latest complete value, so even a shorter
+      // replace/snapshot is authoritative. Before network data arrives,
+      // retain the old length guard for unknown/DOM-compatible callers.
+      const stableText = networkData ? nextText
         : (nextText.length < this.accumulatedText.length
           ? this.accumulatedText : (nextText || this.accumulatedText));
       const nextDone = Boolean(isDone);
+      if (networkData) this.lastDataSource = 'network';
+      else if (source === 'dom' && this.lastDataSource !== 'network') this.lastDataSource = 'dom';
       if (stableText === this.accumulatedText && nextDone === this.doneSignal) return;
       this.clearManualFallback();
       this.accumulatedText = stableText;
-      if (networkData) this.lastDataSource = 'network';
-      else if (source === 'dom' && this.lastDataSource !== 'network') this.lastDataSource = 'dom';
       if (nextDone) {
         this.doneSignal = true;
         if (this.taskStartedAt) {
@@ -1105,22 +1109,34 @@
         inert.stop = () => false;
         return inert;
       }
+      const scope = this.composerWatchScope();
+      const bodyScope = scope === document.body;
+      const attachmentSelector = [
+        'img[src^="blob:"], img[src^="data:"]',
+        '[class*="attach" i], [class*="file-preview" i], [class*="upload" i], [class*="preview" i]',
+        '[data-testid*="attach" i], [data-testid*="file" i], [data-testid*="upload" i], [data-testid*="preview" i]',
+      ].join(', ');
+      const hasAttachmentNode = (node) => {
+        if (!node || node.nodeType !== 1) return false;
+        try { return node.matches(attachmentSelector) || Boolean(node.querySelector(attachmentSelector)); }
+        catch (_) { return false; }
+      };
+      const relevantMutation = (record) => {
+        if (record.type === 'attributes') {
+          return !bodyScope && ['src', 'data-testid'].includes(record.attributeName);
+        }
+        if (record.type !== 'childList' || (!record.addedNodes.length && !record.removedNodes.length)) return false;
+        if (!bodyScope) return true;
+        return [...record.addedNodes, ...record.removedNodes].some(hasAttachmentNode);
+      };
       let mutated = false;
       const observer = new MutationObserver((records) => {
-        if (records.some((record) => (record.type === 'childList'
-          && (record.addedNodes.length || record.removedNodes.length))
-          || (record.type === 'attributes'
-            && ['src', 'data-testid'].includes(record.attributeName)))) {
-          mutated = true;
-        }
+        if (records.some(relevantMutation)) mutated = true;
       });
       try {
-        observer.observe(this.composerWatchScope(), {
-          childList: true,
-          subtree: true,
-          attributes: true,
-          attributeFilter: ['src', 'data-testid'],
-        });
+        const options = { childList: true, subtree: true };
+        if (!bodyScope) Object.assign(options, { attributes: true, attributeFilter: ['src', 'data-testid'] });
+        observer.observe(scope, options);
       } catch (_) {
         const inert = () => false;
         inert.stop = () => false;
