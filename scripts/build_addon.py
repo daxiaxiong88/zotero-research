@@ -166,7 +166,7 @@ def _promote_previous_release(
         previous.with_name(previous.name + ".manifest.json"):
         _json_bytes(candidate.inventory),
     }
-    _write_artifacts_atomically(artifacts)
+    _replace_artifacts_with_restore(artifacts)
     return previous
 
 
@@ -454,7 +454,7 @@ def _inventory_for_manifest(
     return inventory
 
 
-def _write_artifacts_atomically(artifacts: dict[Path, bytes]) -> None:
+def _replace_artifacts_with_restore(artifacts: dict[Path, bytes]) -> None:
     original_artifacts = _snapshot_artifacts(artifacts)
     temporary_paths: list[tuple[Path, Path]] = []
     try:
