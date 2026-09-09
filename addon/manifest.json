@@ -1,14 +1,13 @@
 {
   "manifest_version": 2,
   "name": "Zotero AI 科研阅读助手",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Zotero 10 科研阅读侧栏、网页 AI 对话与页码证据。",
   "author": "Zotero Research contributors",
   "icons": { "48": "content/icon.svg", "96": "content/icon.svg" },
   "applications": {
     "zotero": {
       "id": "zotero-research@local.invalid",
-      "update_url": "https://zotero-research.invalid/updates.json",
       "strict_min_version": "10.0",
       "strict_max_version": "10.0.*"
     }
