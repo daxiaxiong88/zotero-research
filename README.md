@@ -63,10 +63,12 @@ uv run python scripts/build_addon.py
 只有使用“网页 AI 模式”时需要这一步。
 
 1. 在 Chrome 或 Edge 中安装并启用 Tampermonkey。
-2. 打开 [网页 AI 连接脚本](https://github.com/daxiaxiong88/zotero-research/raw/refs/heads/main/userscripts/zotero-research-webai.user.js)，让 Tampermonkey 安装它。
-3. 如果以前装过旧版，请更新原脚本，不要同时保留多个副本；当前脚本版本为 **1.0.8**。
-4. 打开并登录任一支持的 AI 网站，然后刷新页面。
-5. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
+2. <img width="1028" height="425" alt="图片对比_20260909_150702" src="https://github.com/user-attachments/assets/d395c165-9f26-413c-8ebc-7168cab48546" />
+
+3. 打开 [网页 AI 连接脚本](https://github.com/daxiaxiong88/zotero-research/raw/refs/heads/main/userscripts/zotero-research-webai.user.js)，让 Tampermonkey 安装它。
+4. 如果以前装过旧版，请更新原脚本，不要同时保留多个副本；当前脚本版本为 **1.0.8**。
+5. 打开并登录任一支持的 AI 网站，然后刷新页面。
+6. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
 
 ## 使用
 
