@@ -874,3 +874,332 @@ test('MinerU stages a short PDF name, accepts wait objects, and surfaces nested 
   ]);
   await h.context.shutdown({}, 4);
 });
+
+function mountMineruAdapter(h, itemID = 42) {
+  let adapter;
+  h.context.ZoteroResearchPanel.mount = (_body, value) => {
+    adapter = value;
+    return { setContext() {}, destroy() {} };
+  };
+  const doc = {
+    defaultView: {}, createElementNS: () => ({}), documentElement: { appendChild() {} },
+    getElementById: () => null, querySelector: () => null,
+  };
+  const body = { ownerDocument: doc, appendChild() {}, querySelector: () => null, querySelectorAll: () => [] };
+  h.registrations.section.onRender({ body, doc, item: { id: itemID } });
+  return adapter;
+}
+
+function configureMineruFixture(h, options = {}) {
+  const executable = options.executable || 'D:\\fixture\\mineru.exe';
+  const modelPath = options.modelPath || 'D:\\fixture\\models';
+  const pdfPath = options.pdfPath || 'D:\\fixture\\paper.pdf';
+  const stamp = options.stamp || 'mineru-fixture-cache';
+  const files = options.files || new Map();
+  const item = {
+    id: options.itemID || 42, key: options.key || 'MINERU10', libraryID: 1,
+    attachmentContentType: 'application/pdf',
+    isAttachment: () => true, isFileAttachment: () => true,
+    getFilePathAsync: async () => pdfPath,
+  };
+  h.context.zraHash = () => stamp;
+  h.context.Zotero.Profile = { dir: 'C:\\fixture\\profile' };
+  h.context.Zotero.DataDirectory = { dir: 'D:\\fixture\\data' };
+  h.context.Zotero.Prefs.get = (key) => ({
+    'researchAssistant.mineruExecutable': executable,
+    'researchAssistant.mineruModelPath': modelPath,
+  })[key] || '';
+  h.context.Zotero.Items = { getByLibraryAndKey: () => item };
+  h.context.Zotero.Libraries.get = () => ({ editable: true });
+  h.context.PathUtils = {
+    join: (...parts) => path.win32.join(...parts),
+    parent: (value) => path.win32.dirname(value),
+    filename: (value) => path.win32.basename(value),
+  };
+  h.context.IOUtils = {
+    exists: async (value) => value === executable || value === modelPath || files.has(value),
+    makeDirectory: async () => {},
+    stat: async (value) => value === pdfPath
+      ? ({ size: 1024, lastModified: 1234 }) : ({ isDir: false }),
+    getChildren: async (directory) => [path.win32.join(directory, 'fixture_content_list.json')],
+    copy: async () => {},
+    remove: async () => {},
+  };
+  h.context.Zotero.File.getContentsAsync = async (name) => {
+    if (files.has(name)) return files.get(name);
+    if (/_content_list\.json$/.test(name)) {
+      return JSON.stringify([{ type: 'text', page_idx: 0, text: 'Parsed MinerU text' }]);
+    }
+    throw new Error('fixture file missing: ' + name);
+  };
+  h.context.Zotero.File.putContentsAsync = async (name, value) => { files.set(name, value); };
+  return { executable, modelPath, pdfPath, stamp, files, item };
+}
+
+test('MinerU cache hit refreshes pdfTextCache after built-in extraction already ran', async () => {
+  const h = runtime();
+  const fixture = configureMineruFixture(h, { key: 'MINERU10', stamp: 'mineru-fixture-cache' });
+  const cachePath = 'D:\\fixture\\data\\zotero-research-mineru\\MINERU10.json';
+  let extractionCalls = 0;
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => {
+      extractionCalls += 1;
+      return { text: 'Zotero built-in text', extractedPages: 1, totalPages: 1 };
+    },
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+
+  const before = await adapter.retrieveOverviewEvidence('MINERU10');
+  assert.match(before.spans[0].text, /Zotero built-in text/);
+  fixture.files.set(cachePath, JSON.stringify({
+    stamp: fixture.stamp,
+    pages: [{ number: 1, text: 'MinerU cached text' }],
+  }));
+
+  const cached = await adapter.deepParseWithMineru('MINERU10');
+  assert.equal(cached.cached, true);
+  const after = await adapter.retrieveOverviewEvidence('MINERU10');
+  assert.match(after.spans[0].text, /MinerU cached text/);
+  assert.equal(extractionCalls, 1, 'cache hit does not trigger another built-in extraction');
+  await h.context.shutdown({}, 4);
+});
+
+test('MinerU coalesces concurrent parses for the same attachment', async () => {
+  const h = runtime();
+  configureMineruFixture(h, { key: 'MINERU11', stamp: 'mineru-fixture-concurrent' });
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => ({ text: 'source text', extractedPages: 1, totalPages: 1 }),
+  };
+  let calls = 0;
+  let releaseExit;
+  const exit = new Promise(resolve => { releaseExit = resolve; });
+  const fakeProcess = {
+    stdout: { readString: async () => '' },
+    stderr: { readString: async () => '' },
+    wait: () => exit,
+    kill: async () => assert.fail('successful concurrent MinerU process must not be killed'),
+  };
+  h.context.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: { call: async () => { calls += 1; return fakeProcess; } },
+    }),
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  const first = adapter.deepParseWithMineru('MINERU11');
+  const second = adapter.deepParseWithMineru('MINERU11');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  releaseExit({ exitCode: 0 });
+  const results = await Promise.all([first, second]);
+  assert.equal(calls, 1, 'two clicks must not launch two GPU jobs');
+  assert.deepEqual(results.map(result => result.pages[0].text), ['Parsed MinerU text', 'Parsed MinerU text']);
+  await h.context.shutdown({}, 4);
+});
+
+test('MinerU rejects a different attachment while one GPU parse is active', async () => {
+  const h = runtime();
+  const fixture = configureMineruFixture(h, { key: 'MINERU13A', stamp: 'mineru-fixture-a' });
+  const itemA = fixture.item;
+  const itemB = {
+    ...itemA, id: 43, key: 'MINERU13B',
+    getFilePathAsync: async () => 'D:\\fixture\\paper-b.pdf',
+  };
+  h.context.Zotero.Items = {
+    getByLibraryAndKey: (_libraryID, key) => key === itemA.key ? itemA : itemB,
+  };
+  h.context.zraHash = (value) => JSON.parse(value)[0].endsWith('paper-b.pdf')
+    ? 'mineru-fixture-b' : 'mineru-fixture-a';
+  h.context.IOUtils.stat = async (value) => /\.pdf$/.test(value)
+    ? ({ size: 1024, lastModified: 1234 }) : ({ isDir: false });
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => ({ text: 'source text', extractedPages: 1, totalPages: 1 }),
+  };
+  let calls = 0;
+  let releaseExit;
+  const exit = new Promise(resolve => { releaseExit = resolve; });
+  const fakeProcess = {
+    stdout: { readString: async () => '' },
+    stderr: { readString: async () => '' },
+    wait: () => exit,
+    kill: async () => assert.fail('active MinerU process must not be killed by a busy rejection'),
+  };
+  h.context.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: { call: async () => { calls += 1; return fakeProcess; } },
+    }),
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  const first = adapter.deepParseWithMineru('MINERU13A');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(calls, 1);
+  const busyPromise = adapter.deepParseWithMineru('MINERU13B').then(
+    () => null,
+    error => error,
+  );
+  releaseExit({ exitCode: 0 });
+  const [busy] = await Promise.all([busyPromise, first]);
+  assert.ok(busy);
+  assert.match(busy.message, /MinerU 正在解析另一篇论文，请等待当前任务完成后重试/);
+  assert.equal(calls, 1, 'different papers must not launch a second GPU job');
+  const retried = await adapter.deepParseWithMineru('MINERU13B');
+  assert.equal(retried.pages[0].text, 'Parsed MinerU text');
+  assert.equal(calls, 2, 'the rejected paper can retry after the active job finishes');
+  await h.context.shutdown({}, 4);
+});
+
+test('malformed MinerU cache falls back to Zotero PDF extraction', async () => {
+  const h = runtime();
+  const fixture = configureMineruFixture(h, { key: 'MINERU12', stamp: 'mineru-fixture-corrupt' });
+  fixture.files.set('D:\\fixture\\data\\zotero-research-mineru\\MINERU12.json', JSON.stringify({
+    stamp: fixture.stamp,
+    pages: [null],
+  }));
+  let extractionCalls = 0;
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => {
+      extractionCalls += 1;
+      return { text: 'Recovered Zotero text', extractedPages: 1, totalPages: 1 };
+    },
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  const overview = await adapter.retrieveOverviewEvidence('MINERU12');
+  assert.match(overview.spans[0].text, /Recovered Zotero text/);
+  assert.equal(extractionCalls, 1);
+  await h.context.shutdown({}, 4);
+});
+
+test('MinerU migration keeps the legacy cache when the new bytes fail verification', async () => {
+  const h = runtime();
+  const files = new Map();
+  const fixture = configureMineruFixture(h, {
+    key: 'MINERU14', stamp: 'mineru-fixture-migration-verify', files,
+  });
+  const legacyPath = 'C:\\fixture\\profile\\zotero-research-mineru\\MINERU14.json';
+  const currentPath = 'D:\\fixture\\data\\zotero-research-mineru\\MINERU14.json';
+  files.set(legacyPath, JSON.stringify({
+    stamp: fixture.stamp,
+    pages: [{ number: 1, text: 'Legacy survives verification failure' }],
+  }));
+  h.context.Zotero.File.putContentsAsync = async (name, value) => {
+    if (name === currentPath) {
+      files.set(name, JSON.stringify({ stamp: fixture.stamp, pages: [null] }));
+      return;
+    }
+    files.set(name, value);
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  const result = await adapter.deepParseWithMineru('MINERU14');
+  assert.equal(result.cached, true);
+  assert.equal(result.pages[0].text, 'Legacy survives verification failure');
+  assert.equal(files.has(legacyPath), true, 'legacy remains available after a corrupt new write');
+  await h.context.shutdown({}, 4);
+});
+
+test('MinerU cache write IO errors produce a stable parse error without logError', async () => {
+  const h = runtime();
+  const fixture = configureMineruFixture(h, { key: 'MINERU15', stamp: 'mineru-fixture-write-error' });
+  const cachePath = 'D:\\fixture\\data\\zotero-research-mineru\\MINERU15.json';
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => ({ text: 'source text', extractedPages: 1, totalPages: 1 }),
+  };
+  h.context.Zotero.File.putContentsAsync = async (name, value) => {
+    if (name === cachePath) throw new Error('fixture disk full');
+    fixture.files.set(name, value);
+  };
+  h.context.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: {
+        call: async () => ({
+          stdout: { readString: async () => '' },
+          stderr: { readString: async () => '' },
+          wait: async () => ({ exitCode: 0 }),
+          kill: async () => assert.fail('successful process must not be killed'),
+        }),
+      },
+    }),
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  await assert.rejects(
+    adapter.deepParseWithMineru('MINERU15'),
+    /MinerU 解析成功，但无法写入持久缓存/,
+  );
+  await h.context.shutdown({}, 4);
+});
+
+test('MinerU uses totalPages for scanned PDFs whose text layer has zero pages', async () => {
+  const h = runtime();
+  configureMineruFixture(h, { key: 'MINERU16', stamp: 'mineru-fixture-scanned' });
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => ({ text: '', extractedPages: 0, totalPages: 3 }),
+  };
+  h.context.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: {
+        call: async () => ({
+          stdout: { readString: async () => '' },
+          stderr: { readString: async () => '' },
+          wait: async () => ({ exitCode: 0 }),
+          kill: async () => assert.fail('successful process must not be killed'),
+        }),
+      },
+    }),
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  const result = await adapter.deepParseWithMineru('MINERU16');
+  assert.equal(result.stats.pageCount, 3);
+  assert.equal(result.pages[0].number, 1);
+  await h.context.shutdown({}, 4);
+});
+
+test('MinerU timeout remains bounded when kill and output pipes never settle', async () => {
+  const h = runtime();
+  configureMineruFixture(h, { key: 'MINERU17', stamp: 'mineru-fixture-uncooperative' });
+  h.context.Zotero.PDFWorker = {
+    getFullText: async () => ({ text: 'source text', extractedPages: 1, totalPages: 1 }),
+  };
+  let closedStdout = 0;
+  let closedStderr = 0;
+  const never = () => new Promise(() => {});
+  h.context.ChromeUtils = {
+    importESModule: () => ({
+      Subprocess: {
+        call: async () => ({
+          stdout: { readString: never, close: () => { closedStdout += 1; } },
+          stderr: { readString: never, close: () => { closedStderr += 1; } },
+          wait: never,
+          kill: never,
+        }),
+      },
+    }),
+  };
+  let fakeNow = 0;
+  class FakeDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [fakeNow])); }
+    static now() { return fakeNow; }
+  }
+  h.context.Date = FakeDate;
+  h.context.setTimeout = (resolve, delay) => {
+    fakeNow += delay;
+    queueMicrotask(resolve);
+    return 1;
+  };
+  h.context.clearTimeout = () => {};
+  let removed = false;
+  h.context.IOUtils.remove = async () => { removed = true; };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  await assert.rejects(
+    adapter.deepParseWithMineru('MINERU17'),
+    /MinerU 已连续 15 分钟没有输出/,
+  );
+  assert.equal(removed, true, 'finally cleanup runs even after kill timeout');
+  assert.equal(closedStdout, 1);
+  assert.equal(closedStderr, 1);
+  await h.context.shutdown({}, 4);
+});

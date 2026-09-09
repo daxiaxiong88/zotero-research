@@ -855,6 +855,11 @@ function zraCreateAddon(data) {
   // Extracted text cache keyed by the attachment stamp (path+size+mtime):
   // re-parsing the whole PDF on every question cost 1-3s per message.
   const pdfTextCache = new Map();
+  // Only one GPU-backed MinerU process may run at a time. Repeated requests
+  // for the same attachment share one promise; a different attachment gets a
+  // bounded, actionable busy error instead of waiting in an unbounded queue.
+  const mineruJobs = new Map();
+  let activeMineruJobKey = null;
 
   // ---------------------------------------------------------------------------
   // MinerU deep parsing: manual-trigger, disk-cached page text per attachment.
@@ -879,7 +884,14 @@ function zraCreateAddon(data) {
 
   async function ensureDirectory(dir) {
     if (!(await IOUtils.exists(dir))) {
-      await IOUtils.makeDirectory(dir, { createAncestors: true });
+      try {
+        await IOUtils.makeDirectory(dir, { createAncestors: true });
+      } catch (error) {
+        // Two independent papers may initialize the shared cache directory at
+        // the same time. Treat an already-created directory as success, while
+        // preserving genuine permission/IO failures.
+        if (!(await IOUtils.exists(dir))) throw error;
+      }
     }
   }
 
@@ -941,14 +953,26 @@ function zraCreateAddon(data) {
     return pages;
   }
 
+  function validMineruCache(data, stamp) {
+    if (!data || data.stamp !== stamp || !Array.isArray(data.pages) || !data.pages.length) return null;
+    if (data.pages.some(page => !page || !Number.isInteger(page.number)
+      || page.number < 1 || typeof page.text !== 'string' || !page.text.trim())) return null;
+    return data;
+  }
+
+  function rememberPdfPages(stamp, pages) {
+    if (pdfTextCache.has(stamp)) pdfTextCache.delete(stamp);
+    else if (pdfTextCache.size >= 6) pdfTextCache.delete(pdfTextCache.keys().next().value);
+    pdfTextCache.set(stamp, pages);
+  }
+
   async function readMineruCacheAt(path, stamp) {
     try {
       if (!(await IOUtils.exists(path))) return null;
       const raw = await Zotero.File.getContentsAsync(path);
       const data = JSON.parse(raw);
       // Stamp mismatch means the file changed: the archive is stale.
-      if (!data || data.stamp !== stamp || !Array.isArray(data.pages)) return null;
-      return data;
+      return validMineruCache(data, stamp);
     } catch (_) {
       return null;
     }
@@ -979,12 +1003,18 @@ function zraCreateAddon(data) {
 
   async function writeMineruCache(attachmentKey, payload) {
     try {
+      if (!validMineruCache(payload, payload?.stamp)) return false;
       await ensureMineruDirectory();
       const path = mineruCachePath(attachmentKey);
       await Zotero.File.putContentsAsync(path, JSON.stringify(payload));
-      return true;
+      // Do not report migration success until the bytes can be parsed back as
+      // a complete, stamp-matching cache. The legacy file is removed only
+      // after this verification succeeds.
+      return Boolean(await readMineruCacheAt(path, payload.stamp));
     } catch (error) {
-      Zotero.logError(error);
+      try {
+        if (typeof Zotero.logError === 'function') Zotero.logError(error);
+      } catch (_) {}
       return false;
     }
   }
@@ -998,11 +1028,7 @@ function zraCreateAddon(data) {
    * land in the disk cache keyed by the attachment stamp and are then picked
    * up by pdfPages() for every later question.
    */
-  async function deepParseWithMineru(attachmentKey, onProgress) {
-    const info = await attachment(attachmentKey);
-    const cached = await readMineruCache(attachmentKey, info.stamp);
-    if (cached) return { pages: cached.pages, cached: true, stats: cached.stats };
-
+  async function runMineruParse(attachmentKey, info, onProgress) {
     const executable = String(Zotero.Prefs.get('researchAssistant.mineruExecutable') || '').trim();
     const modelPath = String(Zotero.Prefs.get('researchAssistant.mineruModelPath') || '').trim();
     if (!executable || !modelPath) {
@@ -1026,7 +1052,6 @@ function zraCreateAddon(data) {
     const path = await info.item.getFilePathAsync();
     const outputDirectory = PathUtils.join(mineruDirectory(), 'runs',
       info.stamp.slice(0, 16) + '-' + String(Date.now()));
-    await ensureDirectory(outputDirectory);
     const cleanupRun = async () => {
       let cleanupError = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -1045,6 +1070,7 @@ function zraCreateAddon(data) {
     const failParse = (message) => { throw new Error(message); };
 
     try {
+      await ensureDirectory(outputDirectory);
       // MinerU 3.4.x embeds the input stem in a deep temporary output path.
       // Long paper titles can push that path over Windows MAX_PATH, causing a
       // late FileNotFoundError after inference has already finished. Stage the
@@ -1199,6 +1225,38 @@ function zraCreateAddon(data) {
       try { while (true) { const chunk = await process.stderr.readString(); if (!chunk) break; parseProgress(chunk); } }
       catch (_) {}
     })();
+    const bounded = async (promise, timeoutMs) => {
+      const timeoutSentinel = {};
+      let timer = null;
+      const result = await Promise.race([
+        Promise.resolve(promise).then(() => true, () => true),
+        new Promise(resolve => { timer = setTimeout(() => resolve(timeoutSentinel), timeoutMs); }),
+      ]);
+      if (timer !== null) clearTimeout(timer);
+      return result === true;
+    };
+    const terminateProcess = async () => {
+      try {
+        // BaseProcess.kill() resolves only after wait() observes termination;
+        // bound that await so an uncooperative child cannot wedge cleanup.
+        await bounded(process.kill(0), 5000);
+      } catch (_) {}
+    };
+    const closePipe = (pipe) => {
+      try {
+        const result = pipe && typeof pipe.close === 'function' ? pipe.close() : null;
+        if (result && typeof result.catch === 'function') result.catch(() => {});
+      } catch (_) {}
+    };
+    const drainPipes = async () => {
+      const pipesDone = Promise.allSettled([stdoutTask, stderrTask]);
+      if (await bounded(pipesDone, 5000)) return;
+      // A terminated child normally closes both pipes, but a broken native
+      // pipe must not keep the parse promise alive forever. Closing the handles
+      // also lets Subprocess release its worker resources.
+      closePipe(process.stdout);
+      closePipe(process.stderr);
+    };
     const deadline = startedAt + maxRuntimeMs;
     const waitPromise = (async () => {
       try { return { ok: true, outcome: await process.wait() }; }
@@ -1213,13 +1271,18 @@ function zraCreateAddon(data) {
         timeoutReason = 'idle';
         break;
       }
+      let pollTimer = null;
       const current = await Promise.race([
         waitPromise,
-        new Promise(resolve => setTimeout(() => resolve(pollSentinel), 2000)),
+        new Promise(resolve => {
+          pollTimer = setTimeout(() => resolve(pollSentinel), 2000);
+        }),
       ]);
+      if (pollTimer !== null) clearTimeout(pollTimer);
       if (current !== pollSentinel) {
         if (!current.ok) {
-          try { await process.kill(0); } catch (_) {}
+          await terminateProcess();
+          await drainPipes();
           const detail = current.error && current.error.message
             ? String(current.error.message) : String(current.error || '未知错误');
           failParse('等待 MinerU 子进程失败：' + detail);
@@ -1230,20 +1293,17 @@ function zraCreateAddon(data) {
       }
     }
     if (!completed) {
-      try { await process.kill(0); } catch (_) {}
+      await terminateProcess();
       // Give stdout/stderr handles a bounded window to close before finally
       // removes the run directory; this avoids intermittent Windows leftovers.
-      await Promise.race([
-        Promise.allSettled([stdoutTask, stderrTask]),
-        new Promise(resolve => setTimeout(resolve, 5000)),
-      ]);
+      await drainPipes();
       failParse(timeoutReason === 'idle'
         ? 'MinerU 已连续 15 分钟没有输出，已终止。'
         : 'MinerU 解析超过 60 分钟，已终止。');
     }
     // wait() resolves only after the child exits, so both pipes should now
     // reach EOF. Await them before selecting the final useful error line.
-    await Promise.allSettled([stdoutTask, stderrTask]);
+    await drainPipes();
     // Zotero 10 resolves wait() as {exitCode}; retaining bare-number support
     // also keeps the adapter testable and compatible with older runtimes.
     const exitCode = outcome && typeof outcome === 'object' ? outcome.exitCode : outcome;
@@ -1275,8 +1335,10 @@ function zraCreateAddon(data) {
       const pageTexts = await extractPdfPages(info);
       // Count physical pages even when the text layer is empty (scanned PDFs).
       const result = await Zotero.PDFWorker.getFullText(info.id, undefined, true);
-      return Number.isInteger(result?.extractedPages) ? result.extractedPages
-        : Math.max(pageTexts.length, 1);
+      const physicalPages = Number.isInteger(result?.totalPages) && result.totalPages > 0
+        ? result.totalPages : result?.extractedPages;
+      return Number.isInteger(physicalPages) && physicalPages > 0
+        ? physicalPages : Math.max(pageTexts.length, 1);
     })();
     const pages = mineruPagesFromContentList(payload, sourceCount);
     if (!pages.length) {
@@ -1291,12 +1353,55 @@ function zraCreateAddon(data) {
     if (!(await writeMineruCache(attachmentKey, { stamp: info.stamp, pages, stats }))) {
       failParse('MinerU 解析成功，但无法写入持久缓存。请检查 Zotero 数据目录权限。');
     }
-    pdfTextCache.set(info.stamp, pages);
+    rememberPdfPages(info.stamp, pages);
     return { pages, cached: false, stats };
     } finally {
       // All exits—success, parse failure, wait failure and timeout—converge on
       // one awaited cleanup path. Cache files live outside this run directory.
       await cleanupRun();
+    }
+  }
+
+  async function deepParseWithMineru(attachmentKey, onProgress) {
+    const info = await attachment(attachmentKey);
+    const jobKey = String(info.key || attachmentKey) + '\0' + info.stamp;
+    const cached = await readMineruCache(attachmentKey, info.stamp);
+    if (cached) {
+      rememberPdfPages(info.stamp, cached.pages);
+      return { pages: cached.pages, cached: true, stats: cached.stats };
+    }
+
+    const existing = mineruJobs.get(jobKey);
+    if (existing) {
+      if (typeof onProgress === 'function') existing.listeners.add(onProgress);
+      try {
+        return await existing.promise;
+      } finally {
+        if (typeof onProgress === 'function') existing.listeners.delete(onProgress);
+      }
+    }
+    if (activeMineruJobKey && activeMineruJobKey !== jobKey) {
+      throw new Error('MinerU 正在解析另一篇论文，请等待当前任务完成后重试。');
+    }
+
+    const listeners = new Set();
+    if (typeof onProgress === 'function') listeners.add(onProgress);
+    const emitProgress = (progress) => {
+      for (const listener of listeners) {
+        try { listener(progress); } catch (_) { /* progress is advisory */ }
+      }
+    };
+    activeMineruJobKey = jobKey;
+    let promise;
+    promise = runMineruParse(attachmentKey, info, emitProgress).finally(() => {
+      if (mineruJobs.get(jobKey)?.promise === promise) mineruJobs.delete(jobKey);
+      if (activeMineruJobKey === jobKey) activeMineruJobKey = null;
+    });
+    mineruJobs.set(jobKey, { promise, listeners });
+    try {
+      return await promise;
+    } finally {
+      if (typeof onProgress === 'function') listeners.delete(onProgress);
     }
   }
 
@@ -1308,14 +1413,11 @@ function zraCreateAddon(data) {
     // the user explicitly asked for the better text layer on this paper.
     const mineru = await readMineruCache(attachmentKey, info.stamp);
     if (mineru && mineru.pages.length) {
-      pdfTextCache.set(info.stamp, mineru.pages);
+      rememberPdfPages(info.stamp, mineru.pages);
       return mineru.pages;
     }
     const pages = await extractPdfPages(info);
-    if (pdfTextCache.size >= 6) {
-      pdfTextCache.delete(pdfTextCache.keys().next().value);
-    }
-    pdfTextCache.set(info.stamp, pages);
+    rememberPdfPages(info.stamp, pages);
     return pages;
   }
 
