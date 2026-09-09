@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.9
+// @version      1.0.10
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -71,6 +71,30 @@
     return left + right;
   }
 
+  /**
+   * ChatGPT sometimes puts its private file-citation protocol markers directly
+   * in the streamed text. They are useful to ChatGPT's own renderer, but the
+   * Zotero relay has no renderer for them and would show private-use glyphs in
+   * the sidebar. Strip only citation-shaped markers at the parser boundary so
+   * ordinary answer text and line breaks remain untouched.
+   */
+  function stripChatGPTInternalCitations(value) {
+    let text = String(value ?? '');
+    text = text.replace(
+      /[\uE000-\uF8FF]*(?:filecite|felicite|cite)[\uE000-\uF8FF]*(?:turn|return)\d+file\d+(?:[\uE000-\uF8FF]*L\d+(?:-L\d+)?)?[\uE000-\uF8FF]*/gi,
+      '',
+    );
+    // A failed/older decode can leave the same marker without private-use
+    // delimiters. Handle that representation too.
+    text = text.replace(
+      /(?:\b(?:filecite|felicite)\b|\bcite\b)\s*(?:turn|return)\d+file\d+(?:\s+L\d+(?:-L\d+)?)?/gi,
+      '',
+    );
+    // Do not let a malformed marker leave its invisible protocol glyphs in
+    // the answer after the citation-shaped pass above.
+    return text.replace(/[\uE000-\uF8FF]/g, '');
+  }
+
   // ---------------------------------------------------------------------------
   // Per-site response parsers (ported from the reference connector)
   // ---------------------------------------------------------------------------
@@ -96,7 +120,7 @@
         else if (patch?.path === '/message/content/parts/0' && typeof patch.value === 'string') response += patch.value;
       }
     }
-    return { text: response, done };
+    return { text: stripChatGPTInternalCitations(response), done };
   }
 
   function extractGeminiFrames(raw) {
@@ -1189,6 +1213,20 @@
       });
     }
 
+    /**
+     * A submitted turn can be acknowledged before its first response section
+     * is mounted. ChatGPT changes the submit control to a disabled/stop state
+     * during that gap; treat that local state as send confirmation instead of
+     * asking the user to send the already accepted image again.
+     */
+    sendButtonAccepted(button) {
+      if (!button) return false;
+      if (button.disabled || button.getAttribute('aria-disabled') === 'true') return true;
+      const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+        .filter(Boolean).join(' ');
+      return /stop(?:ping| generating| streaming)?|cancel(?: generation| response)?|停止(?:生成|回答|响应)?|终止(?:生成|回答|响应)?/i.test(label);
+    }
+
     observedManualSend(baseline) {
       return this.hasPendingData || this.doneSignal || Boolean(this.accumulatedText)
         || this.conversationAdvanced(baseline)
@@ -1204,8 +1242,9 @@
         const input = this.findUsable(inputConfig?.selector || '');
         return !input || !this.readText(input).trim();
       };
-      const sendConfirmed = () => this.conversationAdvanced(baseline)
-        || Boolean(this.accumulatedText) || inputEmpty();
+      const sendConfirmed = (button = null) => this.conversationAdvanced(baseline)
+        || Boolean(this.accumulatedText) || inputEmpty() || this.sendButtonAccepted(button);
+      let sentButton = null;
       if (typeof send === 'string') {
         const ready = await this.waitForCondition(() => {
           if (this.observedManualSend(baseline)) return { manual: true };
@@ -1219,6 +1258,7 @@
           return true;
         }
         const button = ready?.button;
+        sentButton = button;
         if (!button) {
           this.manualBaseline = this.captureBaseline(messageSelector);
           this.awaitingManualSend = true;
@@ -1235,14 +1275,14 @@
           button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
           button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
           button.click();
-          await this.waitForValue(() => (sendConfirmed() ? true : null), 2500);
-          if (sendConfirmed()) break;
+          await this.waitForValue(() => (sendConfirmed(button) ? true : null), 2500);
+          if (sendConfirmed(button)) break;
           // One retry: the first click can land before the page re-enables.
         }
       } else {
         await this.waitForValue(() => (sendConfirmed() ? true : null), 3000);
       }
-      if (sendConfirmed()) {
+      if (sendConfirmed(sentButton)) {
         this.clearManualFallback();
         if (this.taskStartedAt) {
           setStatus('已发送 ' + ((Date.now() - this.taskStartedAt) / 1000).toFixed(1) + 's，等待回答…');

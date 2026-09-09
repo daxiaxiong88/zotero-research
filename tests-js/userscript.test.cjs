@@ -71,6 +71,34 @@ test('parseChatGPT assembles SSE deltas and honors [DONE]', () => {
   assert.equal(parsed.done, true);
 });
 
+test('parseChatGPT removes internal citation markers from the visible answer', () => {
+  const api = setup();
+  const puaStart = String.fromCodePoint(0xE200);
+  const puaSeparator = String.fromCodePoint(0xE202);
+  const puaEnd = String.fromCodePoint(0xE201);
+  const raw = [
+    `data: ${JSON.stringify({
+      message: {
+        author: { role: 'assistant' },
+        content: {
+          content_type: 'text',
+          parts: [
+            `先看结论${puaStart}filecite${puaSeparator}turn0file0${puaEnd}，然后说明`
+              + `${puaStart}felicite${puaSeparator}return0file0${puaSeparator}L97-L108${puaEnd}。`,
+          ],
+        },
+        status: 'finished_successfully',
+      },
+    })}`,
+    'data: [DONE]',
+    '',
+  ].join('\n');
+
+  const parsed = api.parseChatGPT(raw);
+  assert.equal(parsed.text, '先看结论，然后说明。');
+  assert.doesNotMatch(parsed.text, /filecite|felicite|return0file0|turn0file0/);
+});
+
 test('parseDeepSeek separates THINK and RESPONSE blocks', () => {
   const api = setup();
   const raw = [
@@ -349,4 +377,43 @@ test('投递图片后 composer 出现 DOM 变动即视为已确认，无需匹�
     { data: Buffer.from('fakepng').toString('base64'), mediaType: 'image/png' },
   ]);
   assert.equal(channel, 'paste', 'DOM mutation alone confirms the channel');
+});
+
+test('ChatGPT enters generating state before the response section appears', async (t) => {
+  const dom = new JSDOM(
+    '<!doctype html><body><main id="main"></main>'
+      + '<textarea id="prompt-textarea">请分析这张图片</textarea>'
+      + '<button id="composer-submit-button" type="button">发送</button></body>',
+    { url: 'https://chatgpt.com/', runScripts: 'outside-only', pretendToBeVisual: true },
+  );
+  dom.window.__ZRA_TEST__ = {};
+  Object.assign(dom.window, {
+    GM_getValue: (_key, fallback) => fallback,
+    GM_setValue: () => {},
+    GM_addValueChangeListener: () => {},
+    GM_registerMenuCommand: () => {},
+    GM_notification: () => {},
+    GM_info: { script: { version: 'test' } },
+    GM_xmlhttpRequest: () => ({ abort() {} }),
+    unsafeWindow: dom.window,
+  });
+  dom.window.setInterval = () => 0;
+  dom.window.eval(SOURCE);
+  const connector = dom.window.__ZRA_TEST__.connector;
+  const input = dom.window.document.getElementById('prompt-textarea');
+  const button = dom.window.document.getElementById('composer-submit-button');
+  // jsdom reports zero-sized elements, while the real page exposes both nodes.
+  input.getBoundingClientRect = () => ({ width: 300, height: 40 });
+  button.getBoundingClientRect = () => ({ width: 80, height: 32 });
+  button.addEventListener('click', () => {
+    // ChatGPT can switch to its generating/stop state before the new turn is
+    // mounted under #main. That state is the send acknowledgement we need.
+    button.disabled = true;
+    button.setAttribute('aria-label', 'Stop generating');
+  });
+
+  t.after(() => dom.window.close());
+  const sent = await connector.handleSend('#composer-submit-button', '#main section');
+  assert.equal(sent, true);
+  assert.equal(connector.awaitingManualSend, false, 'accepted send must not enter manual fallback');
 });
