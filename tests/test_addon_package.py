@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import zipfile
 from pathlib import Path
 
@@ -64,6 +65,67 @@ def _make_addon_tree(root: Path) -> None:
             path.write_text(json.dumps(manifest), encoding="utf-8")
         else:
             path.write_text(f"// {relative_path}\n", encoding="utf-8")
+
+
+def _write_release_package(
+    path: Path,
+    version: str,
+    *,
+    addon_id: str = "zotero-research@local.invalid",
+    include_sidecars: bool = True,
+    sidecar_version: str | None = None,
+    sidecar_addon_id: str | None = None,
+    sha_text: str | None = None,
+) -> None:
+    manifest = {
+        "manifest_version": 2,
+        "name": "Zotero Research",
+        "version": version,
+        "applications": {
+            "zotero": {
+                "id": addon_id,
+                "strict_min_version": "10.0",
+                "strict_max_version": "10.0.*",
+                "update_url": "https://zotero-research.invalid/fixture-updates.json",
+            }
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+        for relative_path in sorted([*_DIRECTORY_ENTRIES, *_RUNTIME_FILES]):
+            info = zipfile.ZipInfo(relative_path, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 0
+            if relative_path.endswith("/"):
+                archive.writestr(info, b"")
+            elif relative_path == "manifest.json":
+                archive.writestr(info, json.dumps(manifest).encode("utf-8"))
+            else:
+                archive.writestr(info, f"// {relative_path}\n".encode())
+
+    if not include_sidecars:
+        return
+    inventory = {
+        "addon_id": addon_id if sidecar_addon_id is None else sidecar_addon_id,
+        "files": sorted(_RUNTIME_FILES),
+        "format": 1,
+        "version": version if sidecar_version is None else sidecar_version,
+        "zotero_min_version": "10.0",
+        "zotero_max_version": "10.0.*",
+    }
+    path.with_name(path.name + ".manifest.json").write_text(
+        json.dumps(inventory), encoding="utf-8"
+    )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_name(path.name + ".sha256").write_text(
+        sha_text if sha_text is not None else f"{digest}  {path.name}\n",
+        encoding="utf-8",
+    )
+
+
+def _packaged_manifest(path: Path) -> dict[str, object]:
+    with zipfile.ZipFile(path) as archive:
+        return json.loads(archive.read("manifest.json"))
 
 
 def test_build_addon_injects_local_paths_and_writes_sidecars(tmp_path: Path) -> None:
@@ -345,27 +407,170 @@ def test_cli_defaults_are_repo_local_and_main_reports_outputs(
     assert str(output.resolve()) in stdout
 
 
-def test_build_addon_promotes_replaced_package_to_previous_stable(tmp_path: Path) -> None:
+def test_build_addon_selects_highest_lower_manifest_version_not_mtime(tmp_path: Path) -> None:
     addon_dir = tmp_path / "addon"
     _make_addon_tree(addon_dir)
     output_dir = tmp_path / "dist"
     output_dir.mkdir()
-    older = output_dir / "zotero-research-0.6.2.xpi"
-    older.write_bytes(b"older release")
-    (output_dir / "zotero-research-0.6.2.xpi.sha256").write_bytes(b"older sha")
-    newest = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+    older = output_dir / "arbitrary-old-name.xpi"
+    nearer = output_dir / "arbitrary-near-name.xpi"
+    same = output_dir / "zotero-research-same.xpi"
+    future = output_dir / "zotero-research-future.xpi"
+    unrelated = output_dir / "unrelated-addon.xpi"
+    _write_release_package(older, "0.7.9")
+    _write_release_package(nearer, "0.8.1")
+    _write_release_package(same, PACKAGE_VERSION)
+    _write_release_package(future, "0.8.3", sidecar_version="0.8.1")
+    _write_release_package(
+        unrelated,
+        "0.8.1",
+        addon_id="other@example.invalid",
+        sidecar_addon_id="zotero-research@local.invalid",
+    )
 
-    build_addon(addon_dir=addon_dir, output=newest)
+    now = time.time()
+    os.utime(older, (now + 3, now + 3))
+    os.utime(nearer, (now, now))
+    os.utime(same, (now + 1, now + 1))
+    os.utime(future, (now + 2, now + 2))
+    os.utime(unrelated, (now + 4, now + 4))
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=output)
 
     previous = output_dir / "zotero-research-previous-stable.xpi"
-    assert previous.read_bytes() == b"older release"
-    assert (output_dir / "zotero-research-previous-stable.xpi.sha256").read_bytes() == b"older sha"
-    assert newest.read_bytes() != b"older release"
+    previous_manifest = _packaged_manifest(previous)
+    assert previous_manifest["version"] == "0.8.1"
+    assert previous_manifest["applications"]["zotero"]["id"] == (
+        "zotero-research@local.invalid"
+    )
+    previous_digest = hashlib.sha256(previous.read_bytes()).hexdigest()
+    assert (output_dir / (previous.name + ".sha256")).read_text(encoding="utf-8") == (
+        f"{previous_digest}  {previous.name}\n"
+    )
+    assert json.loads(
+        (output_dir / (previous.name + ".manifest.json")).read_text(encoding="utf-8")
+    )["addon_id"] == "zotero-research@local.invalid"
 
-    # Rebuilding the same version keeps the build that is about to be replaced.
-    first_build = newest.read_bytes()
-    build_addon(addon_dir=addon_dir, output=newest)
-    assert previous.read_bytes() == first_build
+
+def test_build_addon_rebuilding_same_version_keeps_previous_lower_release(
+    tmp_path: Path,
+) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    older = output_dir / "zotero-research-0.8.1.xpi"
+    _write_release_package(older, "0.8.1")
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=output)
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    first_previous = previous.read_bytes()
+    first_sha = (output_dir / (previous.name + ".sha256")).read_bytes()
+    first_manifest = (output_dir / (previous.name + ".manifest.json")).read_bytes()
+
+    build_addon(addon_dir=addon_dir, output=output)
+
+    assert previous.read_bytes() == first_previous
+    assert (output_dir / (previous.name + ".sha256")).read_bytes() == first_sha
+    assert (output_dir / (previous.name + ".manifest.json")).read_bytes() == first_manifest
+
+
+@pytest.mark.parametrize("include_sidecars", [False, True])
+def test_build_addon_rebuilds_rollback_sidecars_from_package(
+    tmp_path: Path, include_sidecars: bool
+) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    older = output_dir / "zotero-research-0.8.1.xpi"
+    _write_release_package(older, "0.8.1", include_sidecars=include_sidecars)
+    if include_sidecars:
+        (output_dir / (older.name + ".manifest.json")).write_text(
+            json.dumps({"addon_id": "stale@example.invalid", "version": "0.1.0"}),
+            encoding="utf-8",
+        )
+        (output_dir / (older.name + ".sha256")).write_text(
+            "0" * 64 + "  stale-name.xpi\n", encoding="utf-8"
+        )
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=output)
+
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    previous_sha = output_dir / (previous.name + ".sha256")
+    previous_manifest = output_dir / (previous.name + ".manifest.json")
+    digest = hashlib.sha256(previous.read_bytes()).hexdigest()
+    assert previous_sha.read_text(encoding="utf-8") == f"{digest}  {previous.name}\n"
+    assert json.loads(previous_manifest.read_text(encoding="utf-8")) == {
+        "addon_id": "zotero-research@local.invalid",
+        "files": sorted(_RUNTIME_FILES),
+        "format": 1,
+        "version": "0.8.1",
+        "zotero_min_version": "10.0",
+        "zotero_max_version": "10.0.*",
+    }
+
+
+def test_build_addon_without_lower_candidate_preserves_existing_rollback(
+    tmp_path: Path,
+) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    output_dir.mkdir()
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    previous_sha = output_dir / (previous.name + ".sha256")
+    previous_manifest = output_dir / (previous.name + ".manifest.json")
+    originals = {
+        previous: b"existing rollback package",
+        previous_sha: b"existing rollback sha\n",
+        previous_manifest: b"existing rollback manifest\n",
+    }
+    for path, content in originals.items():
+        path.write_bytes(content)
+    _write_release_package(output_dir / "future.xpi", "0.8.3")
+    _write_release_package(
+        output_dir / "unrelated.xpi", "0.8.1", addon_id="other@example.invalid"
+    )
+    (output_dir / "broken.xpi").write_bytes(b"not a zip archive")
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=output)
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
+
+
+def test_build_addon_does_not_promote_when_xpi_build_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    output_dir.mkdir()
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    previous.write_bytes(b"existing rollback package")
+    (output_dir / (previous.name + ".sha256")).write_bytes(b"existing rollback sha")
+    (output_dir / (previous.name + ".manifest.json")).write_bytes(
+        b"existing rollback manifest"
+    )
+    _write_release_package(output_dir / "older.xpi", "0.8.1")
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    def fail_xpi_build(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated xpi build failure")
+
+    monkeypatch.setattr("scripts.build_addon._write_xpi_atomically", fail_xpi_build)
+
+    with pytest.raises(OSError, match="simulated xpi build failure"):
+        build_addon(addon_dir=addon_dir, output=output)
+
+    assert previous.read_bytes() == b"existing rollback package"
+    assert (output_dir / (previous.name + ".sha256")).read_bytes() == b"existing rollback sha"
+    assert (output_dir / (previous.name + ".manifest.json")).read_bytes() == (
+        b"existing rollback manifest"
+    )
 
 
 def test_build_addon_promotes_nothing_without_a_previous_package(tmp_path: Path) -> None:
@@ -377,29 +582,3 @@ def test_build_addon_promotes_nothing_without_a_previous_package(tmp_path: Path)
     build_addon(addon_dir=addon_dir, output=output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi")
 
     assert not (output_dir / "zotero-research-previous-stable.xpi").exists()
-
-
-def test_build_addon_previous_stable_sha256_names_the_copy(tmp_path: Path) -> None:
-    addon_dir = tmp_path / "addon"
-    _make_addon_tree(addon_dir)
-    output_dir = tmp_path / "dist"
-    output_dir.mkdir()
-    older = output_dir / "zotero-research-0.6.2.xpi"
-    payload = b"older release"
-    older.write_bytes(payload)
-    (output_dir / "zotero-research-0.6.2.xpi.sha256").write_text(
-        f"{hashlib.sha256(payload).hexdigest()}  {older.name}\n", encoding="utf-8"
-    )
-
-    build_addon(
-        addon_dir=addon_dir,
-        output=output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi",
-    )
-
-    previous = output_dir / "zotero-research-previous-stable.xpi"
-    sidecar = output_dir / "zotero-research-previous-stable.xpi.sha256"
-    recorded = sidecar.read_text(encoding="utf-8")
-    assert recorded.startswith(hashlib.sha256(payload).hexdigest())
-    assert recorded.strip().endswith(previous.name)
-
-

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
-import shutil
 import tempfile
 import zipfile
 from collections.abc import Sequence
@@ -21,11 +21,10 @@ EXPECTED_ZOTERO_MIN_VERSION = "10.0"
 EXPECTED_ZOTERO_MAX_VERSION = "10.0.*"
 DEFAULT_OUTPUT = REPO_ROOT / "dist" / f"zotero-research-{PACKAGE_VERSION}.xpi"
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
-# Rollback copy kept next to the release: the package that shipped before the
-# newest build, with the same sidecars, so a bad release can be undone without
+# Rollback copy kept next to the release: the highest valid package version
+# below the build being produced, so a bad release can be undone without
 # rebuilding from an older checkout.
 PREVIOUS_STABLE_NAME = "zotero-research-previous-stable.xpi"
-_SIDECAR_SUFFIXES = (".sha256", ".manifest.json")
 
 ALLOWED_RUNTIME_FILES = frozenset(
     {
@@ -84,6 +83,16 @@ class PackageResult:
     manifest_path: Path
 
 
+@dataclass(frozen=True)
+class _ReleaseCandidate:
+    """A validated release snapshot eligible for rollback promotion."""
+
+    path: Path
+    payload: bytes
+    inventory: dict[str, Any]
+    version_key: tuple[int, ...]
+
+
 def build_addon(
     *,
     addon_dir: Path | str | None = None,
@@ -101,12 +110,14 @@ def build_addon(
 
     source_files = _validate_addon_tree(source_dir)
     manifest = _read_manifest(source_dir / "manifest.json")
-    _promote_previous_release(output_path)
 
     file_bytes = {
         relative_path: (source_dir / Path(relative_path)).read_bytes()
         for relative_path in source_files
     }
+    target_version = manifest["version"]
+    assert isinstance(target_version, str)
+    candidate = _select_previous_release(output_path, target_version)
     _write_xpi_atomically(output_path, file_bytes)
 
     digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
@@ -114,15 +125,10 @@ def build_addon(
     _write_text_atomically(sha256_path, f"{digest}  {output_path.name}\n")
 
     manifest_path = output_path.with_name(output_path.name + ".manifest.json")
-    inventory = {
-        "addon_id": _zotero_id(manifest),
-        "files": sorted(file_bytes),
-        "format": 1,
-        "version": manifest["version"],
-        "zotero_min_version": _zotero_min_version(manifest),
-        "zotero_max_version": _zotero_max_version(manifest),
-    }
+    inventory = _inventory_for_manifest(manifest, file_bytes)
     _write_text_atomically(manifest_path, _json_text(inventory))
+    if candidate is not None:
+        _promote_previous_release(output_path, candidate)
     return PackageResult(
         xpi_path=output_path,
         sha256_path=sha256_path,
@@ -130,42 +136,118 @@ def build_addon(
     )
 
 
-def _promote_previous_release(output_path: Path) -> Path | None:
-    """Copy the package this build replaces to the rollback slot.
+def _promote_previous_release(
+    output_path: Path, candidate: _ReleaseCandidate | None = None
+) -> Path | None:
+    """Commit a validated release snapshot to the rollback slot.
 
-    The newest existing package wins, so rebuilding the current version keeps
-    the build you are about to overwrite, while a version bump keeps the
-    release that shipped before it. Sidecars are copied byte for byte; only
-    the sidecars that exist are carried over.
+    The package manifest is authoritative. Candidate sidecars are never
+    copied: the digest and inventory are regenerated from the package bytes so
+    missing or stale sidecars cannot describe the wrong rollback artifact.
     """
 
+    if candidate is None:
+        candidate = _select_previous_release(output_path, PACKAGE_VERSION)
+    if candidate is None:
+        return None
+
+    previous = output_path.parent / PREVIOUS_STABLE_NAME
+    digest = hashlib.sha256(candidate.payload).hexdigest()
+    artifacts = {
+        previous: candidate.payload,
+        previous.with_name(previous.name + ".sha256"):
+        f"{digest}  {previous.name}\n".encode(),
+        previous.with_name(previous.name + ".manifest.json"):
+        _json_bytes(candidate.inventory),
+    }
+    _write_artifacts_atomically(artifacts)
+    return previous
+
+
+def _select_previous_release(output_path: Path, target_version: str) -> _ReleaseCandidate | None:
+    """Find the highest valid release below ``target_version``.
+
+    File names, mtimes, and sidecars are not release identity. Each XPI is
+    inspected directly and only a package with the expected addon id and a
+    numerically lower manifest version can be selected.
+    """
+
+    target_key = _version_key(target_version)
+    if target_key is None:
+        raise PackageError(f"manifest version is not a comparable release: {target_version!r}")
     output_dir = output_path.parent
     if not output_dir.is_dir():
         return None
-    candidates = [
-        path
-        for path in output_dir.glob("*.xpi")
-        if path.is_file() and path.name != PREVIOUS_STABLE_NAME
-    ]
+
+    candidates: list[_ReleaseCandidate] = []
+    for path in sorted(output_dir.glob("*.xpi"), key=lambda value: value.name):
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.name == PREVIOUS_STABLE_NAME
+        ):
+            continue
+        candidate = _inspect_release(path)
+        if candidate is None or candidate.version_key >= target_key:
+            continue
+        candidates.append(candidate)
     if not candidates:
         return None
-    newest = max(candidates, key=lambda path: path.stat().st_mtime)
-    previous = output_dir / PREVIOUS_STABLE_NAME
-    shutil.copyfile(newest, previous)
-    for suffix in _SIDECAR_SUFFIXES:
-        sidecar = newest.with_name(newest.name + suffix)
-        if not sidecar.is_file():
-            continue
-        target = previous.with_name(previous.name + suffix)
-        if suffix == ".sha256":
-            # The digest is copied, the recorded filename follows the copy so
-            # the rollback package still verifies under its own name.
-            digest = sidecar.read_text(encoding="utf-8").split()
-            if digest and len(digest[0]) == 64:
-                _write_text_atomically(target, f"{digest[0]}  {previous.name}\n")
-                continue
-        shutil.copyfile(sidecar, target)
-    return previous
+    return max(candidates, key=lambda value: (value.version_key, value.path.name))
+
+
+def _inspect_release(path: Path) -> _ReleaseCandidate | None:
+    """Read candidate identity from the XPI, tolerating bad sidecars."""
+
+    try:
+        payload = path.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            infos = archive.infolist()
+            manifest_infos = [info for info in infos if info.filename == "manifest.json"]
+            if len(manifest_infos) != 1:
+                return None
+            manifest = json.loads(archive.read(manifest_infos[0]).decode("utf-8"))
+            names = [info.filename for info in infos if not info.is_dir()]
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+        zipfile.BadZipFile,
+    ):
+        return None
+
+    if not isinstance(manifest, dict) or manifest.get("manifest_version") != 2:
+        return None
+    version = manifest.get("version")
+    version_key = _version_key(version)
+    if version_key is None:
+        return None
+    try:
+        addon_id = _zotero_manifest(manifest).get("id")
+    except (AssertionError, KeyError, TypeError):
+        return None
+    if addon_id != EXPECTED_ADDON_ID:
+        return None
+    return _ReleaseCandidate(
+        path=path,
+        payload=payload,
+        inventory=_inventory_for_manifest(manifest, names),
+        version_key=version_key,
+    )
+
+
+def _version_key(version: Any) -> tuple[int, ...] | None:
+    if not isinstance(version, str) or not version or version != version.strip():
+        return None
+    parts = version.split(".")
+    if not parts or any(not part.isdecimal() for part in parts):
+        return None
+    key = tuple(int(part) for part in parts)
+    while len(key) > 1 and key[-1] == 0:
+        key = key[:-1]
+    return key
 
 
 def _resolve_directory(value: Path | str, description: str) -> Path:
@@ -326,6 +408,40 @@ def _json_text(value: Any) -> str:
 
 def _json_bytes(value: Any) -> bytes:
     return _json_text(value).encode("utf-8")
+
+
+def _inventory_for_manifest(
+    manifest: dict[str, Any], files: Sequence[str]
+) -> dict[str, Any]:
+    zotero = _zotero_manifest(manifest)
+    inventory: dict[str, Any] = {
+        "addon_id": _zotero_id(manifest),
+        "files": sorted(files),
+        "format": 1,
+        "version": manifest["version"],
+    }
+    for manifest_key, inventory_key in (
+        ("strict_min_version", "zotero_min_version"),
+        ("strict_max_version", "zotero_max_version"),
+    ):
+        value = zotero.get(manifest_key)
+        if isinstance(value, str):
+            inventory[inventory_key] = value
+    return inventory
+
+
+def _write_artifacts_atomically(artifacts: dict[Path, bytes]) -> None:
+    temporary_paths: list[tuple[Path, Path]] = []
+    try:
+        for target, payload in artifacts.items():
+            temporary_path = _temporary_path(target)
+            temporary_path.write_bytes(payload)
+            temporary_paths.append((target, temporary_path))
+        for target, temporary_path in temporary_paths:
+            os.replace(temporary_path, target)
+    finally:
+        for _target, temporary_path in temporary_paths:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _write_xpi_atomically(output: Path, files: dict[str, bytes]) -> None:
