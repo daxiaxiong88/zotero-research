@@ -10,6 +10,35 @@ const API_FIELDS = {
   'zra-api-key': 'apiKey',
 };
 
+function resolveAPIProtocol(protocol, baseUrl) {
+  const selected = String(protocol || 'auto').trim().toLowerCase();
+  if (selected === 'anthropic' || selected === 'openai') return selected;
+  return /\/anthropic/i.test(String(baseUrl || '')) ? 'anthropic' : 'openai';
+}
+
+function apiEndpoint(baseUrl, protocol) {
+  const source = String(baseUrl || '').trim();
+  const match = source.match(/^([^?#]*)([?#].*)?$/);
+  let path = (match ? match[1] : source).replace(/\/+$/, '');
+  const suffix = protocol === 'anthropic' ? '/messages' : '/chat/completions';
+  const endpoint = protocol === 'anthropic' ? /\/messages$/i : /\/chat\/completions$/i;
+  if (!endpoint.test(path)) {
+    if (!/\/v\d+$/i.test(path)) path += '/v1';
+    path += suffix;
+  }
+  return path + (match?.[2] || '');
+}
+
+async function closeAPIResponse(response) {
+  try {
+    if (typeof response?.body?.cancel === 'function') {
+      await response.body.cancel();
+    } else if (typeof response?.text === 'function') {
+      await response.text();
+    }
+  } catch (_) {}
+}
+
 var ZoteroResearchPreferences = {
   _loadListener: null,
   _controlsBound: false,
@@ -125,13 +154,14 @@ var ZoteroResearchPreferences = {
       return;
     }
     this.status('测试中…');
-    const resolved = protocol === 'anthropic' || protocol === 'openai'
-      ? protocol
-      : (/\/anthropic/i.test(base) ? 'anthropic' : 'openai');
+    const resolved = resolveAPIProtocol(protocol, base);
+    const Controller = typeof AbortController === 'function' ? AbortController : null;
+    const controller = Controller ? new Controller() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 30000) : null;
     try {
       let response;
       if (resolved === 'anthropic') {
-        response = await fetch(base.replace(/\/+$/, '') + '/v1/messages', {
+        response = await fetch(apiEndpoint(base, resolved), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -142,13 +172,13 @@ var ZoteroResearchPreferences = {
           body: JSON.stringify({
             model,
             max_tokens: 16,
+            stream: true,
             messages: [{ role: 'user', content: '只回答：ok' }],
           }),
+          signal: controller?.signal,
         });
       } else {
-        let url = base.replace(/\/+$/, '');
-        if (!/\/v\d+$/.test(url)) url += '/v1';
-        response = await fetch(url + '/chat/completions', {
+        response = await fetch(apiEndpoint(base, resolved), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -157,18 +187,23 @@ var ZoteroResearchPreferences = {
           body: JSON.stringify({
             model,
             max_tokens: 16,
+            stream: true,
             messages: [{ role: 'user', content: '只回答：ok' }],
           }),
+          signal: controller?.signal,
         });
       }
       if (response.ok) {
+        await closeAPIResponse(response);
         this.status('连接成功（HTTP ' + response.status + '），协议 ' + resolved + '。');
       } else {
         const detail = await response.text().catch(() => '');
         this.status('HTTP ' + response.status + '：' + String(detail).slice(0, 200));
       }
     } catch (error) {
-      this.status('连接失败：' + String(error?.message || error));
+      this.status('连接失败：' + (controller?.signal.aborted ? '测试请求超时。' : String(error?.message || error)));
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   },
 

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function preferences() {
+function preferences({ fetchImpl = async () => assert.fail('unexpected API request') } = {}) {
   const fields = new Map();
   const events = [];
   const listeners = new Map();
@@ -34,6 +34,8 @@ function preferences() {
     document,
     setTimeout,
     clearTimeout,
+    AbortController,
+    fetch: fetchImpl,
     Zotero: {
       Prefs: {
         values: new Map([
@@ -115,4 +117,39 @@ test('save persists API fields into Zotero preferences', () => {
   assert.equal(values.get('researchAssistant.apiModel'), 'test-model');
   assert.equal(values.get('researchAssistant.apiKey'), 'sk-test');
   assert.match(api.field('zra-api-status').textContent, /已保存/);
+});
+
+test('API connection tests use the same protocol and normalized endpoint as direct requests', async () => {
+  const calls = [];
+  let cancelled = 0;
+  const h = preferences({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        body: { cancel: async () => { cancelled += 1; } },
+        text: async () => '',
+      };
+    },
+  });
+  h.mountFragment();
+  h.api.field('zra-api-protocol').value = 'openai';
+  h.api.field('zra-api-base').value = 'https://api.example.test/v1/';
+  h.api.field('zra-api-model').value = 'test-model';
+  h.api.field('zra-api-key').value = 'test-key';
+  await h.api.testAPI();
+  assert.equal(calls[0].url, 'https://api.example.test/v1/chat/completions');
+  assert.equal(JSON.parse(calls[0].options.body).stream, true);
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer test-key');
+  assert.match(h.api.field('zra-api-status').textContent, /协议 openai/);
+
+  h.api.field('zra-api-protocol').value = 'auto';
+  h.api.field('zra-api-base').value = 'https://gateway.example.test/anthropic/v1';
+  await h.api.testAPI();
+  assert.equal(calls[1].url, 'https://gateway.example.test/anthropic/v1/messages');
+  assert.equal(JSON.parse(calls[1].options.body).stream, true);
+  assert.equal(calls[1].options.headers['anthropic-version'], '2023-06-01');
+  assert.match(h.api.field('zra-api-status').textContent, /协议 anthropic/);
+  assert.equal(cancelled, 2, 'successful probes cancel/drain their response body');
 });

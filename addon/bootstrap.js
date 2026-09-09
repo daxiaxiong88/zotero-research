@@ -450,15 +450,71 @@ function zraCreateAddon(data) {
     return 'application/pdf';
   }
 
+  function resolveAPIProtocol(protocol, baseUrl) {
+    const selected = String(protocol || 'auto').trim().toLowerCase();
+    if (selected === 'anthropic' || selected === 'openai') return selected;
+    return /\/anthropic/i.test(String(baseUrl || '')) ? 'anthropic' : 'openai';
+  }
+
+  function apiEndpoint(baseUrl, protocol) {
+    const source = String(baseUrl || '').trim();
+    const match = source.match(/^([^?#]*)([?#].*)?$/);
+    let path = (match ? match[1] : source).replace(/\/+$/, '');
+    const suffix = protocol === 'anthropic' ? '/messages' : '/chat/completions';
+    const endpoint = protocol === 'anthropic' ? /\/messages$/i : /\/chat\/completions$/i;
+    if (!endpoint.test(path)) {
+      if (!/\/v\d+$/i.test(path)) path += '/v1';
+      path += suffix;
+    }
+    return path + (match?.[2] || '');
+  }
+
   function getAPIConfig() {
-    const protocol = Zotero.Prefs.get('researchAssistant.apiProtocol') || 'auto';
+    const configuredProtocol = Zotero.Prefs.get('researchAssistant.apiProtocol') || 'auto';
     const baseUrl = (Zotero.Prefs.get('researchAssistant.apiBaseUrl') || '').trim();
     const model = (Zotero.Prefs.get('researchAssistant.apiModel') || '').trim();
     const apiKey = (Zotero.Prefs.get('researchAssistant.apiKey') || '').trim();
-    const resolved = protocol === 'anthropic' || protocol === 'openai'
-      ? protocol
-      : (/\/anthropic/i.test(baseUrl) ? 'anthropic' : 'openai');
-    return { protocol: resolved, baseUrl, model, apiKey };
+    return {
+      protocol: resolveAPIProtocol(configuredProtocol, baseUrl),
+      baseUrl, model, apiKey,
+    };
+  }
+
+  const API_REQUEST_TIMEOUT_MS = 120000;
+
+  function prepareAPIRequest(signal) {
+    const Controller = typeof AbortController === 'function' ? AbortController : null;
+    const controller = Controller ? new Controller() : null;
+    let timer = null;
+    let timedOut = false;
+    let externalAbort = null;
+    const abort = (reason) => {
+      if (!controller) return;
+      try { controller.abort(reason); } catch (_) {
+        try { controller.abort(); } catch (_) {}
+      }
+    };
+    if (controller) {
+      if (signal?.aborted) abort(signal.reason);
+      else if (typeof signal?.addEventListener === 'function') {
+        externalAbort = () => abort(signal.reason);
+        signal.addEventListener('abort', externalAbort, { once: true });
+      }
+      timer = setTimeout(() => {
+        timedOut = true;
+        abort(new Error('API 请求超时。'));
+      }, API_REQUEST_TIMEOUT_MS);
+    }
+    return {
+      signal: controller ? controller.signal : signal,
+      timedOut: () => timedOut,
+      cleanup() {
+        if (timer !== null) clearTimeout(timer);
+        if (externalAbort && typeof signal?.removeEventListener === 'function') {
+          signal.removeEventListener('abort', externalAbort);
+        }
+      },
+    };
   }
 
   async function callModelAPI({ messages, onDelta, attachment, images, signal }) {
@@ -470,33 +526,148 @@ function zraCreateAddon(data) {
       throw new Error('附带全文 PDF 目前仅支持 Anthropic 兼容协议。');
     }
     const emit = (delta) => { if (typeof onDelta === 'function') onDelta(delta); };
-    if (config.protocol === 'anthropic') {
-      return callAnthropicAPI(config, messages, emit, attachment || null, signal, images || []);
+    const request = prepareAPIRequest(signal);
+    try {
+      if (config.protocol === 'anthropic') {
+        return await callAnthropicAPI(
+          config, messages, emit, attachment || null, request.signal, images || [],
+        );
+      }
+      return await callOpenAIAPI(config, messages, emit, request.signal, images || []);
+    } catch (error) {
+      if (request.timedOut()) throw new Error('API 请求超时。');
+      throw error;
+    } finally {
+      request.cleanup();
     }
-    return callOpenAIAPI(config, messages, emit, signal, images || []);
   }
 
-  async function readSSEStream(response, handleEvent) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let split;
-      while ((split = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, split).replace(/\r$/, '');
-        buffer = buffer.slice(split + 1);
-        if (line.startsWith('data:')) handleEvent(line.slice(5).trim());
-      }
+  async function readSSEStream(response, handleEvent, signal) {
+    const onEvent = typeof handleEvent === 'function' ? handleEvent : () => {};
+    let reader = null;
+    let readerFinished = false;
+    let readerCancelled = false;
+    let doneMarker = false;
+    let abortReject = null;
+    let abortPromise = null;
+    const abortReason = () => signal?.reason instanceof Error
+      ? signal.reason : new Error('API 请求已取消。');
+    const abortHandler = () => { if (abortReject) abortReject(abortReason()); };
+    if (typeof signal?.addEventListener === 'function') {
+      abortPromise = new Promise((_, reject) => { abortReject = reject; });
+      signal.addEventListener('abort', abortHandler, { once: true });
     }
-    const tail = decoder.decode();
-    if (tail.trim().startsWith('data:')) handleEvent(tail.trim().slice(5).trim());
+    const cancelReader = async (reason) => {
+      if (!reader || readerCancelled || readerFinished || typeof reader.cancel !== 'function') return;
+      readerCancelled = true;
+      try { await reader.cancel(reason); } catch (_) {}
+    };
+    const cancelResponseBody = async (reason) => {
+      if (reader) {
+        await cancelReader(reason);
+        return;
+      }
+      if (typeof response?.body?.cancel === 'function') {
+        try { await response.body.cancel(reason); } catch (_) {}
+      }
+    };
+    try {
+      if (signal?.aborted) throw abortReason();
+      if (!response?.body?.getReader) {
+        let raw = '';
+        if (typeof response?.text === 'function') {
+          const value = response.text();
+          raw = abortPromise ? await Promise.race([value, abortPromise]) : await value;
+        } else if (typeof response?.json === 'function') {
+          const value = response.json();
+          raw = JSON.stringify(abortPromise ? await Promise.race([value, abortPromise]) : await value);
+        }
+        else throw new Error('API 响应没有可读正文。');
+        if (String(raw).trim()) onEvent(String(raw).trim());
+        return;
+      }
+
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let raw = '';
+      let dataLines = [];
+      let sawSSEFrame = false;
+      const dispatchEvent = () => {
+        if (!dataLines.length) return;
+        const payload = dataLines.join('\n').trim();
+        dataLines = [];
+        if (!payload) return;
+        if (payload === '[DONE]') doneMarker = true;
+        else if (onEvent(payload) === false) doneMarker = true;
+      };
+      const processLine = (line) => {
+        const normalized = line.replace(/\r$/, '');
+        if (!normalized) {
+          dispatchEvent();
+          return;
+        }
+        if (normalized.startsWith(':')) {
+          sawSSEFrame = true;
+          return;
+        }
+        if (/^(?:event|id|retry):/.test(normalized)) {
+          sawSSEFrame = true;
+          return;
+        }
+        if (normalized.startsWith('data:')) {
+          sawSSEFrame = true;
+          const value = normalized.slice(5);
+          dataLines.push(value.startsWith(' ') ? value.slice(1) : value);
+        }
+      };
+      const processAvailableLines = () => {
+        let split;
+        while ((split = buffer.search(/\r\n|\r|\n/)) >= 0) {
+          const lineEnd = buffer[split] === '\r' && buffer[split + 1] === '\n'
+            ? split + 2 : split + 1;
+          processLine(buffer.slice(0, split));
+          buffer = buffer.slice(lineEnd);
+          if (doneMarker) break;
+        }
+      };
+      while (!doneMarker) {
+        const read = reader.read();
+        const result = abortPromise ? await Promise.race([read, abortPromise]) : await read;
+        if (result.done) {
+          readerFinished = true;
+          break;
+        }
+        const chunk = decoder.decode(result.value, { stream: true });
+        raw += chunk;
+        buffer += chunk;
+        processAvailableLines();
+        if (sawSSEFrame) raw = '';
+      }
+      const tail = decoder.decode();
+      raw += tail;
+      buffer += tail;
+      if (!doneMarker) {
+        if (buffer) {
+          processLine(buffer);
+          buffer = '';
+        }
+        dispatchEvent();
+      }
+      if (!sawSSEFrame && !doneMarker && raw.trim()) onEvent(raw.trim());
+      if (doneMarker) await cancelReader();
+    } catch (error) {
+      await cancelResponseBody(error);
+      throw error;
+    } finally {
+      if (typeof signal?.removeEventListener === 'function') {
+        signal.removeEventListener('abort', abortHandler);
+      }
+      try { reader?.releaseLock?.(); } catch (_) {}
+    }
   }
 
   async function callAnthropicAPI(config, messages, emit, attachment, signal, images = []) {
-    const base = config.baseUrl.replace(/\/+$/, '');
     const headers = {
       'Content-Type': 'application/json',
       'anthropic-version': '2023-06-01',
@@ -539,22 +710,31 @@ function zraCreateAddon(data) {
         },
       ];
     }
-    const response = await fetch(base + '/v1/messages', {
+    const response = await fetch(apiEndpoint(config.baseUrl, 'anthropic'), {
       method: 'POST', headers, signal,
       body: JSON.stringify({
         model: config.model, max_tokens: 16000, stream: true, messages: payloadMessages,
       }),
     });
-    if (!response.ok || !response.body) {
+    if (!response.ok) {
       const detail = await response.text().catch(() => '');
       throw new Error('Anthropic API HTTP ' + response.status + (detail ? '：' + detail.slice(0, 300) : ''));
+    }
+    if (!response?.body?.getReader
+      && typeof response?.text !== 'function' && typeof response?.json !== 'function') {
+      throw new Error('Anthropic API 响应没有可读正文。');
     }
     let thinking = '';
     let text = '';
     await readSSEStream(response, (payload) => {
       if (!payload || payload === '[DONE]') return;
       let data;
-      try { data = JSON.parse(payload); } catch (_) { return; }
+      try { data = JSON.parse(payload); } catch (_) {
+        throw new Error('Anthropic API 响应格式无效。');
+      }
+      if (data.type === 'error' || data.error) {
+        throw new Error('Anthropic API 错误：' + String(data.error?.message || '未知错误').slice(0, 300));
+      }
       if (data.type === 'content_block_delta') {
         if (typeof data.delta?.thinking === 'string') {
           thinking += data.delta.thinking;
@@ -563,16 +743,26 @@ function zraCreateAddon(data) {
           text += data.delta.text;
           emit({ type: 'text', text: data.delta.text });
         }
-      } else if (data.type === 'error') {
-        throw new Error('Anthropic API 错误：' + String(data.error?.message || '').slice(0, 300));
+      } else if (Array.isArray(data.content)) {
+        // Some OpenAI-compatible gateways ignore stream:true and return the
+        // regular Anthropic response object instead.
+        for (const block of data.content) {
+          if (typeof block?.thinking === 'string') {
+            thinking += block.thinking;
+            emit({ type: 'thinking', text: block.thinking });
+          } else if (typeof block?.text === 'string') {
+            text += block.text;
+            emit({ type: 'text', text: block.text });
+          }
+        }
+      } else if (data.type === 'message_stop') {
+        return false;
       }
-    });
+    }, signal);
     return { thinking, text };
   }
 
   async function callOpenAIAPI(config, messages, emit, signal, images = []) {
-    let base = config.baseUrl.replace(/\/+$/, '');
-    if (!/\/v\d+$/.test(base)) base += '/v1';
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
     let payloadMessages = messages;
@@ -590,31 +780,52 @@ function zraCreateAddon(data) {
         { role: 'user', content: [...parts, { type: 'text', text: String(last.content || '') }] },
       ];
     }
-    const response = await fetch(base + '/chat/completions', {
+    const response = await fetch(apiEndpoint(config.baseUrl, 'openai'), {
       method: 'POST', headers, signal,
       body: JSON.stringify({ model: config.model, max_tokens: 16000, stream: true, messages: payloadMessages }),
     });
-    if (!response.ok || !response.body) {
+    if (!response.ok) {
       const detail = await response.text().catch(() => '');
       throw new Error('OpenAI API HTTP ' + response.status + (detail ? '：' + detail.slice(0, 300) : ''));
+    }
+    if (!response?.body?.getReader
+      && typeof response?.text !== 'function' && typeof response?.json !== 'function') {
+      throw new Error('OpenAI API 响应没有可读正文。');
     }
     let thinking = '';
     let text = '';
     await readSSEStream(response, (payload) => {
       if (!payload || payload === '[DONE]') return;
       let data;
-      try { data = JSON.parse(payload); } catch (_) { return; }
+      try { data = JSON.parse(payload); } catch (_) {
+        throw new Error('OpenAI API 响应格式无效。');
+      }
+      if (data.error) {
+        throw new Error('OpenAI API 错误：' + String(data.error.message || data.error || '未知错误').slice(0, 300));
+      }
       const delta = data.choices?.[0]?.delta;
-      if (!delta) return;
-      if (typeof delta.reasoning_content === 'string') {
-        thinking += delta.reasoning_content;
-        emit({ type: 'thinking', text: delta.reasoning_content });
+      const message = data.choices?.[0]?.message;
+      const source = delta || message;
+      if (!source) return;
+      const reasoning = typeof source.reasoning_content === 'string'
+        ? source.reasoning_content : source.reasoning;
+      if (typeof reasoning === 'string') {
+        thinking += reasoning;
+        emit({ type: 'thinking', text: reasoning });
       }
-      if (typeof delta.content === 'string') {
-        text += delta.content;
-        emit({ type: 'text', text: delta.content });
+      if (typeof source.content === 'string') {
+        text += source.content;
+        emit({ type: 'text', text: source.content });
+      } else if (Array.isArray(source.content)) {
+        for (const part of source.content) {
+          if (typeof part?.text === 'string') {
+            text += part.text;
+            emit({ type: 'text', text: part.text });
+          }
+        }
       }
-    });
+      if (data.choices?.[0]?.finish_reason) return false;
+    }, signal);
     return { thinking, text };
   }
 
