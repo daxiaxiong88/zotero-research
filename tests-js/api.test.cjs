@@ -33,6 +33,7 @@ function streamResponse(chunks, options = {}) {
           },
           cancel() {
             cancelled += 1;
+            if (options.cancelHangs) return new Promise(() => {});
             if (pendingRead) {
               const resolve = pendingRead;
               pendingRead = null;
@@ -220,6 +221,19 @@ test('OpenAI /v1 base URLs are not duplicated and UTF-8 SSE chunks are parsed', 
   await h.stop();
 });
 
+test('SSE keeps a CRLF split across chunks and joins multi-line data fields', async () => {
+  const response = streamResponse([
+    'data: {"choices":[\r',
+    '\ndata: {"delta":{"content":"跨块"}}]}\r\n\r\n',
+    'data: [DONE]\r\n\r\n',
+  ]);
+  const h = runtime({ fetchImpl: async () => response });
+  const adapter = await h.start();
+  const result = await adapter.callModelAPI({ messages: [{ role: 'user', content: 'hello' }] });
+  assert.equal(result.text, '跨块');
+  await h.stop();
+});
+
 test('auto protocol matches the Anthropic endpoint and avoids a repeated /v1 segment', async () => {
   const calls = [];
   const response = streamResponse([
@@ -243,6 +257,27 @@ test('auto protocol matches the Anthropic endpoint and avoids a repeated /v1 seg
   assert.equal(result.text, 'ok');
   assert.ok(response.stats.cancelled >= 1, 'message_stop closes a still-open SSE response');
   await h.stop();
+});
+
+test('auto protocol recognizes Anthropic official and complete messages URLs', async () => {
+  for (const [baseUrl, expected] of [
+    ['https://api.anthropic.com', 'https://api.anthropic.com/v1/messages'],
+    ['https://api.anthropic.com/v1/messages', 'https://api.anthropic.com/v1/messages'],
+  ]) {
+    const calls = [];
+    const h = runtime({
+      protocol: 'auto', baseUrl,
+      fetchImpl: async (url) => {
+        calls.push(url);
+        return streamResponse(['data: {"type":"message_stop"}\n\n']);
+      },
+    });
+    const adapter = await h.start();
+    assert.equal(adapter.getAPIConfig().protocol, 'anthropic');
+    await adapter.callModelAPI({ messages: [{ role: 'user', content: 'hello' }] });
+    assert.equal(calls[0], expected);
+    await h.stop();
+  }
 });
 
 test('non-stream OpenAI JSON responses remain compatible when a gateway ignores stream:true', async () => {
@@ -302,7 +337,7 @@ test('reader failures are not swallowed and release the stream lock', async () =
     body: {
       getReader: () => ({
         read: async () => { throw new Error('socket broke'); },
-        cancel: async () => { cancelled += 1; },
+        cancel: () => { cancelled += 1; return new Promise(() => {}); },
         releaseLock: () => { released += 1; },
       }),
     },
@@ -310,10 +345,14 @@ test('reader failures are not swallowed and release the stream lock', async () =
   };
   const h = runtime({ fetchImpl: async () => response });
   const adapter = await h.start();
-  await assert.rejects(
+  const rejected = assert.rejects(
     adapter.callModelAPI({ messages: [{ role: 'user', content: 'hello' }] }),
     /socket broke/,
   );
+  await Promise.race([
+    rejected,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('cancel hung')), 100)),
+  ]);
   assert.equal(cancelled, 1);
   assert.equal(released, 1);
   await h.stop();
@@ -339,23 +378,66 @@ test('external cancellation aborts a pending stream and cancels its reader', asy
 
 test('the internal timeout aborts a stalled stream and reports a timeout', async () => {
   const response = pendingStreamResponse();
-  let timeoutCallback;
+  const timers = [];
   const h = runtime({
     fetchImpl: async () => response,
     setTimeoutImpl: (callback, delay) => {
-      assert.equal(delay, 120000);
-      timeoutCallback = callback;
-      return 1;
+      const timer = { callback, delay, active: true };
+      timers.push(timer);
+      return timer;
     },
-    clearTimeoutImpl: () => {},
+    clearTimeoutImpl: (timer) => { if (timer) timer.active = false; },
   });
   const adapter = await h.start();
   const request = adapter.callModelAPI({ messages: [{ role: 'user', content: 'hello' }] });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(typeof timeoutCallback, 'function');
-  timeoutCallback();
-  await assert.rejects(request, /API 请求超时/);
+  assert.deepEqual(timers.map((timer) => timer.delay), [120000, 900000]);
+  timers[0].callback();
+  await assert.rejects(request, /API 请求超时.*120/);
   assert.ok(response.stats.cancelled >= 1);
   assert.equal(response.stats.released, 1);
+  await h.stop();
+});
+
+test('stream activity resets the idle timer while the total timer remains armed', async () => {
+  const response = streamResponse([
+    'data: {"choices":[{"delta":{"content":"chunk"}}]}\n\n',
+  ], { hangAfterChunks: true });
+  const timers = [];
+  const h = runtime({
+    fetchImpl: async () => response,
+    setTimeoutImpl: (callback, delay) => {
+      const timer = { callback, delay, active: true };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl: (timer) => { if (timer) timer.active = false; },
+  });
+  const adapter = await h.start();
+  const request = adapter.callModelAPI({ messages: [{ role: 'user', content: 'hello' }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(timers.map((timer) => timer.delay), [120000, 900000, 120000]);
+  assert.equal(timers[0].active, false);
+  assert.equal(timers[1].active, true);
+  timers[2].callback();
+  await assert.rejects(request, /API 请求超时.*120/);
+  await h.stop();
+});
+
+test('SSE EOF without a terminal marker rejects but preserves already emitted partial text', async () => {
+  const response = streamResponse([
+    'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+  ]);
+  const h = runtime({ fetchImpl: async () => response });
+  const adapter = await h.start();
+  const deltas = [];
+  await assert.rejects(
+    adapter.callModelAPI({
+      messages: [{ role: 'user', content: 'hello' }],
+      onDelta: (delta) => deltas.push(delta),
+    }),
+    /结束标记前中断/,
+  );
+  assert.deepEqual(deltas.map((delta) => delta.text), ['partial']);
   await h.stop();
 });

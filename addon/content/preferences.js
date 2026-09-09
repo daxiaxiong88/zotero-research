@@ -13,7 +13,11 @@ const API_FIELDS = {
 function resolveAPIProtocol(protocol, baseUrl) {
   const selected = String(protocol || 'auto').trim().toLowerCase();
   if (selected === 'anthropic' || selected === 'openai') return selected;
-  return /\/anthropic/i.test(String(baseUrl || '')) ? 'anthropic' : 'openai';
+  const source = String(baseUrl || '');
+  return /\/anthropic(?:\/|$)/i.test(source)
+    || /(^|:\/\/)(?:[^/]+\.)?anthropic\.com(?:[/:?#]|$)/i.test(source)
+    || /\/messages(?:[?#]|$)/i.test(source)
+    ? 'anthropic' : 'openai';
 }
 
 function apiEndpoint(baseUrl, protocol) {

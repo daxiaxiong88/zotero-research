@@ -453,7 +453,11 @@ function zraCreateAddon(data) {
   function resolveAPIProtocol(protocol, baseUrl) {
     const selected = String(protocol || 'auto').trim().toLowerCase();
     if (selected === 'anthropic' || selected === 'openai') return selected;
-    return /\/anthropic/i.test(String(baseUrl || '')) ? 'anthropic' : 'openai';
+    const source = String(baseUrl || '');
+    return /\/anthropic(?:\/|$)/i.test(source)
+      || /(^|:\/\/)(?:[^/]+\.)?anthropic\.com(?:[/:?#]|$)/i.test(source)
+      || /\/messages(?:[?#]|$)/i.test(source)
+      ? 'anthropic' : 'openai';
   }
 
   function apiEndpoint(baseUrl, protocol) {
@@ -480,13 +484,16 @@ function zraCreateAddon(data) {
     };
   }
 
-  const API_REQUEST_TIMEOUT_MS = 120000;
+  const API_IDLE_TIMEOUT_MS = 120000;
+  const API_MAX_DURATION_MS = 15 * 60 * 1000;
 
   function prepareAPIRequest(signal) {
     const Controller = typeof AbortController === 'function' ? AbortController : null;
     const controller = Controller ? new Controller() : null;
     let timer = null;
+    let maxTimer = null;
     let timedOut = false;
+    let timeoutMessage = 'API 请求超时（连续 120 秒无数据）。';
     let externalAbort = null;
     const abort = (reason) => {
       if (!controller) return;
@@ -500,16 +507,34 @@ function zraCreateAddon(data) {
         externalAbort = () => abort(signal.reason);
         signal.addEventListener('abort', externalAbort, { once: true });
       }
-      timer = setTimeout(() => {
+      const idleTimeout = () => {
         timedOut = true;
-        abort(new Error('API 请求超时。'));
-      }, API_REQUEST_TIMEOUT_MS);
+        timeoutMessage = 'API 请求超时（连续 120 秒无数据）。';
+        abort(new Error(timeoutMessage));
+      };
+      timer = setTimeout(idleTimeout, API_IDLE_TIMEOUT_MS);
+      maxTimer = setTimeout(() => {
+        timedOut = true;
+        timeoutMessage = 'API 请求超时（总时限 15 分钟）。';
+        abort(new Error(timeoutMessage));
+      }, API_MAX_DURATION_MS);
     }
     return {
       signal: controller ? controller.signal : signal,
       timedOut: () => timedOut,
+      timeoutMessage: () => timeoutMessage,
+      activity: () => {
+        if (!controller || timedOut) return;
+        if (timer !== null) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timedOut = true;
+          timeoutMessage = 'API 请求超时（连续 120 秒无数据）。';
+          abort(new Error(timeoutMessage));
+        }, API_IDLE_TIMEOUT_MS);
+      },
       cleanup() {
         if (timer !== null) clearTimeout(timer);
+        if (maxTimer !== null) clearTimeout(maxTimer);
         if (externalAbort && typeof signal?.removeEventListener === 'function') {
           signal.removeEventListener('abort', externalAbort);
         }
@@ -530,19 +555,19 @@ function zraCreateAddon(data) {
     try {
       if (config.protocol === 'anthropic') {
         return await callAnthropicAPI(
-          config, messages, emit, attachment || null, request.signal, images || [],
+          config, messages, emit, attachment || null, request.signal, images || [], request.activity,
         );
       }
-      return await callOpenAIAPI(config, messages, emit, request.signal, images || []);
+      return await callOpenAIAPI(config, messages, emit, request.signal, images || [], request.activity);
     } catch (error) {
-      if (request.timedOut()) throw new Error('API 请求超时。');
+      if (request.timedOut()) throw new Error(request.timeoutMessage());
       throw error;
     } finally {
       request.cleanup();
     }
   }
 
-  async function readSSEStream(response, handleEvent, signal) {
+  async function readSSEStream(response, handleEvent, signal, onChunk) {
     const onEvent = typeof handleEvent === 'function' ? handleEvent : () => {};
     let reader = null;
     let readerFinished = false;
@@ -557,18 +582,24 @@ function zraCreateAddon(data) {
       abortPromise = new Promise((_, reject) => { abortReject = reject; });
       signal.addEventListener('abort', abortHandler, { once: true });
     }
-    const cancelReader = async (reason) => {
+    const cancelReader = (reason) => {
       if (!reader || readerCancelled || readerFinished || typeof reader.cancel !== 'function') return;
       readerCancelled = true;
-      try { await reader.cancel(reason); } catch (_) {}
+      try {
+        const pending = reader.cancel(reason);
+        if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+      } catch (_) {}
     };
-    const cancelResponseBody = async (reason) => {
+    const cancelResponseBody = (reason) => {
       if (reader) {
-        await cancelReader(reason);
+        cancelReader(reason);
         return;
       }
       if (typeof response?.body?.cancel === 'function') {
-        try { await response.body.cancel(reason); } catch (_) {}
+        try {
+          const pending = response.body.cancel(reason);
+          if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+        } catch (_) {}
       }
     };
     try {
@@ -621,9 +652,10 @@ function zraCreateAddon(data) {
           dataLines.push(value.startsWith(' ') ? value.slice(1) : value);
         }
       };
-      const processAvailableLines = () => {
+      const processAvailableLines = (flush = false) => {
         let split;
         while ((split = buffer.search(/\r\n|\r|\n/)) >= 0) {
+          if (!flush && buffer[split] === '\r' && split + 1 === buffer.length) break;
           const lineEnd = buffer[split] === '\r' && buffer[split + 1] === '\n'
             ? split + 2 : split + 1;
           processLine(buffer.slice(0, split));
@@ -639,15 +671,18 @@ function zraCreateAddon(data) {
           break;
         }
         const chunk = decoder.decode(result.value, { stream: true });
+        if (chunk && typeof onChunk === 'function') onChunk();
         raw += chunk;
         buffer += chunk;
         processAvailableLines();
         if (sawSSEFrame) raw = '';
       }
       const tail = decoder.decode();
+      if (tail && typeof onChunk === 'function') onChunk();
       raw += tail;
       buffer += tail;
       if (!doneMarker) {
+        processAvailableLines(true);
         if (buffer) {
           processLine(buffer);
           buffer = '';
@@ -655,7 +690,8 @@ function zraCreateAddon(data) {
         dispatchEvent();
       }
       if (!sawSSEFrame && !doneMarker && raw.trim()) onEvent(raw.trim());
-      if (doneMarker) await cancelReader();
+      if (sawSSEFrame && !doneMarker) throw new Error('API 流在结束标记前中断。');
+      if (doneMarker) cancelReader();
     } catch (error) {
       await cancelResponseBody(error);
       throw error;
@@ -667,7 +703,7 @@ function zraCreateAddon(data) {
     }
   }
 
-  async function callAnthropicAPI(config, messages, emit, attachment, signal, images = []) {
+  async function callAnthropicAPI(config, messages, emit, attachment, signal, images = [], onChunk) {
     const headers = {
       'Content-Type': 'application/json',
       'anthropic-version': '2023-06-01',
@@ -758,11 +794,11 @@ function zraCreateAddon(data) {
       } else if (data.type === 'message_stop') {
         return false;
       }
-    }, signal);
+    }, signal, onChunk);
     return { thinking, text };
   }
 
-  async function callOpenAIAPI(config, messages, emit, signal, images = []) {
+  async function callOpenAIAPI(config, messages, emit, signal, images = [], onChunk) {
     const headers = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
     let payloadMessages = messages;
@@ -825,7 +861,7 @@ function zraCreateAddon(data) {
         }
       }
       if (data.choices?.[0]?.finish_reason) return false;
-    }, signal);
+    }, signal, onChunk);
     return { thinking, text };
   }
 
