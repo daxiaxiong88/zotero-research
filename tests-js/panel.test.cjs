@@ -1346,3 +1346,150 @@ test('深度解析未配置时显示指引错误', async () => {
   assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
   panel.destroy();
 });
+
+test('切换文献解除旧解析锁；旧解析结束不能清除新解析的锁和进度条', async (t) => {
+  const parses = [];
+  const { root, panel } = setupWithMarkdown(makeAdapter(makeRelayHarness(), {
+    deepParseWithMineru(key, onProgress) {
+      return new Promise(resolve => parses.push({ key, onProgress, resolve }));
+    },
+  }));
+  t.after(() => panel.destroy());
+  panel.setContext(CONTEXT);
+  root.querySelector('[data-testid="quick-deep-parse"]').click();
+  await settle();
+  panel.setContext({ ...CONTEXT, item_key: 'ITEM-2', attachment_key: 'ATT-2' });
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
+  assert.equal(root.querySelector('[data-testid="deep-progress"]').hidden, true);
+  root.querySelector('[data-testid="quick-deep-parse"]').click();
+  await settle();
+  parses[1].onProgress({ phase: 'parsing', current: 3, total: 8 });
+  parses[0].resolve({ stats: { pageCount: 99, textPages: 99 } });
+  await settle();
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, true);
+  assert.equal(root.querySelector('[data-testid="deep-progress"]').hidden, false);
+  assert.match(root.querySelector('[data-testid="deep-progress"]').textContent, /3\/8/);
+  assert.doesNotMatch(root.textContent, /99\/99/);
+  parses[1].resolve({ stats: { pageCount: 8, textPages: 8 } });
+  await settle();
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
+  assert.equal(root.querySelector('[data-testid="deep-progress"]').hidden, true);
+});
+
+test('解析时清空聊天可继续使用；离开后未启动的解析不再调用后端', async (t) => {
+  const harness = makeRelayHarness();
+  let finish;
+  let calls = 0;
+  const { root, panel } = setupWithMarkdown(makeAdapter(harness, {
+    deepParseWithMineru() { calls++; return new Promise(resolve => { finish = resolve; }); },
+    loadChatSession: async () => ({ messages: [{ role: 'user', content: 'Q' }, { role: 'assistant', content: 'A' }] }),
+  }));
+  t.after(() => panel.destroy());
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="quick-deep-parse"]').click();
+  await settle();
+  root.querySelector('[data-testid="webai-clear"]').click();
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
+  assert.equal(root.querySelector('[data-testid="deep-progress"]').hidden, true);
+  finish({});
+  await settle();
+  root.querySelector('[data-testid="quick-deep-parse"]').click();
+  panel.setContext(null);
+  await settle();
+  assert.equal(calls, 1, 'cancel a not-yet-started operation on navigation');
+});
+
+test('同一文献切换 PDF 附件仍恢复按文献保存的对话', async (t) => {
+  const calls = [];
+  const { root, panel } = setupWithMarkdown(makeAdapter(makeRelayHarness(), {
+    loadChatSession: async key => {
+      calls.push(key);
+      return { messages: [{ role: 'user', content: 'KEEP-Q' }, { role: 'assistant', content: 'KEEP-A' }] };
+    },
+  }));
+  t.after(() => panel.destroy());
+  panel.setContext(CONTEXT);
+  await settle();
+  panel.setContext({ ...CONTEXT, attachment_key: 'ATT-SECOND' });
+  await settle();
+  assert.deepEqual(calls, ['ITEM-1', 'ITEM-1']);
+  assert.match(root.textContent, /KEEP-A/);
+});
+
+test('剪贴板图片不会跨文献串入；只接受最新一次粘贴且切换会移除截图', async (t) => {
+  const readers = [];
+  const { dom, root, panel } = setupWithMarkdown(makeAdapter(makeRelayHarness()));
+  t.after(() => panel.destroy());
+  dom.window.FileReader = class {
+    constructor() { readers.push(this); }
+    readAsDataURL() {}
+    finish(name) { this.result = 'data:image/png;base64,' + name; this.onload(); }
+  };
+  function paste(name) {
+    const event = new dom.window.Event('paste', { bubbles: true, cancelable: true });
+    const file = new dom.window.File(['png'], name + '.png', { type: 'image/png' });
+    event.clipboardData = { items: [{ kind: 'file', getAsFile: () => file }] };
+    root.querySelector('[data-testid="webai-chat-input"]').dispatchEvent(event);
+  }
+  panel.setContext(CONTEXT);
+  paste('old');
+  assert.equal(root.querySelector('[data-testid="webai-chat-send"]').disabled, true);
+  panel.setContext({ ...CONTEXT, item_key: 'ITEM-2', attachment_key: 'ATT-2' });
+  readers[0].finish('OLD');
+  assert.equal(root.querySelector('.zrp-image-chip').hidden, true);
+  paste('first'); paste('second');
+  readers[2].finish('SECOND'); readers[1].finish('FIRST');
+  assert.equal(root.querySelector('[data-testid="webai-chat-send"]').disabled, false);
+  assert.match(root.querySelector('.zrp-image-chip').textContent, /second.png/);
+  panel.setContext(CONTEXT);
+  assert.equal(root.querySelector('.zrp-image-chip').hidden, true);
+});
+
+test('API 附件尚在读取时切换文献不会发出旧请求', async (t) => {
+  let finishAttachment;
+  let requests = 0;
+  const { dom, root, panel } = setupWithMarkdown(makeAdapter(makeRelayHarness(), {
+    getAPIConfig: () => ({ protocol: 'anthropic', baseUrl: 'https://example.invalid', model: 'test' }),
+    getAttachmentBase64: () => new Promise(resolve => { finishAttachment = resolve; }),
+    getAttachmentMediaType: async () => 'application/pdf',
+    callModelAPI: async () => { requests++; return { text: 'obsolete' }; },
+  }));
+  t.after(() => panel.destroy());
+  panel.setContext(CONTEXT);
+  const provider = root.querySelector('[data-testid="webai-provider"]');
+  provider.value = 'api'; provider.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  root.querySelector('[data-testid="attach-pdf"]').checked = true;
+  root.querySelector('[data-testid="webai-chat-input"]').value = 'Question';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  assert.equal(typeof finishAttachment, 'function');
+  panel.setContext({ ...CONTEXT, item_key: 'ITEM-2', attachment_key: 'ATT-2' });
+  finishAttachment('cGRm');
+  await settle();
+  assert.equal(requests, 0);
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').disabled, false);
+});
+
+for (const action of ['switch', 'clear', 'destroy']) {
+  test(`已入队问题在 ${action} 时撤销，不再从旧文献延迟发到网页`, async () => {
+    const harness = makeRelayHarness();
+    const cancelled = [];
+    harness.relay.cancelTask = id => {
+      cancelled.push(id);
+      harness.relay.emit({ type: 'answer', id, text: 'cancelled', error: 'cancelled', done: true });
+    };
+    const saved = [];
+    const { root, panel } = setupWithMarkdown(makeAdapter(harness, { saveChatSession: key => saved.push(key) }));
+    panel.setContext(CONTEXT);
+    root.querySelector('[data-testid="webai-chat-input"]').value = 'Pending old question';
+    root.querySelector('[data-testid="webai-chat-send"]').click();
+    await settle();
+    if (action === 'switch') panel.setContext({ ...CONTEXT, item_key: 'ITEM-2', attachment_key: 'ATT-2' });
+    if (action === 'clear') root.querySelector('[data-testid="webai-clear"]').click();
+    if (action === 'destroy') panel.destroy();
+    assert.deepEqual(cancelled, ['task-1']);
+    assert.deepEqual(saved, [], 'synchronous cancellation does not archive into the next paper');
+    panel.destroy();
+  });
+}

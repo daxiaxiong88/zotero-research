@@ -1294,6 +1294,7 @@ function zraCreateAddon(data) {
           navigate,
           relay: {
             enqueueTask: (request) => relayStore.enqueueTask(request),
+            cancelTask: (id) => relayStore.cancelTask(id),
             subscribe: (listener) => relayStore.subscribe(listener),
             state: () => relayStore.state(),
           },

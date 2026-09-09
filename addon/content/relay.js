@@ -126,6 +126,28 @@
     const queue = []; // task ids awaiting claim
     const pollWaiters = []; // {resolve, timer}
     const listeners = new Set();
+    let watchdog = null;
+
+    function armWatchdog() {
+      if (watchdog !== null) cancel(watchdog);
+      watchdog = null;
+      let deadline = Infinity;
+      for (const task of tasks.values()) {
+        if (!task.complete) deadline = Math.min(deadline,
+          (task.claimedAt === null ? task.queuedAt : task.claimedAt) + STALE_CLAIM_MS);
+      }
+      if (!Number.isFinite(deadline)) return;
+      watchdog = schedule(() => {
+        watchdog = null;
+        reclaimStaleClaims();
+        armWatchdog();
+      }, Math.max(1, deadline - now()));
+    }
+
+    function removeQueued(id) {
+      const index = queue.indexOf(id);
+      if (index >= 0) queue.splice(index, 1);
+    }
 
     function notify(event) {
       for (const listener of Array.from(listeners)) {
@@ -183,16 +205,30 @@
       while (queue.length) {
         const id = queue.shift();
         const task = tasks.get(id);
-        if (task && !task.complete) return task;
+        if (task && !task.complete) {
+          const mismatch = providerMismatch(task.meta);
+          if (mismatch) failTask(id, mismatch);
+          else return task;
+        }
       }
       return null;
     }
 
+    function providerMismatch(meta) {
+      const provider = String(meta?.provider || '').toLowerCase();
+      if (!session || !provider) return '';
+      const active = session.ai.toLowerCase().replace(/[^a-z]/g, '');
+      return provider === active ? ''
+        : '当前连接的是 ' + session.ai + '，所选提供方为 ' + provider + '。请点击“打开网页”连接所选站点，或切换提供方后重试。';
+    }
+
     function reclaimStaleClaims() {
       for (const task of tasks.values()) {
-        if (task.complete || task.claimedAt === null) continue;
-        if (now() - task.claimedAt < STALE_CLAIM_MS) continue;
-        failTask(task.id, '网页长时间未回传回答（可能已刷新或断开），请在侧栏重新发送。');
+        if (task.complete) continue;
+        if (now() - (task.claimedAt === null ? task.queuedAt : task.claimedAt) < STALE_CLAIM_MS) continue;
+        failTask(task.id, task.claimedAt === null
+          ? '网页长时间未领取消息，请连接网页后在侧栏重新发送。'
+          : '网页长时间未回传回答（可能已刷新或断开），请在侧栏重新发送。');
       }
     }
 
@@ -203,6 +239,7 @@
       const task = nextQueuedTask();
       if (task) {
         task.claimedAt = now();
+        armWatchdog();
         return Promise.resolve({ task: { id: task.id, messages: task.messages } });
       }
       if (waitMs === 0) return Promise.resolve({});
@@ -230,6 +267,8 @@
       task.done = Boolean(payload && payload.isDone);
       if (task.done) {
         task.complete = true;
+        task.messages = [];
+        removeQueued(task.id);
         task.completedAt = now();
         task.error = String((payload && payload.failed) || '').slice(0, 300);
         notify({
@@ -242,12 +281,18 @@
           notice: task.notice, meta: task.meta,
         });
       }
+      armWatchdog();
       return { ok: true };
     }
 
     function enqueueTask({ messages, meta }) {
       if (!Array.isArray(messages) || !messages.length) throw new Error('任务内容不能为空。');
-      if (queue.length >= MAX_QUEUE) throw new Error('待处理任务过多，请等待当前任务完成。');
+      const mismatch = providerMismatch(meta);
+      if (mismatch) throw new Error(mismatch);
+      reclaimStaleClaims();
+      if (Array.from(tasks.values()).filter(task => !task.complete).length >= MAX_QUEUE) {
+        throw new Error('待处理任务过多，请等待当前任务完成。');
+      }
       // Completed records are delivered already; drop the stale ones so a long
       // Zotero session does not accumulate every answer it ever produced.
       prune();
@@ -274,7 +319,7 @@
           return { type: 'text', text };
         }),
         meta: meta || {},
-        text: '', notice: '', done: false, complete: false, error: '', claimedAt: null, completedAt: 0,
+        text: '', notice: '', done: false, complete: false, error: '', queuedAt: now(), claimedAt: null, completedAt: 0,
       };
       tasks.set(id, task);
       queue.push(id);
@@ -288,6 +333,7 @@
           waiter.resolve({ task: { id: waiting.id, messages: waiting.messages } });
         }
       }
+      armWatchdog();
       return id;
     }
 
@@ -295,9 +341,16 @@
       const task = tasks.get(id);
       if (!task || task.complete) return;
       task.complete = true;
+      task.messages = [];
+      removeQueued(id);
       task.completedAt = now();
       task.error = String(message || '网页 AI 页面未能完成本次请求。').slice(0, 300);
       notify({ type: 'answer', id: task.id, text: task.text, done: true, error: task.error, meta: task.meta });
+      armWatchdog();
+    }
+
+    function cancelTask(id) {
+      failTask(id, '已取消本机等待；尚未领取的消息不会再发送，网页已发出的回答可能仍在生成。');
     }
 
     function failClaimedTasks(message) {
@@ -313,6 +366,8 @@
       queue.length = 0;
       tasks.clear();
       listeners.clear();
+      if (watchdog !== null) cancel(watchdog);
+      watchdog = null;
     }
 
     function subscribe(listener) {
@@ -329,7 +384,7 @@
 
     return {
       connect, disconnect, poll, update,
-      enqueueTask, failTask, subscribe, state, prune, destroy,
+      enqueueTask, failTask, cancelTask, subscribe, state, prune, destroy,
       _tasks: tasks, _queue: queue, _pollWaiters: pollWaiters,
     };
   }

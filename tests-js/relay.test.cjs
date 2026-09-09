@@ -271,3 +271,81 @@ test('enqueueTask preserves image messages and rejects oversized ones', () => {
     meta: {},
   }), /截图缺失或超过大小限制/);
 });
+
+function timedStore() {
+  let clock = 0;
+  let serial = 0;
+  const timers = new Map();
+  const store = relay.createRelayStore({
+    now: () => clock,
+    setTimeout: (fn, delay) => { const id = ++serial; timers.set(id, { fn, at: clock + delay }); return id; },
+    clearTimeout: id => timers.delete(id),
+  });
+  function advance(ms) {
+    clock += ms;
+    for (const [id, timer] of [...timers]) {
+      if (timer.at <= clock) { timers.delete(id); timer.fn(); }
+    }
+  }
+  return { store, advance, timers };
+}
+
+for (const claimed of [false, true]) {
+  test(`no browser activity: ${claimed ? 'claimed' : 'unclaimed'} task expires autonomously and frees queue`, async () => {
+    const { store, advance, timers } = timedStore();
+    connect(store);
+    const events = [];
+    store.subscribe(e => events.push(e));
+    const id = store.enqueueTask({ messages: [{ text: 'Q' }] });
+    if (claimed) await store.poll({ sessionSecret: SECRET }, 0);
+    advance(91000);
+    assert.ok(events.some(e => e.type === 'answer' && e.id === id && e.error));
+    assert.deepEqual(await store.poll({ sessionSecret: SECRET }, 0), {});
+    assert.equal(store._queue.length, 0);
+    assert.equal(timers.size, 0, 'no watchdog left without active work');
+    store.destroy();
+  });
+}
+
+test('autonomous timeout respects progress heartbeats and destroys all timers', async () => {
+  const { store, advance, timers } = timedStore();
+  connect(store);
+  const id = store.enqueueTask({ messages: [{ text: 'Q' }] });
+  await store.poll({ sessionSecret: SECRET }, 0);
+  advance(60000);
+  store.update({ sessionSecret: SECRET, id, text: 'partial' });
+  advance(60000);
+  assert.equal(store._tasks.get(id).complete, false);
+  advance(31000);
+  assert.equal(store._tasks.get(id).complete, true);
+  assert.equal(store._tasks.get(id).text, 'partial');
+  assert.equal(timers.size, 0);
+  store.enqueueTask({ messages: [{ text: 'next' }] });
+  store.destroy();
+  assert.equal(timers.size, 0);
+});
+
+test('cancelled navigation tasks cannot later be delivered to the browser', async () => {
+  const { store, timers } = timedStore();
+  connect(store);
+  const id = store.enqueueTask({ messages: [{ text: 'old paper' }] });
+  store.cancelTask(id);
+  store.cancelTask(id);
+  assert.equal(timers.size, 0);
+  assert.equal(store._queue.length, 0);
+  assert.deepEqual(await store.poll({ sessionSecret: SECRET }, 0), {});
+});
+
+test('selected provider must match the connected page, including late connections', async () => {
+  const { store } = makeStore();
+  connect(store); // Gemini
+  assert.throws(() => store.enqueueTask({ messages: [{ text: 'Q' }], meta: { provider: 'chatgpt' } }), /ChatGPT|chatgpt/);
+  store.disconnect({ sessionSecret: SECRET });
+  const id = store.enqueueTask({ messages: [{ text: 'Q' }], meta: { provider: 'chatgpt' } });
+  connect(store);
+  assert.deepEqual(await store.poll({ sessionSecret: SECRET }, 0), {});
+  assert.match(store._tasks.get(id).error, /打开网页/);
+  store.connect({ sessionSecret: SECRET, ai: 'AIStudio' });
+  const studio = store.enqueueTask({ messages: [{ text: 'Q' }], meta: { provider: 'aistudio' } });
+  assert.equal((await store.poll({ sessionSecret: SECRET }, 0)).task.id, studio);
+});

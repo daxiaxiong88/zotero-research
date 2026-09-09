@@ -201,6 +201,7 @@
       pendingTaskId: null,
       queueing: false,
       apiBusy: false,
+      imageReading: false,
       deepParsing: false,
       deepTimer: null,
       restoring: false,
@@ -215,6 +216,7 @@
     var sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
     // Pasted screenshot awaiting the next send: { dataUrl, mediaType, name }.
     var pendingImage = null;
+    var imageReadGeneration = 0;
     var MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
     function persistSession() {
@@ -561,7 +563,7 @@
 
     function renderControls() {
       var hasContext = Boolean(state.context && state.context.attachment_key);
-      var busy = state.restoring || state.deepParsing || state.queueing || Boolean(state.pendingTaskId) || state.apiBusy;
+      var busy = state.restoring || state.imageReading || state.deepParsing || state.queueing || Boolean(state.pendingTaskId) || state.apiBusy;
       Array.prototype.forEach.call(refs.quickActions.querySelectorAll('button'), function setQuickState(button) {
         button.disabled = !hasContext || busy;
         if (button.getAttribute('data-web-only') === 'true') button.hidden = isApiMode();
@@ -819,7 +821,7 @@
     }
 
     function sendMessage(message, options) {
-      if (destroyed || state.restoring || state.deepParsing || state.queueing || state.pendingTaskId || state.apiBusy) return;
+      if (destroyed || state.restoring || state.imageReading || state.deepParsing || state.queueing || state.pendingTaskId || state.apiBusy) return;
       if (!state.context || !state.context.attachment_key) {
         setError('请先在 Zotero 中打开一篇 PDF 文献。');
         return;
@@ -1031,6 +1033,7 @@
       if (apiAbort) request.signal = apiAbort.signal;
       Promise.resolve()
         .then(function loadAttachment() {
+          if (destroyed || generation !== contextGeneration) return null;
           if (!attachment) return null;
           return Promise.all([
             adapter.getAttachmentBase64(context.attachment_key),
@@ -1040,6 +1043,7 @@
           });
         })
         .then(function callModel(loaded) {
+          if (destroyed || generation !== contextGeneration) return null;
           if (loaded) request.attachment = loaded;
           return adapter.callModelAPI(request);
         })
@@ -1077,8 +1081,19 @@
       catch (error) { setError(text(error && error.message, '打开网页失败。')); }
     }
 
+    function cancelPendingRelayTask() {
+      var id = state.pendingTaskId;
+      state.pendingTaskId = null;
+      if (!id || typeof relayAdapter.cancelTask !== 'function') return;
+      var message = findAssistantMessage(id);
+      if (message) message.taskId = null;
+      try { relayAdapter.cancelTask(id); } catch (_) { /* timeout remains the fallback */ }
+    }
+
     function clearChat() {
       contextGeneration += 1;
+      resetDeepParseUI();
+      discardPendingImage();
       state.restoring = false;
       if (apiAbort) {
         try { apiAbort.abort(); } catch (_) { /* already settled */ }
@@ -1086,7 +1101,7 @@
       }
       state.queueing = false;
       state.apiBusy = false;
-      state.pendingTaskId = null;
+      cancelPendingRelayTask();
       state.messages = [];
       sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
       refs.webaiResume.hidden = true;
@@ -1132,6 +1147,15 @@
     }
 
     /** Manual MinerU deep parse of the current paper (long-running). */
+    function resetDeepParseUI() {
+      if (state.deepTimer !== null && typeof view.clearInterval === 'function') {
+        view.clearInterval(state.deepTimer);
+      }
+      state.deepTimer = null;
+      state.deepParsing = false;
+      if (refs.deepProgress) refs.deepProgress.hidden = true;
+    }
+
     function runDeepParse() {
       if (destroyed || state.deepParsing) return;
       if (!state.context || !state.context.attachment_key) {
@@ -1154,12 +1178,7 @@
       var current = 0;
       var total = 0;
       var stage = '';
-      function clearDeepTimer() {
-        if (state.deepTimer !== null && typeof view.clearInterval === 'function') {
-          view.clearInterval(state.deepTimer);
-        }
-        state.deepTimer = null;
-      }
+      var timer = null;
       function showProgress(label, fraction) {
         if (!refs.deepProgress) return;
         refs.deepProgress.hidden = false;
@@ -1176,13 +1195,14 @@
         return Math.max(0, Math.round((Date.now() - startedAt) / 1000));
       }
       function tick() {
+        if (destroyed || generation !== contextGeneration) return;
         var base = total > 0
           ? '解析中：第 ' + current + '/' + total + ' 页'
           : (stage || '加载模型与准备中');
         showProgress(base + ' · 已进行 ' + elapsedSeconds() + ' 秒', total > 0 ? current / total : null);
       }
-      clearDeepTimer();
-      if (typeof view.setInterval === 'function') state.deepTimer = view.setInterval(tick, 1000);
+      if (typeof view.setInterval === 'function') timer = view.setInterval(tick, 1000);
+      state.deepTimer = timer;
       tick();
       function onProgress(info) {
         if (destroyed || generation !== contextGeneration) return;
@@ -1202,7 +1222,10 @@
       }
 
       Promise.resolve()
-        .then(function parse() { return adapter.deepParseWithMineru(attachmentKey, onProgress); })
+        .then(function parse() {
+          if (destroyed || generation !== contextGeneration) return null;
+          return adapter.deepParseWithMineru(attachmentKey, onProgress);
+        })
         .then(function done(result) {
           if (destroyed || generation !== contextGeneration) return;
           var stats = result && result.stats ? result.stats : {};
@@ -1216,10 +1239,11 @@
           setStatus('');
         })
         .finally(function settled() {
-          clearDeepTimer();
-          if (refs.deepProgress) refs.deepProgress.hidden = true;
+          // A departed paper may finish after the next paper starts parsing.
+          // Release only this task's timer; never clear the new task's UI.
+          if (timer !== null && typeof view.clearInterval === 'function') view.clearInterval(timer);
           if (destroyed || generation !== contextGeneration) return;
-          state.deepParsing = false;
+          resetDeepParseUI();
           renderControls();
         });
     }
@@ -1302,7 +1326,7 @@
 
     /** Ctrl+V with an image in the clipboard attaches it to the next send. */
     function onPaste(event) {
-      if (destroyed) return;
+      if (destroyed || state.restoring || state.deepParsing || state.queueing || state.pendingTaskId || state.apiBusy) return;
       var clipboard = event.clipboardData;
       var items = clipboard && clipboard.items;
       if (!items || !items.length) return;
@@ -1320,7 +1344,13 @@
         }
         var FileReaderCtor = view.FileReader || FileReader;
         var reader = new FileReaderCtor();
+        var imageGeneration = ++imageReadGeneration;
+        state.imageReading = true;
+        setStatus('正在读取截图…');
+        renderControls();
         reader.onload = function loaded() {
+          if (destroyed || imageGeneration !== imageReadGeneration) return;
+          state.imageReading = false;
           pendingImage = {
             dataUrl: String(reader.result || ''),
             mediaType: mediaType,
@@ -1328,10 +1358,17 @@
           };
           setError('');
           renderImageChip();
+          renderControls();
           setStatus('已附截图（' + pendingImage.name + '），将随下一条消息发送。');
         };
-        reader.onerror = function failed() { setError('读取剪贴板图片失败。'); };
-        reader.readAsDataURL(file);
+        reader.onerror = function failed() {
+          if (destroyed || imageGeneration !== imageReadGeneration) return;
+          state.imageReading = false;
+          renderControls();
+          setStatus('');
+          setError('读取剪贴板图片失败。');
+        };
+        try { reader.readAsDataURL(file); } catch (_) { reader.onerror(); }
         return;
       }
     }
@@ -1344,9 +1381,16 @@
         : '');
     }
 
-    function removePendingImage() {
+    function discardPendingImage() {
+      imageReadGeneration += 1;
+      state.imageReading = false;
       pendingImage = null;
       renderImageChip();
+    }
+
+    function removePendingImage() {
+      discardPendingImage();
+      renderControls();
       setStatus('已移除截图。');
     }
 
@@ -1429,7 +1473,6 @@
 
     return {
       setContext(nextContext) {
-        var previousKey = state.context ? state.context.item_key : null;
         var changed = !state.context || !nextContext
           || state.context.item_key !== nextContext.item_key
           || state.context.attachment_key !== nextContext.attachment_key;
@@ -1443,6 +1486,8 @@
         else if (!state.selection || state.selection.attachment_key !== state.context.attachment_key) state.selection = null;
         if (changed) {
           contextGeneration += 1;
+          resetDeepParseUI();
+          discardPendingImage();
           state.restoring = false;
           if (apiAbort) {
             try { apiAbort.abort(); } catch (_) { /* already settled */ }
@@ -1450,11 +1495,11 @@
           }
           state.apiBusy = false;
           state.queueing = false;
-          state.pendingTaskId = null;
+          cancelPendingRelayTask();
           state.messages = [];
           sessionMeta = { aiUrl: '', provider: '', updatedAt: '' };
           refs.webaiResume.hidden = true;
-          if (state.context && state.context.item_key && state.context.item_key !== previousKey) {
+          if (state.context && state.context.item_key) {
             restoreSession(state.context.item_key);
           }
         }
@@ -1468,11 +1513,10 @@
       },
       focusQuestion() { refs.chatInput.focus(); },
       destroy() {
-        if (state.deepTimer !== null && typeof view.clearInterval === 'function') {
-          view.clearInterval(state.deepTimer);
-        }
-        state.deepTimer = null;
+        resetDeepParseUI();
+        discardPendingImage();
         destroyed = true;
+        cancelPendingRelayTask();
         if (apiAbort) {
           try { apiAbort.abort(); } catch (_) { /* already settled */ }
           apiAbort = null;
