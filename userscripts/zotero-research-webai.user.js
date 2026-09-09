@@ -80,20 +80,67 @@
    */
   function stripChatGPTInternalCitations(value) {
     let text = String(value ?? '');
-    if (!/(?:filecite|felicite|(?:turn|return)\d+file\d+)/i.test(text)) return text;
+    if (!/(?:filecite|felicite|\bcite\b|(?:turn|return)\d+file\d+)/i.test(text)) return text;
+    const pua = '[\\uE000-\\uF8FF]';
+    const marker = '(?:filecite|felicite|cite)';
+    const reference = '(?:turn|return)\\d+file\\d+';
+    const lineReference = `(?:${pua}*(?:\\s+)?L\\d+(?:-L\\d+)?)?`;
+    // Complete protocol markers may use private-use delimiters between every
+    // component. Consume only the delimiters directly attached to a marker;
+    // ordinary private-use characters elsewhere are answer text and survive.
     text = text.replace(
-      /[\uE000-\uF8FF]*(?:filecite|felicite|cite)[\uE000-\uF8FF]*(?:turn|return)\d+file\d+(?:[\uE000-\uF8FF]*L\d+(?:-L\d+)?)?[\uE000-\uF8FF]*/gi,
+      new RegExp(`${pua}*\\b${marker}\\b${pua}*${reference}${lineReference}${pua}*`, 'gi'),
       '',
     );
     // A failed/older decode can leave the same marker without private-use
     // delimiters. Handle that representation too.
     text = text.replace(
-      /(?:\b(?:filecite|felicite)\b|\bcite\b)\s*(?:turn|return)\d+file\d+(?:\s+L\d+(?:-L\d+)?)?/gi,
+      new RegExp(`\\b${marker}\\b\\s*${reference}${lineReference}`, 'gi'),
       '',
     );
-    // Do not let a malformed marker leave its invisible protocol glyphs in
-    // the answer after the citation-shaped pass above.
-    return text.replace(/[\uE000-\uF8FF]/g, '');
+    // Keep the same narrow rule for a plain-text token whose file number is
+    // still incomplete (for example, `filecite turn0file`).
+    text = text.replace(
+      /\b(?:filecite|felicite)\b\s*(?:turn|return)\d+file\d*(?![A-Za-z0-9])/gi,
+      '',
+    );
+    // Streaming can expose a protocol token before its reference is complete.
+    // Only a PUA-delimited marker is strong evidence here; do not remove a
+    // normal prose word such as "cite" merely because it is incomplete.
+    text = text.replace(
+      new RegExp(`${pua}+(?:filecite|felicite|cite)(?:${pua}+(?:(?:turn|return)\\d*file\\d*)?)?${pua}*`, 'gi'),
+      '',
+    );
+    return text;
+  }
+
+  function chatGPTSnapshotText(message) {
+    if ((!message?.author?.role || message.author.role === 'assistant')
+      && message?.content?.content_type === 'text'
+      && Array.isArray(message.content.parts)) {
+      return message.content.parts.filter((part) => typeof part === 'string').join('\n');
+    }
+    return null;
+  }
+
+  function chatGPTFrameDone(data, message) {
+    const statuses = [data?.status, message?.status]
+      .map((value) => String(value || '').toLowerCase());
+    const types = [data?.type, data?.event]
+      .map((value) => String(value || '').toLowerCase());
+    const stopReason = String(data?.delta?.stop_reason ?? data?.stop_reason ?? '').toLowerCase();
+    return data?.done === true || data?.complete === true || data?.completed === true
+      || data?.is_done === true || message?.end_turn === true
+      || statuses.some((status) => ['finished_successfully', 'finished', 'finished_partial', 'complete', 'completed', 'done', 'stopped', 'cancelled', 'failed', 'error'].includes(status))
+      || types.some((type) => ['done', 'complete', 'completed', 'message_stop', 'response.completed'].includes(type))
+      || ['end_turn', 'stop'].includes(stopReason);
+  }
+
+  function chatGPTPatchValue(patch) {
+    const value = Object.prototype.hasOwnProperty.call(patch || {}, 'v') ? patch.v : patch?.value;
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.filter((part) => typeof part === 'string').join('\n');
+    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -108,17 +155,20 @@
       const data = parseJson(payload);
       if (!data) continue;
       const message = data.message;
-      if ((!message?.author?.role || message.author.role === 'assistant')
-        && message?.content?.content_type === 'text') {
-        if (Array.isArray(message.content.parts)) {
-          response = message.content.parts.filter((part) => typeof part === 'string').join('\n');
-        }
-        if (message.status === 'finished_successfully') done = true;
-        continue;
-      }
-      for (const patch of Array.isArray(data.v) ? data.v : [data]) {
-        if (patch?.p === '/message/content/parts/0' && typeof patch.v === 'string') response += patch.v;
-        else if (patch?.path === '/message/content/parts/0' && typeof patch.value === 'string') response += patch.value;
+      const snapshot = chatGPTSnapshotText(message);
+      if (snapshot !== null) response = mergeStreamText(response, snapshot);
+      if (chatGPTFrameDone(data, message)) done = true;
+      const patches = Array.isArray(data.v)
+        ? data.v : (data.p || data.path ? [data] : []);
+      for (const patch of patches) {
+        const path = patch?.p ?? patch?.path;
+        if (path !== '/message/content/parts/0') continue;
+        const value = chatGPTPatchValue(patch);
+        if (value === null) continue;
+        const operation = String(patch?.o ?? patch?.op ?? '').toLowerCase();
+        if (operation === 'remove' || operation === 'delete') response = '';
+        else if (operation === 'replace' || operation === 'set' || operation === 'snapshot') response = value;
+        else response = mergeStreamText(response, value);
       }
     }
     return { text: stripChatGPTInternalCitations(response), done };
@@ -355,7 +405,7 @@
         const connector = this.connector;
         if (!connector.isRunning || connector.currentTaskId !== taskId
           || connector.doneSignal || !connector.accumulatedText) return;
-        connector.onNewData(connector.accumulatedText, true);
+        connector.onNewData(connector.accumulatedText, true, 'network');
       });
     }
 
@@ -374,11 +424,11 @@
       if (!outputConfig?.parser) return;
       const parsed = this.parseOutput(outputConfig, allText);
       if (parsed.text) {
-        this.connector.onNewData(parsed.text, parsed.done);
+        this.connector.onNewData(parsed.text, parsed.done, 'network');
         if (parsed.done || parsed.waitingForResponse) this.clearIdle();
         else this.scheduleIdle(taskId);
       } else if (parsed.done && this.connector.accumulatedText) {
-        this.connector.onNewData(this.connector.accumulatedText, true);
+        this.connector.onNewData(this.connector.accumulatedText, true, 'network');
       }
     }
 
@@ -517,6 +567,7 @@
       this.isRunning = false;
       this.currentTaskId = null;
       this.accumulatedText = '';
+      this.lastDataSource = null;
       this.doneSignal = false;
       this.isSendingUpdate = false;
       this.hasPendingData = false;
@@ -698,6 +749,7 @@
       this.currentTaskId = null;
       this.doneSignal = false;
       this.accumulatedText = '';
+      this.lastDataSource = null;
       this.hasPendingData = false;
       this.awaitingManualSend = false;
       this.manualBaseline = null;
@@ -706,7 +758,7 @@
       this.stopDomWatcher();
     }
 
-    onNewData(text, isDone) {
+    onNewData(text, isDone, source = 'unknown') {
       if (!this.isRunning) return;
       const rawText = String(text || '');
       // Network parsing and visible-DOM fallback converge here. Keep the
@@ -714,10 +766,21 @@
       // recovered ChatGPT turn bypasses parseChatGPT and leaks filecite tags.
       const nextText = this.config.name === 'ChatGPT'
         ? stripChatGPTInternalCitations(rawText) : rawText;
+      const networkData = source === 'network';
+      if (networkData && this.config.output?.type === 'network') this.stopDomWatcher();
+      // Network SSE is authoritative when it has already yielded a longer
+      // answer. A visible-DOM fallback can briefly expose the previous or a
+      // truncated turn; never let that shorter snapshot erase received text.
+      const stableText = networkData && this.lastDataSource !== 'network'
+        ? (nextText || this.accumulatedText)
+        : (nextText.length < this.accumulatedText.length
+          ? this.accumulatedText : (nextText || this.accumulatedText));
       const nextDone = Boolean(isDone);
-      if (nextText === this.accumulatedText && nextDone === this.doneSignal) return;
+      if (stableText === this.accumulatedText && nextDone === this.doneSignal) return;
       this.clearManualFallback();
-      this.accumulatedText = nextText;
+      this.accumulatedText = stableText;
+      if (networkData) this.lastDataSource = 'network';
+      else if (source === 'dom' && this.lastDataSource !== 'network') this.lastDataSource = 'dom';
       if (nextDone) {
         this.doneSignal = true;
         if (this.taskStartedAt) {
@@ -1025,14 +1088,16 @@
     composerWatchScope() {
       const input = this.findUsable(this.config.input.text.selector)
         || document.querySelector('textarea, [contenteditable="true"]');
-      return (input && (input.closest('form, [class*="chat" i], [class*="composer" i], [class*="input" i]')
-        || input.parentElement)) || document.body;
+      const fileInput = this.pickFileInput();
+      const anchor = input || fileInput;
+      return (anchor && (anchor.closest('form, [class*="chat" i], [class*="composer" i], [class*="input" i]')
+        || anchor.parentElement)) || document.body;
     }
 
     /**
      * A file-bearing event makes the site mutate the composer (attachment
-     * chip, progress bar, class toggles). Class-name probes miss most of
-     * those, so watch the DOM itself during the delivery window.
+     * chip, progress bar, preview URL or test-id). Class-name probes miss
+     * most of those, so watch relevant DOM changes during the delivery window.
      */
     startMutationWatch() {
       if (typeof MutationObserver !== 'function') {
@@ -1041,13 +1106,20 @@
         return inert;
       }
       let mutated = false;
-      const observer = new MutationObserver(() => { mutated = true; });
+      const observer = new MutationObserver((records) => {
+        if (records.some((record) => (record.type === 'childList'
+          && (record.addedNodes.length || record.removedNodes.length))
+          || (record.type === 'attributes'
+            && ['src', 'data-testid'].includes(record.attributeName)))) {
+          mutated = true;
+        }
+      });
       try {
         observer.observe(this.composerWatchScope(), {
           childList: true,
           subtree: true,
           attributes: true,
-          attributeFilter: ['class', 'src', 'data-testid', 'hidden'],
+          attributeFilter: ['src', 'data-testid'],
         });
       } catch (_) {
         const inert = () => false;
@@ -1070,47 +1142,49 @@
       if (!transfer) return null;
       const before = this.attachmentSnapshot();
       const stopWatch = this.startMutationWatch();
+      try {
+        const fileInput = this.pickFileInput();
+        if (fileInput) {
+          try {
+            fileInput.files = transfer.files;
+            fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+            fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+            if (await this.waitRegistered(before, 2600, stopWatch)) return 'file-input';
+            console.warn('[Zotero relay] file-input channel not confirmed');
+          } catch (error) {
+            console.warn('[Zotero relay] file-input channel failed', error);
+          }
+        }
 
-      const fileInput = this.pickFileInput();
-      if (fileInput) {
-        try {
-          fileInput.files = transfer.files;
-          fileInput.dispatchEvent(new Event('input', { bubbles: true }));
-          fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-          if (await this.waitRegistered(before, 2600, stopWatch)) return 'file-input';
-          console.warn('[Zotero relay] file-input channel not confirmed');
-        } catch (error) {
-          console.warn('[Zotero relay] file-input channel failed', error);
+        const input = this.findUsable(this.config.input.text.selector)
+          || document.querySelector(this.config.input.text.selector)
+          // Site redesign fallback: any visible composer still accepts drops.
+          || document.querySelector('textarea, [contenteditable="true"]');
+        if (input) {
+          input.focus();
+          try {
+            input.dispatchEvent(new ClipboardEvent('paste', {
+              bubbles: true, cancelable: true, clipboardData: transfer,
+            }));
+            if (await this.waitRegistered(before, 2600, stopWatch)) return 'paste';
+            console.warn('[Zotero relay] paste channel not confirmed');
+          } catch (error) {
+            console.warn('[Zotero relay] paste channel failed', error);
+          }
+          try {
+            input.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+            input.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+            input.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+            if (await this.waitRegistered(before, 2600, stopWatch)) return 'drop';
+            console.warn('[Zotero relay] drop channel not confirmed');
+          } catch (error) {
+            console.warn('[Zotero relay] drop channel failed', error);
+          }
         }
+        return null;
+      } finally {
+        stopWatch.stop();
       }
-
-      const input = this.findUsable(this.config.input.text.selector)
-        || document.querySelector(this.config.input.text.selector)
-        // Site redesign fallback: any visible composer still accepts drops.
-        || document.querySelector('textarea, [contenteditable="true"]');
-      if (input) {
-        input.focus();
-        try {
-          input.dispatchEvent(new ClipboardEvent('paste', {
-            bubbles: true, cancelable: true, clipboardData: transfer,
-          }));
-          if (await this.waitRegistered(before, 2600, stopWatch)) return 'paste';
-          console.warn('[Zotero relay] paste channel not confirmed');
-        } catch (error) {
-          console.warn('[Zotero relay] paste channel failed', error);
-        }
-        try {
-          input.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: transfer }));
-          input.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer }));
-          input.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
-          if (await this.waitRegistered(before, 2600, stopWatch)) return 'drop';
-          console.warn('[Zotero relay] drop channel not confirmed');
-        } catch (error) {
-          console.warn('[Zotero relay] drop channel failed', error);
-        }
-      }
-      stopWatch.stop();
-      return null;
     }
 
     /** Prefer an input accepting images; any file input beats none. */
@@ -1198,7 +1272,7 @@
     }
 
     conversationAdvanced(baseline) {
-      if (!baseline?.count && !baseline?.last) return false;
+      if (!baseline) return false;
       let messages;
       try { messages = [...document.querySelectorAll(this.config.input.message)]; } catch { return false; }
       const last = messages.at(-1) || null;
@@ -1221,13 +1295,12 @@
 
     /**
      * A submitted turn can be acknowledged before its first response section
-     * is mounted. ChatGPT changes the submit control to a disabled/stop state
-     * during that gap; treat that local state as send confirmation instead of
-     * asking the user to send the already accepted image again.
+     * is mounted. A stop/cancel label is a positive state transition; a bare
+     * disabled flag is not, because sites also disable controls before send
+     * and while a click is being processed.
      */
     sendButtonAccepted(button) {
       if (!button) return false;
-      if (button.disabled || button.getAttribute('aria-disabled') === 'true') return true;
       const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
         .filter(Boolean).join(' ');
       return /stop(?:ping| generating| streaming)?|cancel(?: generation| response)?|停止(?:生成|回答|响应)?|终止(?:生成|回答|响应)?/i.test(label);
@@ -1244,12 +1317,22 @@
       this.killPoll();
       this.isSendingUpdate = true;
       const inputConfig = this.config.input.text;
-      const inputEmpty = () => {
+      let inputWasNonEmpty = false;
+      const initialInput = this.findUsable(inputConfig?.selector || '')
+        || document.querySelector(inputConfig?.selector || '');
+      if (this.readText(initialInput).trim()) inputWasNonEmpty = true;
+      const inputWasCleared = () => {
         const input = this.findUsable(inputConfig?.selector || '');
-        return !input || !this.readText(input).trim();
+        const value = input ? this.readText(input).trim() : '';
+        if (value) {
+          inputWasNonEmpty = true;
+          return false;
+        }
+        return inputWasNonEmpty;
       };
       const sendConfirmed = (button = null) => this.conversationAdvanced(baseline)
-        || Boolean(this.accumulatedText) || inputEmpty() || this.sendButtonAccepted(button);
+        || Boolean(this.accumulatedText) || inputWasCleared()
+        || this.sendButtonAccepted(button) || this.hasStreamingControl();
       let sentButton = null;
       if (typeof send === 'string') {
         const ready = await this.waitForCondition(() => {
@@ -1258,7 +1341,7 @@
           return button ? { button } : null;
         }, SEND_BUTTON_WAIT_MS);
         if (ready?.manual) {
-          this.manualBaseline = this.captureBaseline(messageSelector);
+          this.manualBaseline = baseline;
           this.awaitingManualSend = true;
           this.startDomWatcher();
           return true;
@@ -1266,7 +1349,7 @@
         const button = ready?.button;
         sentButton = button;
         if (!button) {
-          this.manualBaseline = this.captureBaseline(messageSelector);
+          this.manualBaseline = baseline;
           this.awaitingManualSend = true;
           this.startDomWatcher();
           setStatus('30 秒未找到发送按钮；请手动发送');
@@ -1277,14 +1360,10 @@
         // setTimeout to >=1s, so a 25x100ms loop would stretch to 25s and the
         // send would visibly fire only when the tab regains focus.
         setStatus('正在输入并发送…');
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          button.click();
-          await this.waitForValue(() => (sendConfirmed(button) ? true : null), 2500);
-          if (sendConfirmed(button)) break;
-          // One retry: the first click can land before the page re-enables.
-        }
+        button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        button.click();
+        await this.waitForValue(() => (sendConfirmed(button) ? true : null), 2500);
       } else {
         await this.waitForValue(() => (sendConfirmed() ? true : null), 3000);
       }
@@ -1297,7 +1376,7 @@
       }
       // Click never registered. Surface it in the sidebar, then watch for a
       // manual send as the recovery path.
-      this.manualBaseline = this.captureBaseline(messageSelector);
+      this.manualBaseline = baseline;
       this.awaitingManualSend = true;
       this.startDomWatcher();
       setStatus('未能自动发送；请手动点击发送按钮');
@@ -1354,12 +1433,12 @@
           }
           if (!result || typeof result.text !== 'string') return;
           if (result.isDone) {
-            if (result.text.length > lastLength) { stableCycles = 0; this.onNewData(result.text, false); }
-            else if (++stableCycles >= 5) { this.onNewData(result.text, true); this.stopDomWatcher(); }
-            else this.onNewData(result.text, false);
+            if (result.text.length > lastLength) { stableCycles = 0; this.onNewData(result.text, false, 'dom'); }
+            else if (++stableCycles >= 5) { this.onNewData(result.text, true, 'dom'); this.stopDomWatcher(); }
+            else this.onNewData(result.text, false, 'dom');
           } else {
             stableCycles = 0;
-            this.onNewData(result.text, false);
+            this.onNewData(result.text, false, 'dom');
           }
           lastLength = result.text.length;
         } finally {
@@ -1488,6 +1567,7 @@
     globalThis.__ZRA_TEST__.parseClaude = parseClaude;
     globalThis.__ZRA_TEST__.parseAIStudio = parseAIStudio;
     globalThis.__ZRA_TEST__.mergeStreamText = mergeStreamText;
+    globalThis.__ZRA_TEST__.stripChatGPTInternalCitations = stripChatGPTInternalCitations;
     globalThis.__ZRA_TEST__.siteConfig = siteConfig;
     globalThis.__ZRA_TEST__.connector = connector;
   }

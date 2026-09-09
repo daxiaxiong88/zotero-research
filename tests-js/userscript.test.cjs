@@ -9,8 +9,8 @@ const SOURCE = fs.readFileSync(
   'utf8',
 );
 
-function setup(url = 'https://gemini.google.com/app') {
-  const dom = new JSDOM('<!doctype html><body></body>', {
+function setup(url = 'https://gemini.google.com/app', html = '<!doctype html><body></body>') {
+  const dom = new JSDOM(html, {
     url,
     runScripts: 'outside-only',
     pretendToBeVisual: true,
@@ -24,6 +24,8 @@ function setup(url = 'https://gemini.google.com/app') {
   dom.window.GM_xmlhttpRequest = () => ({ abort: () => {} });
   dom.window.GM_info = { script: { version: 'test' } };
   dom.window.unsafeWindow = dom.window;
+  dom.window.TextDecoder = TextDecoder;
+  dom.window.TextEncoder = TextEncoder;
   // Parser-only fixtures do not run browser lifecycle timers.
   dom.window.setInterval = () => 0;
   // jsdom lacks DataTransfer; the userscript only needs files/items here.
@@ -37,6 +39,7 @@ function setup(url = 'https://gemini.google.com/app') {
     constructor(type, init) { super(type, init); this.clipboardData = init && init.clipboardData; }
   };
   dom.window.eval(SOURCE);
+  dom.window.__ZRA_TEST__.window = dom.window;
   return dom.window.__ZRA_TEST__;
 }
 
@@ -71,6 +74,46 @@ test('parseChatGPT assembles SSE deltas and honors [DONE]', () => {
   assert.equal(parsed.done, true);
 });
 
+test('parseChatGPT keeps a longer snapshot when a later frame is truncated', () => {
+  const api = setup('https://chatgpt.com/');
+  const raw = [
+    `data: ${JSON.stringify({
+      message: {
+        author: { role: 'assistant' },
+        content: { content_type: 'text', parts: ['完整回答第一段\n第二段及结尾'] },
+        status: 'in_progress',
+      },
+    })}`,
+    `data: ${JSON.stringify({
+      message: {
+        author: { role: 'assistant' },
+        content: { content_type: 'text', parts: ['完整回答第一段'] },
+        status: 'in_progress',
+      },
+    })}`,
+    'data: [DONE]',
+    '',
+  ].join('\n');
+
+  const parsed = api.parseChatGPT(raw);
+  assert.equal(parsed.text, '完整回答第一段\n第二段及结尾');
+  assert.equal(parsed.done, true);
+});
+
+test('parseChatGPT applies replace and append patch operations', () => {
+  const api = setup('https://chatgpt.com/');
+  const raw = [
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'replace', v: '替换后的正文' }] })}`,
+    `data: ${JSON.stringify({ v: [{ p: '/message/content/parts/0', o: 'append', v: '，还有结尾' }] })}`,
+    `data: ${JSON.stringify({ done: true })}`,
+    '',
+  ].join('\n');
+
+  const parsed = api.parseChatGPT(raw);
+  assert.equal(parsed.text, '替换后的正文，还有结尾');
+  assert.equal(parsed.done, true);
+});
+
 test('parseChatGPT removes internal citation markers from the visible answer', () => {
   const api = setup();
   const puaStart = String.fromCodePoint(0xE200);
@@ -97,6 +140,26 @@ test('parseChatGPT removes internal citation markers from the visible answer', (
   const parsed = api.parseChatGPT(raw);
   assert.equal(parsed.text, '先看结论，然后说明。');
   assert.doesNotMatch(parsed.text, /filecite|felicite|return0file0|turn0file0/);
+});
+
+test('ChatGPT citation cleanup preserves unrelated PUA and removes incomplete markers', () => {
+  const api = setup('https://chatgpt.com/');
+  const puaStart = String.fromCodePoint(0xE200);
+  const puaSeparator = String.fromCodePoint(0xE202);
+  const puaEnd = String.fromCodePoint(0xE201);
+  const ordinaryPua = String.fromCodePoint(0xE900);
+  const marker = `${puaStart}filecite${puaSeparator}turn0file0${puaEnd}`;
+
+  assert.equal(
+    api.stripChatGPTInternalCitations(`前${ordinaryPua}中${marker}后`),
+    `前${ordinaryPua}中后`,
+  );
+  assert.equal(
+    api.stripChatGPTInternalCitations(`前${puaStart}filecite${puaSeparator}turn0file后`),
+    '前后',
+  );
+  assert.equal(api.stripChatGPTInternalCitations('前filecite turn0file后'), '前后');
+  assert.equal(api.stripChatGPTInternalCitations('普通 cite 文字'), '普通 cite 文字');
 });
 
 test('ChatGPT common relay boundary also removes citations from DOM fallback text', () => {
@@ -171,6 +234,62 @@ test('mergeStreamText handles delta and cumulative frames without duplication', 
   assert.equal(api.mergeStreamText('abc', 'abcdef'), 'abcdef');
   assert.equal(api.mergeStreamText('abcdef', 'abc'), 'abcdef');
   assert.equal(api.mergeStreamText('abc', 'def'), 'abcdef');
+});
+
+test('network fallback does not replace a complete SSE answer with a shorter DOM snapshot', () => {
+  const api = setup('https://chatgpt.com/');
+  const connector = api.connector;
+  connector.isRunning = true;
+  connector.onNewData('SSE 完整回答，后面还有很多内容。', false);
+  connector.onNewData('DOM 旧回答', false);
+  connector.onNewData('', true);
+  assert.equal(connector.accumulatedText, 'SSE 完整回答，后面还有很多内容。');
+  assert.equal(connector.doneSignal, true);
+});
+
+test('network data wins over stale DOM fallback even when the DOM text is longer', () => {
+  const api = setup('https://chatgpt.com/');
+  const connector = api.connector;
+  connector.isRunning = true;
+  connector.onNewData('DOM 上一轮很长的旧回答。', false, 'dom');
+  connector.onNewData('SSE 当前回答', false, 'network');
+  connector.onNewData('DOM 截断', false, 'dom');
+  assert.equal(connector.accumulatedText, 'SSE 当前回答');
+  api.window.close();
+});
+
+test('network readStream preserves UTF-8 when a code point crosses chunks', async (t) => {
+  const api = setup('https://chatgpt.com/');
+  const connector = api.connector;
+  connector.isRunning = true;
+  connector.currentTaskId = 'utf8-task';
+  const body = [
+    `data: ${JSON.stringify({
+      message: {
+        author: { role: 'assistant' },
+        content: { content_type: 'text', parts: ['跨境'] },
+        status: 'finished_successfully',
+      },
+    })}`,
+    'data: [DONE]',
+    '',
+  ].join('\n');
+  const bytes = new TextEncoder().encode(body);
+  const splitAt = new TextEncoder().encode(body.slice(0, body.indexOf('跨'))).length + 1;
+  const chunks = [bytes.slice(0, splitAt), bytes.slice(splitAt)];
+  let index = 0;
+  await connector.proxy.readStream({
+    getReader() {
+      return {
+        async read() {
+          if (index >= chunks.length) return { done: true, value: undefined };
+          return { done: false, value: chunks[index++] };
+        },
+      };
+    },
+  }, 'utf8-task');
+  assert.equal(connector.accumulatedText, '跨境');
+  t.after(() => api.window.close());
 });
 
 function browserHarness({ respond, initialLock } = {}) {
@@ -378,6 +497,18 @@ test('投递图片后 composer 出现 DOM 变动即视为已确认，无需匹�
   const connector = dom.window.__ZRA_TEST__.connector;
   assert.ok(connector, 'connector exported');
 
+  let stopCalls = 0;
+  const originalStartMutationWatch = connector.startMutationWatch.bind(connector);
+  connector.startMutationWatch = (...args) => {
+    const signal = originalStartMutationWatch(...args);
+    const originalStop = signal.stop;
+    signal.stop = () => {
+      stopCalls += 1;
+      return originalStop();
+    };
+    return signal;
+  };
+
   // Paste handler registers nothing the class-name probes can see; it just
   // inserts a neutral node — exactly the false-negative this fix removes.
   const composer = dom.window.document.getElementById('composer');
@@ -391,6 +522,24 @@ test('投递图片后 composer 出现 DOM 变动即视为已确认，无需匹�
     { data: Buffer.from('fakepng').toString('base64'), mediaType: 'image/png' },
   ]);
   assert.equal(channel, 'paste', 'DOM mutation alone confirms the channel');
+  assert.equal(stopCalls, 1, 'successful confirmation disconnects the observer');
+});
+
+test('图片确认忽略 body 和 composer 的 class 动画变动', async () => {
+  const api = setup(
+    'https://gemini.google.com/app',
+    '<!doctype html><body><div id="composer"><textarea id="t"></textarea></div></body>',
+  );
+  const connector = api.connector;
+  const body = api.window.document.body;
+  const composer = api.window.document.getElementById('composer');
+  const signal = connector.startMutationWatch();
+  body.classList.add('page-animation');
+  composer.classList.add('upload-animation');
+  await new Promise((resolve) => api.window.setTimeout(resolve, 0));
+  assert.equal(signal(), false, 'class-only animation is not an upload acknowledgement');
+  signal.stop();
+  api.window.close();
 });
 
 test('ChatGPT enters generating state before the response section appears', async (t) => {
@@ -430,4 +579,45 @@ test('ChatGPT enters generating state before the response section appears', asyn
   const sent = await connector.handleSend('#composer-submit-button', '#main section');
   assert.equal(sent, true);
   assert.equal(connector.awaitingManualSend, false, 'accepted send must not enter manual fallback');
+});
+
+test('disabled send control alone does not count as sent and never retries into cancel', async (t) => {
+  const api = setup(
+    'https://chatgpt.com/',
+    '<!doctype html><body><main id="main"></main>'
+      + '<textarea id="prompt-textarea">问题</textarea>'
+      + '<button id="composer-submit-button" type="button">发送</button></body>',
+  );
+  const connector = api.connector;
+  const input = api.window.document.getElementById('prompt-textarea');
+  const button = api.window.document.getElementById('composer-submit-button');
+  input.getBoundingClientRect = () => ({ width: 300, height: 40 });
+  button.getBoundingClientRect = () => ({ width: 80, height: 32 });
+  let clicks = 0;
+  button.addEventListener('click', () => {
+    clicks += 1;
+    button.disabled = true;
+  });
+  connector.waitForValue = async (check) => check() || null;
+  connector.notifySidebar = async () => {};
+
+  const sent = await connector.handleSend('#composer-submit-button', '#main section');
+  assert.equal(sent, true, 'manual fallback keeps the task alive');
+  assert.equal(clicks, 1, 'an uncertain click is not retried as a possible cancel');
+  assert.equal(connector.awaitingManualSend, true);
+  t.after(() => api.window.close());
+});
+
+test('empty message baseline needs a real conversation advance', () => {
+  const api = setup(
+    'https://chatgpt.com/',
+    '<!doctype html><body><main id="main"></main></body>',
+  );
+  const connector = api.connector;
+  const baseline = connector.captureBaseline('#main section');
+  assert.equal(connector.conversationAdvanced(baseline), false);
+  const section = api.window.document.createElement('section');
+  api.window.document.getElementById('main').appendChild(section);
+  assert.equal(connector.conversationAdvanced(baseline), true);
+  api.window.close();
 });
