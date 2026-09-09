@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import json
@@ -118,15 +119,20 @@ def build_addon(
     target_version = manifest["version"]
     assert isinstance(target_version, str)
     candidate = _select_previous_release(output_path, target_version)
-    _write_xpi_atomically(output_path, file_bytes)
-
-    digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
     sha256_path = output_path.with_name(output_path.name + ".sha256")
-    _write_text_atomically(sha256_path, f"{digest}  {output_path.name}\n")
-
     manifest_path = output_path.with_name(output_path.name + ".manifest.json")
-    inventory = _inventory_for_manifest(manifest, file_bytes)
-    _write_text_atomically(manifest_path, _json_text(inventory))
+    original_artifacts = _snapshot_artifacts((output_path, sha256_path, manifest_path))
+    try:
+        _write_xpi_atomically(output_path, file_bytes)
+
+        digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
+        _write_text_atomically(sha256_path, f"{digest}  {output_path.name}\n")
+
+        inventory = _inventory_for_manifest(manifest, file_bytes)
+        _write_text_atomically(manifest_path, _json_text(inventory))
+    except Exception:
+        _restore_artifacts(original_artifacts)
+        raise
     if candidate is not None:
         _promote_previous_release(output_path, candidate)
     return PackageResult(
@@ -167,9 +173,10 @@ def _promote_previous_release(
 def _select_previous_release(output_path: Path, target_version: str) -> _ReleaseCandidate | None:
     """Find the highest valid release below ``target_version``.
 
-    File names, mtimes, and sidecars are not release identity. Each XPI is
-    inspected directly and only a package with the expected addon id and a
-    numerically lower manifest version can be selected.
+    File names, mtimes, and sidecars are not release identity. Each XPI,
+    including an existing rollback slot, is inspected directly; only a
+    package with the expected addon id and a numerically lower manifest
+    version can be selected.
     """
 
     target_key = _version_key(target_version)
@@ -180,20 +187,33 @@ def _select_previous_release(output_path: Path, target_version: str) -> _Release
         return None
 
     candidates: list[_ReleaseCandidate] = []
-    for path in sorted(output_dir.glob("*.xpi"), key=lambda value: value.name):
+    candidate_paths = [
+        output_dir / PREVIOUS_STABLE_NAME,
+        *sorted(output_dir.glob("*.xpi"), key=lambda value: value.name),
+    ]
+    seen_paths: set[Path] = set()
+    for path in candidate_paths:
         if (
-            not path.is_file()
+            path in seen_paths
+            or not path.is_file()
             or path.is_symlink()
-            or path.name == PREVIOUS_STABLE_NAME
         ):
             continue
+        seen_paths.add(path)
         candidate = _inspect_release(path)
         if candidate is None or candidate.version_key >= target_key:
             continue
         candidates.append(candidate)
     if not candidates:
         return None
-    return max(candidates, key=lambda value: (value.version_key, value.path.name))
+    return max(
+        candidates,
+        key=lambda value: (
+            value.version_key,
+            value.path.name == PREVIOUS_STABLE_NAME,
+            value.path.name,
+        ),
+    )
 
 
 def _inspect_release(path: Path) -> _ReleaseCandidate | None:
@@ -203,11 +223,16 @@ def _inspect_release(path: Path) -> _ReleaseCandidate | None:
         payload = path.read_bytes()
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                return None
+            if archive.testzip() is not None:
+                return None
             manifest_infos = [info for info in infos if info.filename == "manifest.json"]
             if len(manifest_infos) != 1:
                 return None
             manifest = json.loads(archive.read(manifest_infos[0]).decode("utf-8"))
-            names = [info.filename for info in infos if not info.is_dir()]
+            files = [info.filename for info in infos if not info.is_dir()]
     except (
         OSError,
         UnicodeDecodeError,
@@ -233,7 +258,7 @@ def _inspect_release(path: Path) -> _ReleaseCandidate | None:
     return _ReleaseCandidate(
         path=path,
         payload=payload,
-        inventory=_inventory_for_manifest(manifest, names),
+        inventory=_inventory_for_manifest(manifest, files),
         version_key=version_key,
     )
 
@@ -431,6 +456,7 @@ def _inventory_for_manifest(
 
 
 def _write_artifacts_atomically(artifacts: dict[Path, bytes]) -> None:
+    original_artifacts = _snapshot_artifacts(artifacts)
     temporary_paths: list[tuple[Path, Path]] = []
     try:
         for target, payload in artifacts.items():
@@ -439,9 +465,36 @@ def _write_artifacts_atomically(artifacts: dict[Path, bytes]) -> None:
             temporary_paths.append((target, temporary_path))
         for target, temporary_path in temporary_paths:
             os.replace(temporary_path, target)
+    except Exception:
+        with contextlib.suppress(Exception):
+            _restore_artifacts(original_artifacts)
+        raise
     finally:
         for _target, temporary_path in temporary_paths:
             temporary_path.unlink(missing_ok=True)
+
+
+def _snapshot_artifacts(paths: Sequence[Path]) -> dict[Path, bytes | None]:
+    return {path: path.read_bytes() if path.is_file() else None for path in paths}
+
+
+def _write_bytes_atomically(path: Path, payload: bytes) -> None:
+    temporary_path = _temporary_path(path)
+    try:
+        temporary_path.write_bytes(payload)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _restore_artifacts(snapshot: dict[Path, bytes | None]) -> None:
+    for path, payload in snapshot.items():
+        if payload is None:
+            path.unlink(missing_ok=True)
+    existing = {path: payload for path, payload in snapshot.items() if payload is not None}
+    for path, payload in existing.items():
+        assert payload is not None
+        _write_bytes_atomically(path, payload)
 
 
 def _write_xpi_atomically(output: Path, files: dict[str, bytes]) -> None:

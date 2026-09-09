@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
+import struct
 import time
 import zipfile
 from pathlib import Path
@@ -76,6 +78,7 @@ def _write_release_package(
     sidecar_version: str | None = None,
     sidecar_addon_id: str | None = None,
     sha_text: str | None = None,
+    payload_marker: str = "",
 ) -> None:
     manifest = {
         "manifest_version": 2,
@@ -101,7 +104,7 @@ def _write_release_package(
             elif relative_path == "manifest.json":
                 archive.writestr(info, json.dumps(manifest).encode("utf-8"))
             else:
-                archive.writestr(info, f"// {relative_path}\n".encode())
+                archive.writestr(info, f"// {relative_path}{payload_marker}\n".encode())
 
     if not include_sidecars:
         return
@@ -126,6 +129,22 @@ def _write_release_package(
 def _packaged_manifest(path: Path) -> dict[str, object]:
     with zipfile.ZipFile(path) as archive:
         return json.loads(archive.read("manifest.json"))
+
+
+def _corrupt_xpi_crc(path: Path, entry_name: str) -> None:
+    payload = bytearray(path.read_bytes())
+    entry_bytes = entry_name.encode("utf-8")
+    for offset in range(len(payload) - 4):
+        if payload[offset : offset + 4] != b"PK\x01\x02":
+            continue
+        name_length = struct.unpack_from("<H", payload, offset + 28)[0]
+        name_start = offset + 46
+        name_end = name_start + name_length
+        if payload[name_start:name_end] == entry_bytes:
+            struct.pack_into("<I", payload, offset + 16, 0)
+            path.write_bytes(payload)
+            return
+    raise AssertionError(f"ZIP entry not found: {entry_name}")
 
 
 def test_build_addon_injects_local_paths_and_writes_sidecars(tmp_path: Path) -> None:
@@ -474,6 +493,90 @@ def test_build_addon_rebuilding_same_version_keeps_previous_lower_release(
     assert previous.read_bytes() == first_previous
     assert (output_dir / (previous.name + ".sha256")).read_bytes() == first_sha
     assert (output_dir / (previous.name + ".manifest.json")).read_bytes() == first_manifest
+
+
+def test_build_addon_prefers_valid_previous_slot_over_older_archive(
+    tmp_path: Path,
+) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    _write_release_package(previous, "0.8.1", payload_marker="-slot")
+    _write_release_package(output_dir / "older.xpi", "0.8.0", payload_marker="-older")
+    original_previous = previous.read_bytes()
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=output)
+
+    assert previous.read_bytes() == original_previous
+    assert _packaged_manifest(previous)["version"] == "0.8.1"
+
+
+def test_build_addon_prefers_existing_slot_for_same_version_tie(tmp_path: Path) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    previous = output_dir / "zotero-research-previous-stable.xpi"
+    same_version = output_dir / "other-0.8.1.xpi"
+    _write_release_package(previous, "0.8.1", payload_marker="-slot")
+    _write_release_package(same_version, "0.8.1", payload_marker="-other")
+    original_previous = previous.read_bytes()
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=output)
+
+    assert previous.read_bytes() == original_previous
+
+
+@pytest.mark.parametrize("corruption", ["crc", "duplicate"])
+def test_build_addon_skips_corrupt_or_duplicate_release_candidates(
+    tmp_path: Path, corruption: str
+) -> None:
+    addon_dir = tmp_path / "addon"
+    _make_addon_tree(addon_dir)
+    output_dir = tmp_path / "dist"
+    candidate = output_dir / "broken-0.8.1.xpi"
+    _write_release_package(candidate, "0.8.1")
+    if corruption == "crc":
+        _corrupt_xpi_crc(candidate, "bootstrap.js")
+    else:
+        with zipfile.ZipFile(candidate, "a") as archive, pytest.warns(
+            UserWarning, match="Duplicate name"
+        ):
+            archive.writestr("bootstrap.js", b"duplicate entry")
+    output = output_dir / f"zotero-research-{PACKAGE_VERSION}.xpi"
+
+    build_addon(addon_dir=addon_dir, output=output)
+
+    assert not (output_dir / "zotero-research-previous-stable.xpi").exists()
+
+
+def test_build_addon_restores_outputs_when_sidecar_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    addon_dir, output = _valid_inputs(tmp_path)
+    result = build_addon(addon_dir=addon_dir, output=output)
+    originals = {
+        result.xpi_path: result.xpi_path.read_bytes(),
+        result.sha256_path: result.sha256_path.read_bytes(),
+        result.manifest_path: result.manifest_path.read_bytes(),
+    }
+    (addon_dir / "content" / "panel.js").write_text("// changed\n", encoding="utf-8")
+    build_module = importlib.import_module("scripts.build_addon")
+    real_write_text = build_module._write_text_atomically
+
+    def fail_manifest_write(path: Path, text: str) -> None:
+        if path == result.manifest_path:
+            raise OSError("simulated manifest sidecar failure")
+        real_write_text(path, text)
+
+    monkeypatch.setattr(build_module, "_write_text_atomically", fail_manifest_write)
+    with pytest.raises(OSError, match="simulated manifest sidecar failure"):
+        build_addon(addon_dir=addon_dir, output=output)
+
+    for path, content in originals.items():
+        assert path.read_bytes() == content
 
 
 @pytest.mark.parametrize("include_sidecars", [False, True])
