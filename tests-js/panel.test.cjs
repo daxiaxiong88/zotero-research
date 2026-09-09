@@ -717,6 +717,26 @@ test('ChatGPT 内部引用标记在实时回答和旧会话恢复时都不会显
   view.panel.destroy();
 });
 
+test('引用清理不误删正文 PUA，半截标记在进度回传和恢复时同样清除', async (t) => {
+  const glyph = '\uE123';
+  const answer = `符号${glyph}保留；\uE200filecite\uE202turn0file`;
+  const harness = makeRelayHarness();
+  const { root, panel } = setupWithMarkdown(makeAdapter(harness, {
+    loadChatSession: async () => ({ messages: [{ role: 'assistant', content: answer }] }),
+  }));
+  t.after(() => panel.destroy());
+  panel.setContext(CONTEXT);
+  await settle();
+  assert.ok(root.textContent.includes(glyph));
+  assert.doesNotMatch(root.textContent, /filecite|turn0file/);
+  root.querySelector('[data-testid="webai-chat-input"]').value = 'next';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'progress', id: 'task-1', text: answer });
+  assert.ok(root.textContent.includes(glyph));
+  assert.doesNotMatch(root.textContent, /filecite|turn0file/);
+});
+
 test('大材料原样交给存档层：面板不再提前截到 24000', async () => {
   const saved = [];
   const harness = makeRelayHarness();

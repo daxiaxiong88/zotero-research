@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.11
+// @version      1.0.12
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*

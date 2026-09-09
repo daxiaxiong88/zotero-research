@@ -121,17 +121,39 @@
   // but Zotero does not. Clean at the panel boundary too so an older userscript
   // or an already persisted conversation cannot display protocol glyphs.
   function stripWebAIInternalCitations(value) {
-    var source = text(value);
-    if (!/(?:filecite|felicite|(?:turn|return)\d+file\d+)/i.test(source)) return source;
-    source = source.replace(
-      /[\uE000-\uF8FF]*(?:filecite|felicite|cite)[\uE000-\uF8FF]*(?:turn|return)\d+file\d+(?:[\uE000-\uF8FF]*L\d+(?:-L\d+)?)?[\uE000-\uF8FF]*/gi,
+    let text = String(value ?? '');
+    if (!/(?:filecite|felicite|\bcite\b|(?:turn|return)\d+file\d+)/i.test(text)) return text;
+    const pua = '[\\uE000-\\uF8FF]';
+    const marker = '(?:filecite|felicite|cite)';
+    const reference = '(?:turn|return)\\d+file\\d+';
+    const lineReference = `(?:${pua}*(?:\\s+)?L\\d+(?:-L\\d+)?)?`;
+    // Complete protocol markers may use private-use delimiters between every
+    // component. Consume only the delimiters directly attached to a marker;
+    // ordinary private-use characters elsewhere are answer text and survive.
+    text = text.replace(
+      new RegExp(`${pua}*\\b${marker}\\b${pua}*${reference}${lineReference}${pua}*`, 'gi'),
       '',
     );
-    source = source.replace(
-      /(?:\b(?:filecite|felicite)\b|\bcite\b)\s*(?:turn|return)\d+file\d+(?:\s+L\d+(?:-L\d+)?)?/gi,
+    // A failed/older decode can leave the same marker without private-use
+    // delimiters. Handle that representation too.
+    text = text.replace(
+      new RegExp(`\\b${marker}\\b\\s*${reference}${lineReference}`, 'gi'),
       '',
     );
-    return source.replace(/[\uE000-\uF8FF]/g, '');
+    // Keep the same narrow rule for a plain-text token whose file number is
+    // still incomplete (for example, `filecite turn0file`).
+    text = text.replace(
+      /\b(?:filecite|felicite)\b\s*(?:turn|return)\d+file\d*(?![A-Za-z0-9])/gi,
+      '',
+    );
+    // Streaming can expose a protocol token before its reference is complete.
+    // Only a PUA-delimited marker is strong evidence here; do not remove a
+    // normal prose word such as "cite" merely because it is incomplete.
+    text = text.replace(
+      new RegExp(`${pua}+(?:filecite|felicite|cite)(?:${pua}+(?:(?:turn|return)\\d*file\\d*)?)?${pua}*`, 'gi'),
+      '',
+    );
+    return text;
   }
 
   function createElement(document, tagName, attributes, content) {
