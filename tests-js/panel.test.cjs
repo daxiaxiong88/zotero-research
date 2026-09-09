@@ -686,6 +686,37 @@ test('会话持久化：回答后保存，重开文献自动恢复并提示继�
   second.panel.destroy();
 });
 
+test('ChatGPT 内部引用标记在实时回答和旧会话恢复时都不会显示', async () => {
+  const start = String.fromCodePoint(0xE200);
+  const separator = String.fromCodePoint(0xE202);
+  const end = String.fromCodePoint(0xE201);
+  const marker = `${start}filecite${separator}turn0file0${separator}L86-L107${end}`;
+  const harness = makeRelayHarness();
+  const adapter = makeAdapter(harness, {
+    loadChatSession: async () => ({
+      provider: 'ChatGPT',
+      messages: [
+        { role: 'user', content: '旧问题' },
+        { role: 'assistant', content: `旧回答${marker}正文` },
+      ],
+    }),
+  });
+  const view = setupWithMarkdown(adapter);
+  view.panel.setContext(CONTEXT);
+  await settle();
+  assert.match(view.root.textContent, /旧回答正文/);
+  assert.doesNotMatch(view.root.textContent, /filecite|turn0file0|L86-L107/);
+
+  view.root.querySelector('[data-testid="webai-chat-input"]').value = '新问题';
+  view.root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: `新回答${marker}正文` });
+  await settle();
+  assert.match(view.root.textContent, /新回答正文/);
+  assert.doesNotMatch(view.root.textContent, /filecite|turn0file0|L86-L107/);
+  view.panel.destroy();
+});
+
 test('大材料原样交给存档层：面板不再提前截到 24000', async () => {
   const saved = [];
   const harness = makeRelayHarness();

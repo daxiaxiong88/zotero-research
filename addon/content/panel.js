@@ -117,6 +117,23 @@
     try { return JSON.stringify(value); } catch (_) { return fallback || ''; }
   }
 
+  // ChatGPT's page renderer understands these private file-citation tokens,
+  // but Zotero does not. Clean at the panel boundary too so an older userscript
+  // or an already persisted conversation cannot display protocol glyphs.
+  function stripWebAIInternalCitations(value) {
+    var source = text(value);
+    if (!/(?:filecite|felicite|(?:turn|return)\d+file\d+)/i.test(source)) return source;
+    source = source.replace(
+      /[\uE000-\uF8FF]*(?:filecite|felicite|cite)[\uE000-\uF8FF]*(?:turn|return)\d+file\d+(?:[\uE000-\uF8FF]*L\d+(?:-L\d+)?)?[\uE000-\uF8FF]*/gi,
+      '',
+    );
+    source = source.replace(
+      /(?:\b(?:filecite|felicite)\b|\bcite\b)\s*(?:turn|return)\d+file\d+(?:\s+L\d+(?:-L\d+)?)?/gi,
+      '',
+    );
+    return source.replace(/[\uE000-\uF8FF]/g, '');
+  }
+
   function createElement(document, tagName, attributes, content) {
     var element = document.createElementNS(XHTML_NS, tagName);
     if (attributes) {
@@ -782,11 +799,11 @@
       var message = findAssistantMessage(event.id);
       if (!message) return;
       if (event.type === 'progress') {
-        message.content = text(event.text, '');
+        message.content = stripWebAIInternalCitations(event.text);
         message.pending = true;
         message.notice = text(event.notice, '') || message.notice || '';
       } else {
-        message.content = text(event.text, '') || '网页 AI 返回了空回答。';
+        message.content = stripWebAIInternalCitations(event.text) || '网页 AI 返回了空回答。';
         message.pending = false;
         message.error = text(event.error, '');
         if (state.pendingTaskId === event.id) state.pendingTaskId = null;
@@ -1381,9 +1398,11 @@
           sessionMeta.aiUrl = String(data.aiUrl || '');
           sessionMeta.updatedAt = String(data.updatedAt || '');
           state.messages = data.messages.map(function unpack(m) {
+            var role = m.role === 'assistant' ? 'assistant' : 'user';
             return {
-              role: m.role === 'assistant' ? 'assistant' : 'user',
-              content: String(m.content || ''),
+              role: role,
+              content: role === 'assistant'
+                ? stripWebAIInternalCitations(m.content) : String(m.content || ''),
               sourceContext: text(m.sourceContext),
               evidence: Array.isArray(m.evidence) ? m.evidence : [],
               contextNotice: text(m.contextNotice),

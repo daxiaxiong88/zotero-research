@@ -99,6 +99,20 @@ test('parseChatGPT removes internal citation markers from the visible answer', (
   assert.doesNotMatch(parsed.text, /filecite|felicite|return0file0|turn0file0/);
 });
 
+test('ChatGPT common relay boundary also removes citations from DOM fallback text', () => {
+  const api = setup('https://chatgpt.com/');
+  const connector = api.connector;
+  const start = String.fromCodePoint(0xE200);
+  const separator = String.fromCodePoint(0xE202);
+  const end = String.fromCodePoint(0xE201);
+  const marker = `${start}filecite${separator}turn0file0${separator}L86-L107${end}`;
+  connector.isRunning = true;
+
+  connector.onNewData(`这里的 PDF 第1页）${marker}\n\n具体来说，这是虚拟仪器。`, false);
+
+  assert.equal(connector.accumulatedText, '这里的 PDF 第1页）\n\n具体来说，这是虚拟仪器。');
+});
+
 test('parseDeepSeek separates THINK and RESPONSE blocks', () => {
   const api = setup();
   const raw = [

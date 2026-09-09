@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.10
+// @version      1.0.11
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -80,6 +80,7 @@
    */
   function stripChatGPTInternalCitations(value) {
     let text = String(value ?? '');
+    if (!/(?:filecite|felicite|(?:turn|return)\d+file\d+)/i.test(text)) return text;
     text = text.replace(
       /[\uE000-\uF8FF]*(?:filecite|felicite|cite)[\uE000-\uF8FF]*(?:turn|return)\d+file\d+(?:[\uE000-\uF8FF]*L\d+(?:-L\d+)?)?[\uE000-\uF8FF]*/gi,
       '',
@@ -707,7 +708,12 @@
 
     onNewData(text, isDone) {
       if (!this.isRunning) return;
-      const nextText = String(text || '');
+      const rawText = String(text || '');
+      // Network parsing and visible-DOM fallback converge here. Keep the
+      // cleanup at this shared boundary as well, otherwise a manually
+      // recovered ChatGPT turn bypasses parseChatGPT and leaks filecite tags.
+      const nextText = this.config.name === 'ChatGPT'
+        ? stripChatGPTInternalCitations(rawText) : rawText;
       const nextDone = Boolean(isDone);
       if (nextText === this.accumulatedText && nextDone === this.doneSignal) return;
       this.clearManualFallback();

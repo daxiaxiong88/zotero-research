@@ -56,7 +56,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 uv run python scripts/build_addon.py
 ```
 
-生成的安装包位于 `dist/zotero-research-0.8.1.xpi`。
+生成的安装包位于 `dist/zotero-research-0.8.2.xpi`。
 
 ### 2. 安装网页连接脚本
 
@@ -66,7 +66,7 @@ uv run python scripts/build_addon.py
 2. <img width="1028" height="425" alt="图片对比_20260909_150702" src="https://github.com/user-attachments/assets/d395c165-9f26-413c-8ebc-7168cab48546" />
 
 3. 打开 [网页 AI 连接脚本](https://github.com/daxiaxiong88/zotero-research/raw/refs/heads/main/userscripts/zotero-research-webai.user.js)，让 Tampermonkey 安装它。
-4. 如果以前装过旧版，请更新原脚本，不要同时保留多个副本；当前脚本版本为 **1.0.10**。
+4. 如果以前装过旧版，请更新原脚本，不要同时保留多个副本；当前脚本版本为 **1.0.11**。
 5. 打开并登录任一支持的 AI 网站，然后刷新页面。
 6. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
 
@@ -143,6 +143,8 @@ API 模式支持在发送时附带整篇 PDF；是否能处理附件取决于所
 0.8.0 起插件内置离线 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`。请确认已安装 0.8.0 或更高版本；语法不完整的公式会保留原文，避免错误排版。
 
 0.8.1 修复了长块级公式在 Zotero 侧栏中撑宽整段对话的问题；公式本身过宽时可在公式区域内横向滚动，普通正文仍会随侧栏宽度自动换行。
+
+0.8.2 会清理 ChatGPT 回答中的内部 `filecite` 标记，包括实时回传和已经保存在本机的旧对话。
 
 ## 开发与测试
 
