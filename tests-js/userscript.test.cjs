@@ -304,3 +304,49 @@ test('file-input 通道优先：accept 含 image 的输入框直接赋 files', a
   assert.equal(channel, 'file-input');
   assert.equal(fileInput.files.length, 1);
 });
+
+test('投递图片后 composer 出现 DOM 变动即视为已确认，无需匹配类名', async () => {
+  const dom = new JSDOM(
+    '<!doctype html><body><div id="composer"><textarea id="t"></textarea></div></body>',
+    { url: 'https://gemini.google.com/app', runScripts: 'outside-only', pretendToBeVisual: true },
+  );
+  const values = new Map();
+  dom.window.__ZRA_TEST__ = {};
+  Object.assign(dom.window, {
+    GM_getValue: (k, f) => values.get(k) ?? f,
+    GM_setValue: (k, v) => values.set(k, v),
+    GM_addValueChangeListener: () => {},
+    GM_registerMenuCommand: () => {},
+    GM_notification: () => {},
+    GM_info: { script: { version: 'test' } },
+    GM_xmlhttpRequest: () => ({ abort() {} }),
+    unsafeWindow: dom.window,
+  });
+  dom.window.setInterval = () => 0;
+  dom.window.DataTransfer = class {
+    constructor() { this.files = []; this.items = { add: (file) => this.files.push(file) }; }
+  };
+  dom.window.DragEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.dataTransfer = init && init.dataTransfer; }
+  };
+  dom.window.ClipboardEvent = class extends dom.window.Event {
+    constructor(type, init) { super(type, init); this.clipboardData = init && init.clipboardData; }
+  };
+  dom.window.eval(SOURCE);
+  const connector = dom.window.__ZRA_TEST__.connector;
+  assert.ok(connector, 'connector exported');
+
+  // Paste handler registers nothing the class-name probes can see; it just
+  // inserts a neutral node — exactly the false-negative this fix removes.
+  const composer = dom.window.document.getElementById('composer');
+  composer.addEventListener('paste', () => {
+    const chip = dom.window.document.createElement('div');
+    chip.setAttribute('id', 'mystery-upload-chip');
+    composer.appendChild(chip);
+  });
+
+  const channel = await connector.deliverImages([
+    { data: Buffer.from('fakepng').toString('base64'), mediaType: 'image/png' },
+  ]);
+  assert.equal(channel, 'paste', 'DOM mutation alone confirms the channel');
+});

@@ -20,7 +20,7 @@
 
 1. 在 Chrome 或 Edge 安装并启用 Tampermonkey。
 2. 打开 `userscripts/zotero-research-webai.user.js`，复制全部内容。
-3. 在 Tampermonkey 新建脚本，粘贴并保存；如果已有本脚本，编辑原脚本并替换全文，避免同时运行多个副本。确认版本为 **1.0.8**，更新后刷新 AI 网页。
+3. 在 Tampermonkey 新建脚本，粘贴并保存；如果已有本脚本，编辑原脚本并替换全文，避免同时运行多个副本。确认版本为 **1.0.9**，更新后刷新 AI 网页。
 4. 打开以下任一网页 AI 并登录：
    - `https://gemini.google.com/`
    - `https://chat.deepseek.com/`

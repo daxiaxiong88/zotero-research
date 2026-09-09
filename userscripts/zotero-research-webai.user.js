@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.8
+// @version      1.0.9
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -991,10 +991,55 @@
      * 3. drop events on the composer (DeepSeek/AIStudio drag targets).
      * Returns the channel name that verified, or null when all failed.
      */
+    /** The composer region mutations are scoped to; body as a fallback. */
+    composerWatchScope() {
+      const input = this.findUsable(this.config.input.text.selector)
+        || document.querySelector('textarea, [contenteditable="true"]');
+      return (input && (input.closest('form, [class*="chat" i], [class*="composer" i], [class*="input" i]')
+        || input.parentElement)) || document.body;
+    }
+
+    /**
+     * A file-bearing event makes the site mutate the composer (attachment
+     * chip, progress bar, class toggles). Class-name probes miss most of
+     * those, so watch the DOM itself during the delivery window.
+     */
+    startMutationWatch() {
+      if (typeof MutationObserver !== 'function') {
+        const inert = () => false;
+        inert.stop = () => false;
+        return inert;
+      }
+      let mutated = false;
+      const observer = new MutationObserver(() => { mutated = true; });
+      try {
+        observer.observe(this.composerWatchScope(), {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['class', 'src', 'data-testid', 'hidden'],
+        });
+      } catch (_) {
+        const inert = () => false;
+        inert.stop = () => false;
+        return inert;
+      }
+      // The returned function is a peek: it only reads the flag. Disconnecting
+      // is a separate .stop() — waitRegistered polls the peek every tick, and
+      // a peek that also disconnected would kill the observer on first check.
+      const peek = () => mutated;
+      peek.stop = () => {
+        try { observer.disconnect(); } catch (_) {}
+        return mutated;
+      };
+      return peek;
+    }
+
     async deliverImages(images) {
       const transfer = this.buildImageFiles(images);
       if (!transfer) return null;
       const before = this.attachmentSnapshot();
+      const stopWatch = this.startMutationWatch();
 
       const fileInput = this.pickFileInput();
       if (fileInput) {
@@ -1002,7 +1047,7 @@
           fileInput.files = transfer.files;
           fileInput.dispatchEvent(new Event('input', { bubbles: true }));
           fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-          if (await this.waitRegistered(before, 2600)) return 'file-input';
+          if (await this.waitRegistered(before, 2600, stopWatch)) return 'file-input';
           console.warn('[Zotero relay] file-input channel not confirmed');
         } catch (error) {
           console.warn('[Zotero relay] file-input channel failed', error);
@@ -1019,7 +1064,7 @@
           input.dispatchEvent(new ClipboardEvent('paste', {
             bubbles: true, cancelable: true, clipboardData: transfer,
           }));
-          if (await this.waitRegistered(before, 2600)) return 'paste';
+          if (await this.waitRegistered(before, 2600, stopWatch)) return 'paste';
           console.warn('[Zotero relay] paste channel not confirmed');
         } catch (error) {
           console.warn('[Zotero relay] paste channel failed', error);
@@ -1028,12 +1073,13 @@
           input.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: transfer }));
           input.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer }));
           input.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }));
-          if (await this.waitRegistered(before, 2600)) return 'drop';
+          if (await this.waitRegistered(before, 2600, stopWatch)) return 'drop';
           console.warn('[Zotero relay] drop channel not confirmed');
         } catch (error) {
           console.warn('[Zotero relay] drop channel failed', error);
         }
       }
+      stopWatch.stop();
       return null;
     }
 
@@ -1064,8 +1110,18 @@
     }
 
     /** Poll for an upload indicator until the deadline. */
-    async waitRegistered(before, timeoutMs) {
-      return Boolean(await this.waitForValue(() => this.registeredSince(before) || null, timeoutMs));
+    async waitRegistered(before, timeoutMs, mutationSignal) {
+      const mutation = mutationSignal || (() => false);
+      return Boolean(await this.waitForValue(() => {
+        // The mutation signal is the robust verdict; probe it first so a
+        // selector-engine quirk in registeredSince cannot mask it.
+        if (mutation()) return true;
+        try {
+          return this.registeredSince(before) || null;
+        } catch (_) {
+          return null;
+        }
+      }, timeoutMs));
     }
 
     /** True when the live input actually holds the expected text (tail match). */
