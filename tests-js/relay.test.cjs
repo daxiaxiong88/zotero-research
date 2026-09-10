@@ -92,6 +92,39 @@ test('waiting poll resolves when a task is enqueued later', async () => {
   assert.equal(result.task.messages[0].text, 'hello');
 });
 
+test('same-session reconnect discards abandoned polls without cancelling an active task', async () => {
+  const { store } = makeStore();
+  connect(store);
+  const claimed = store.enqueueTask({ messages: [{ text: 'already executing' }] });
+  await store.poll({ sessionSecret: SECRET }, 0);
+  let oldReply;
+  const old = store.poll({ sessionSecret: SECRET }).then(result => { oldReply = result; });
+  connect(store);
+  await Promise.resolve();
+  assert.deepEqual(oldReply, {}, 'an obsolete poll is released even when the secret stays the same');
+  assert.equal(store._tasks.get(claimed).complete, false, 'an already executing task is not resent or cancelled');
+  const live = store.poll({ sessionSecret: SECRET });
+  const queued = store.enqueueTask({ messages: [{ text: 'new message' }] });
+  assert.equal((await live).task.id, queued);
+  await old;
+  store.destroy();
+});
+
+test('a retry replaces the abandoned waiting poll and gets the task exactly once', async () => {
+  const { store } = makeStore();
+  connect(store);
+  let oldReply;
+  const old = store.poll({ sessionSecret: SECRET }).then(result => { oldReply = result; });
+  const live = store.poll({ sessionSecret: SECRET });
+  await Promise.resolve();
+  assert.deepEqual(oldReply, {}, 'a new poll retires the previous same-session request');
+  const id = store.enqueueTask({ messages: [{ text: 'image question' }] });
+  assert.equal((await live).task.id, id);
+  assert.deepEqual(await store.poll({ sessionSecret: SECRET }, 0), {});
+  await old;
+  store.destroy();
+});
+
 test('update streams progress and finalizes with done', async () => {
   const { store } = makeStore();
   connect(store);
@@ -105,7 +138,10 @@ test('update streams progress and finalizes with done', async () => {
   assert.deepEqual(kinds, ['progress', 'answer']);
   assert.equal(events[1].text, '部分+完整');
   // Duplicate completion is idempotent.
-  assert.deepEqual(store.update({ sessionSecret: SECRET, id, text: 'x', isDone: true }), { ok: true });
+  assert.deepEqual(store.update({ sessionSecret: SECRET, id, text: '部分+完整', isDone: true }), { ok: true });
+  assert.equal(events.length, 2);
+  assert.deepEqual(store.update({ sessionSecret: SECRET, id, text: 'x', isDone: true }), { error: 'TASK_CLOSED', complete: true });
+  assert.equal(store._tasks.get(id).text, '部分+完整');
 });
 
 test('rejects foreign secret, unknown task, oversized text', () => {
@@ -166,7 +202,7 @@ test('update accepts a failed flag and surfaces the error', async () => {
   assert.equal(answer.done, true);
 });
 
-test('takeover releases old polls and hands a task to exactly one current poll', async () => {
+test('takeover releases old polls and hands a task to exactly the latest current poll', async () => {
   const { store } = makeStore();
   connect(store);
   const oldPoll = store.poll({ sessionSecret: SECRET });
@@ -176,9 +212,9 @@ test('takeover releases old polls and hands a task to exactly one current poll',
   const secondPoll = store.poll({ sessionSecret: newSecret });
   const id = store.enqueueTask({ messages: [{ text: 'one task' }] });
   assert.deepEqual(await oldPoll, { error: 'SESSION_EXPIRED' });
-  assert.equal((await firstPoll).task.id, id);
+  assert.deepEqual(await firstPoll, {});
+  assert.equal((await secondPoll).task.id, id);
   store.disconnect({ sessionSecret: newSecret });
-  assert.deepEqual(await secondPoll, { error: 'SESSION_EXPIRED' });
 });
 
 test('disconnect terminates claimed tasks so the sidebar can retry explicitly', async () => {
@@ -290,6 +326,53 @@ function timedStore() {
   return { store, advance, timers };
 }
 
+test('delayed full answer replaces a timed-out prefix for the same latest claimed task', async () => {
+  const { store, advance } = timedStore();
+  connect(store);
+  const events = [];
+  store.subscribe(e => events.push(e));
+  const id = store.enqueueTask({ messages: [{ text: '解释无因果遮挡' }] });
+  await store.poll({ sessionSecret: SECRET }, 0);
+  store.update({ sessionSecret: SECRET, id, text: '**无因果遮挡' });
+  advance(91000);
+  assert.equal(store._tasks.get(id).complete, true);
+  const heartbeat = store.update({ sessionSecret: SECRET, id, heartbeat: true });
+  assert.equal(heartbeat.recoverable, true, 'timeout is not an acknowledgement of full delivery');
+  const partial = '**无因果遮挡**\n' + '已抓取正文。'.repeat(200);
+  store.update({ sessionSecret: SECRET, id, text: partial });
+  assert.equal(store._tasks.get(id).text, partial, 'never silently discard the captured answer');
+  assert.equal(store._tasks.get(id).complete, true, 'late progress must not lock the sidebar again');
+  const full = partial + '\n最终结论。';
+  store.update({ sessionSecret: SECRET, id, text: full, isDone: true });
+  assert.equal(store._tasks.get(id).text, full);
+  assert.equal(store._tasks.get(id).error, '');
+  assert.equal(events.at(-1).type, 'answer');
+  assert.equal(events.at(-1).error, '');
+  assert.equal((await store.poll({ sessionSecret: SECRET }, 0)).task, undefined, 'never resend the prompt');
+  store.destroy();
+});
+
+for (const stop of ['cancel', 'new-task', 'new-session', 'disconnect', 'expired', 'unclaimed']) {
+  test(`late recovery cannot revive a ${stop} task`, async () => {
+    const { store, advance } = timedStore();
+    connect(store);
+    const id = store.enqueueTask({ messages: [{ text: 'Q' }] });
+    if (stop !== 'unclaimed') await store.poll({ sessionSecret: SECRET }, 0);
+    advance(91000);
+    let secret = SECRET;
+    if (stop === 'cancel') store.cancelTask(id);
+    if (stop === 'new-task') store.enqueueTask({ messages: [{ text: 'next' }] });
+    if (stop === 'new-session') { secret += '-new'; connect(store, secret); }
+    if (stop === 'disconnect') { store.disconnect({ sessionSecret: secret }); connect(store, secret); }
+    if (stop === 'expired') advance(20 * 60000);
+    const result = store.update({ sessionSecret: secret, id, text: 'must not revive', isDone: true });
+    assert.equal(result.error, 'TASK_CLOSED');
+    assert.equal(store._tasks.get(id).text, '');
+    assert.notEqual(store.update({ sessionSecret: secret, id, heartbeat: true }).recoverable, true);
+    store.destroy();
+  });
+}
+
 for (const claimed of [false, true]) {
   test(`no browser activity: ${claimed ? 'claimed' : 'unclaimed'} task expires autonomously and frees queue`, async () => {
     const { store, advance, timers } = timedStore();
@@ -323,6 +406,24 @@ test('autonomous timeout respects progress heartbeats and destroys all timers', 
   store.enqueueTask({ messages: [{ text: 'next' }] });
   store.destroy();
   assert.equal(timers.size, 0);
+});
+
+test('transport heartbeat keeps slow uploads and reasoning alive without overwriting the partial answer', async () => {
+  const { store, advance } = timedStore();
+  connect(store);
+  const events = [];
+  store.subscribe(event => events.push(event));
+  const id = store.enqueueTask({ messages: [{ text: 'Q' }] });
+  await store.poll({ sessionSecret: SECRET }, 0);
+  store.update({ sessionSecret: SECRET, id, text: '已收到的回答', notice: '正在处理图片' });
+  const before = events.length;
+  advance(60000);
+  store.update({ sessionSecret: SECRET, id, heartbeat: true });
+  assert.equal(store._tasks.get(id).text, '已收到的回答');
+  assert.equal(events.length, before, 'a heartbeat is not a new/empty answer');
+  advance(60000);
+  assert.equal(store._tasks.get(id).complete, false);
+  store.destroy();
 });
 
 test('cancelled navigation tasks cannot later be delivered to the browser', async () => {

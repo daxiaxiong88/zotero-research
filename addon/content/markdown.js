@@ -183,6 +183,9 @@
   /** Render trusted KaTeX output as native MathML without using innerHTML. */
   function renderWithKatex(doc, parent, latex, display) {
     var source = String(latex || '').trim();
+    source = source.replace(/\\(?:begin|end)\{(?:equation\*?|displaymath)\}/g, '')
+      .replace(/\\(begin|end)\{align\*?\}/g, '\\$1{aligned}')
+      .replace(/\\(begin|end)\{gather\*?\}/g, '\\$1{gathered}');
     var Parser = doc.defaultView && doc.defaultView.DOMParser;
     if (!source || source.length > 10000 || !katexApi
       || typeof katexApi.renderToString !== 'function' || !Parser) return false;
@@ -285,15 +288,20 @@
   /** Inline pass with $…$, $$…$$ and \(…\) math before Markdown rules. */
   function renderInline(doc, parent, source) {
     var text = String(source || '');
-    var math = /\\\((.+?)\\\)|\$\$([^$\n]+)\$\$|\$([^$\n]+)\$/g;
+    var math = /`[^`\n]+`|\\\((.+?)\\\)|\$\$([^$\n]+)\$\$|\$([^$\n]+)\$|\\\[(.+?)\\\]/g;
     var cursor = 0;
     var match;
     while ((match = math.exec(text)) !== null) {
       if (match.index > cursor) renderInlineCore(doc, parent, text.slice(cursor, match.index));
+      if (match[0][0] === '`') {
+        renderInlineCore(doc, parent, match[0]);
+        cursor = match.index + match[0].length;
+        continue;
+      }
       var expression = match[1] !== undefined ? match[1]
-        : (match[2] !== undefined ? match[2] : match[3]);
-      if (match[1] !== undefined || match[2] !== undefined || looksLikeMath(expression)) {
-        renderMathSpan(doc, parent, expression, match[2] !== undefined);
+        : (match[2] !== undefined ? match[2] : (match[3] !== undefined ? match[3] : match[4]));
+      if (match[1] !== undefined || match[2] !== undefined || match[4] !== undefined || looksLikeMath(expression)) {
+        renderMathSpan(doc, parent, expression, match[2] !== undefined || match[4] !== undefined);
       }
       else appendText(parent, match[0]);
       cursor = match.index + match[0].length;
@@ -319,41 +327,31 @@
     while (index < lines.length) {
       var line = lines[index];
 
-      // Gemini and other web AIs commonly use \[…\] for display math.
-      var bracketSingle = /^\s*\\\[(.+)\\\]\s*$/.exec(line);
-      if (bracketSingle) {
-        renderMathSpan(doc, fragment, bracketSingle[1], true);
-        index += 1;
-        continue;
-      }
-      if (/^\s*\\\[\s*$/.test(line)) {
-        var bracketLines = [];
-        index += 1;
-        while (index < lines.length && !/\\\]\s*$/.test(lines[index])) {
-          bracketLines.push(lines[index]);
-          index += 1;
-        }
-        index += 1; // closing \]
-        renderMathSpan(doc, fragment, bracketLines.join('\n'), true);
-        continue;
-      }
-
-      // Display math block: $$…$$ on one line or across lines.
-      if (/^\s*\$\$/.test(line)) {
-        var single = /^\s*\$\$(.+)\$\$\s*$/.exec(line);
-        if (single) {
-          renderMathSpan(doc, fragment, single[1], true);
-          index += 1;
-          continue;
-        }
+      // Delimiters can share a line with the expression or with following
+      // prose. Preserve both boundary lines and never consume trailing text.
+      var mathOpen = /^\s*(\$\$|\\\[)/.exec(line);
+      if (mathOpen) {
+        var mathClose = mathOpen[1] === '$$' ? '$$' : '\\]';
         var mathLines = [];
-        index += 1;
-        while (index < lines.length && lines[index].indexOf('$$') < 0) {
-          mathLines.push(lines[index]);
+        var mathPart = line.slice(mathOpen[0].length);
+        var closed = false;
+        while (index < lines.length) {
+          var closeIndex = mathPart.indexOf(mathClose);
+          if (closeIndex >= 0) {
+            mathLines.push(mathPart.slice(0, closeIndex));
+            var remainder = mathPart.slice(closeIndex + mathClose.length);
+            if (remainder.trim()) lines[index] = remainder;
+            else index += 1;
+            closed = true;
+            break;
+          }
+          mathLines.push(mathPart);
           index += 1;
+          mathPart = lines[index] || '';
         }
-        index += 1; // closing $$
-        renderMathSpan(doc, fragment, mathLines.join('\n'), true);
+        if (closed) renderMathSpan(doc, fragment, mathLines.join('\n'), true);
+        else fragment.appendChild(create(doc, 'span', 'zrp-math-raw zrp-math-block',
+          mathOpen[1] + mathLines.join('\n')));
         continue;
       }
 
@@ -367,9 +365,17 @@
           codeLines.push(lines[index]);
           index += 1;
         }
+        var fenceClosed = index < lines.length;
         index += 1; // closing fence
+        var codeSource = codeLines.join('\n');
+        if (fenceClosed && /^(?:math|latex|tex)$/i.test(fence[2])
+          && !/\\(?:documentclass|usepackage)\b|\\begin\{document\}/.test(codeSource)) {
+          var fencedMath = codeSource.trim().replace(/^(?:\$\$|\\\[)\s*/, '')
+            .replace(/\s*(?:\$\$|\\\])$/, '');
+          if (renderWithKatex(doc, fragment, fencedMath, true)) continue;
+        }
         var block = create(doc, 'pre', 'zrp-md-pre');
-        block.appendChild(create(doc, 'code', 'zrp-md-codeblock', codeLines.join('\n')));
+        block.appendChild(create(doc, 'code', 'zrp-md-codeblock', codeSource));
         fragment.appendChild(block);
         continue;
       }
@@ -482,6 +488,9 @@
         first = false;
         index += 1;
       }
+      // Malformed streaming Markdown (e.g. a lone table pipe) must always
+      // advance; otherwise one unfinished line can freeze the sidebar.
+      if (first) { renderInline(doc, paragraph, lines[index]); index += 1; }
       fragment.appendChild(paragraph);
     }
     return fragment;

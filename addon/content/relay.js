@@ -9,6 +9,7 @@
   // A claimed task whose page stops sending updates (crash, refresh, silent
   // failure) must not wedge the sidebar's pending state forever.
   const STALE_CLAIM_MS = 90000;
+  const LATE_RECOVERY_MS = 20 * 60 * 1000;
 
   function tokenize(text) {
     const tokens = [];
@@ -179,6 +180,11 @@
       if (session && session.secret !== secret) {
         releaseWaiters({ error: 'SESSION_EXPIRED' });
         failClaimedTasks('已切换网页，请在当前网页重新发送问题。');
+      } else {
+        // The browser aborts its old long poll before reconnecting. A socket
+        // abort does not remove that waiter here; never give it the next task.
+        // Same-session reconnect must still preserve already executing work.
+        releaseWaiters({});
       }
       // A fresh connect supersedes an old page; the old page sees SESSION_EXPIRED.
       session = {
@@ -188,7 +194,7 @@
         connectedAt: now(),
       };
       notify({ type: 'session', connected: true, ai: session.ai, url: session.url });
-      return { status: 'connected' };
+      return { status: 'connected', capabilities: ['task-heartbeat'] };
     }
 
     function disconnect(payload) {
@@ -228,17 +234,21 @@
         if (now() - (task.claimedAt === null ? task.queuedAt : task.claimedAt) < STALE_CLAIM_MS) continue;
         failTask(task.id, task.claimedAt === null
           ? '网页长时间未领取消息，请连接网页后在侧栏重新发送。'
-          : '网页长时间未回传回答（可能已刷新或断开），请在侧栏重新发送。');
+          : '网页长时间未回传回答，已保留收到的内容；网页恢复响应后可补回，也可重新发送。', 'timeout');
       }
     }
 
     function poll(payload, waitMs) {
       const error = sessionError(String((payload && payload.sessionSecret) || ''));
       if (error) return Promise.resolve(error);
+      // One page/session has one current poll. A retry supersedes any request
+      // whose browser callback was lost, rather than leaving it first in line.
+      releaseWaiters({});
       reclaimStaleClaims();
       const task = nextQueuedTask();
       if (task) {
         task.claimedAt = now();
+        task.claimedSession = session.secret;
         armWatchdog();
         return Promise.resolve({ task: { id: task.id, messages: task.messages } });
       }
@@ -253,20 +263,50 @@
       });
     }
 
+    function canRecover(task) {
+      return task.completionReason === 'timeout' && task.claimedAt !== null
+        && task.claimedSession === session?.secret && task.sequence === sequence
+        && now() - task.completedAt < LATE_RECOVERY_MS;
+    }
+
     function update(payload) {
       const error = sessionError(String((payload && payload.sessionSecret) || ''));
       if (error) return error;
       const task = tasks.get(String((payload && payload.id) || ''));
       if (!task) return { error: 'UNKNOWN_TASK' };
-      if (task.complete) return { ok: true };
+      if (payload.heartbeat === true) {
+        if (!task.complete && task.claimedAt !== null) {
+          task.claimedAt = now();
+          armWatchdog();
+        }
+        return { ok: true, complete: task.complete, ...(canRecover(task) ? { recoverable: true } : {}) };
+      }
       const text = String((payload && payload.text) || '');
       if (text.length > MAX_TEXT_LENGTH) return { error: 'TEXT_TOO_LONG' };
+      if (task.complete) {
+        if (task.completionReason === 'delivered' && payload.isDone && task.text === text
+          && task.error === String(payload.failed || '').slice(0, 300)) return { ok: true };
+        if (!canRecover(task)) return { error: 'TASK_CLOSED', complete: true };
+        task.text = text;
+        if (payload.isDone) {
+          task.done = true;
+          task.completionReason = 'delivered';
+          task.error = String(payload.failed || '').slice(0, 300);
+          task.completedAt = now();
+        }
+        // Replace the existing bubble without re-locking the input or
+        // restarting the task. Partial recovery retains its incomplete notice.
+        notify({ type: 'answer', id: task.id, text: task.text, done: true,
+          error: task.error, meta: task.meta });
+        return { ok: true, recovered: true };
+      }
       task.text = text;
       if (task.claimedAt !== null) task.claimedAt = now();
       task.notice = String((payload && payload.notice) || '').slice(0, 300);
       task.done = Boolean(payload && payload.isDone);
       if (task.done) {
         task.complete = true;
+        task.completionReason = 'delivered';
         task.messages = [];
         removeQueued(task.id);
         task.completedAt = now();
@@ -299,7 +339,7 @@
       sequence += 1;
       const id = 'task-' + String(sequence) + '-' + Math.random().toString(36).slice(2, 10);
       const task = {
-        id,
+        id, sequence, claimedSession: null, completionReason: '',
         messages: messages.map((message) => {
           if (message && message.type === 'image') {
             const data = String(message.data || '');
@@ -328,6 +368,7 @@
         const waiting = nextQueuedTask();
         if (waiting) {
           waiting.claimedAt = now();
+          waiting.claimedSession = session.secret;
           const waiter = pollWaiters.shift();
           cancel(waiter.timer);
           waiter.resolve({ task: { id: waiting.id, messages: waiting.messages } });
@@ -337,10 +378,15 @@
       return id;
     }
 
-    function failTask(id, message) {
+    function failTask(id, message, reason = 'failed') {
       const task = tasks.get(id);
-      if (!task || task.complete) return;
+      if (!task) return;
+      if (task.complete) {
+        if (task.completionReason === 'timeout' && reason !== 'timeout') task.completionReason = reason;
+        return;
+      }
       task.complete = true;
+      task.completionReason = reason;
       task.messages = [];
       removeQueued(id);
       task.completedAt = now();
@@ -355,7 +401,7 @@
 
     function failClaimedTasks(message) {
       for (const task of tasks.values()) {
-        if (!task.complete && task.claimedAt !== null) failTask(task.id, message);
+        if (task.claimedAt !== null) failTask(task.id, message);
       }
     }
 

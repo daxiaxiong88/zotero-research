@@ -86,3 +86,38 @@ test('renders Gemini-style parenthesis and bracket math delimiters', () => {
   assert.equal(container.querySelectorAll('.zrp-math-block math').length, 2);
   assert.equal(container.textContent.includes('$$'), false);
 });
+
+test('ChatGPT math fences render as MathML and retain the text after the formula', () => {
+  const { JSDOM } = require('jsdom');
+  const doc = new JSDOM('<!doctype html><body></body>').window.document;
+  const container = doc.createElement('div');
+  container.appendChild(md.renderMarkdown(doc,
+    '推导如下：\n```latex\n\\begin{aligned}\ny &= \\frac{x}{2} \\\\\nz &= y^2\n\\end{aligned}\n```\n最后的结论。'));
+  assert.ok(container.querySelector('math mfrac'), 'a mathematical latex fence is not a raw code block');
+  assert.match(container.textContent, /最后的结论/);
+});
+
+test('display math keeps content on opening and closing delimiter lines', () => {
+  const { JSDOM } = require('jsdom');
+  const doc = new JSDOM('<!doctype html><body></body>').window.document;
+  const container = doc.createElement('div');
+  container.appendChild(md.renderMarkdown(doc, '$$x = \\frac{a}{b}\n+ c$$\n结论\n\\[\nq = \\frac{d}{e}\\]'));
+  assert.equal(container.querySelectorAll('mfrac').length, 2, 'neither delimiter line may be dropped');
+  assert.match(container.querySelector('annotation').textContent, /x = \\frac\{a\}\{b\}\n\+ c/);
+  assert.match(container.textContent, /结论/);
+});
+
+test('incomplete math, real code and full LaTeX documents remain readable without losing tails', () => {
+  const { JSDOM } = require('jsdom');
+  const dom = new JSDOM('<body></body>');
+  try {
+    for (const source of ['```js\nconst x = "$a$";\n```\n末尾',
+      '```latex\n\\documentclass{article}\n\\begin{document}正文\\end{document}\n```\n末尾',
+      '```latex\n\\frac{a}{b}\n末尾', '$$x = \\frac{a}{b}\n末尾', '| 单独的竖线\n末尾']) {
+      const host = dom.window.document.createElement('div');
+      host.append(md.renderMarkdown(dom.window.document, source));
+      assert.match(host.textContent, /末尾/);
+      assert.equal(host.querySelectorAll('math').length, 0);
+    }
+  } finally { dom.window.close(); }
+});

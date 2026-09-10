@@ -226,11 +226,25 @@ async function runSyntheticNativeChecks(paper, pdf) {
       action: 'connect', sessionSecret, ai: 'synthetic-no-network', url: 'https://synthetic.invalid/',
     });
     check(connected.status === 'connected', 'relay connect');
+    let abandonedReply;
+    const abandoned = relayRequest({ action: 'poll', sessionSecret })
+      .then(result => { abandonedReply = result; });
+    await relayRequest({ action: 'connect', sessionSecret, ai: 'synthetic-no-network' });
+    await waitFor(() => abandonedReply, 'same-page reconnect retires old poll', 1000);
+    check(!abandonedReply.task, 'abandoned poll must not claim a task');
+    await abandoned;
+    let retriedReply;
+    const retried = relayRequest({ action: 'poll', sessionSecret })
+      .then(result => { retriedReply = result; });
+    const currentPoll = relayRequest({ action: 'poll', sessionSecret });
+    await waitFor(() => retriedReply, 'poll retry retires prior waiter', 1000);
+    check(!retriedReply.task, 'superseded poll must not claim a task');
+    await retried;
     const taskID = registrations.adapter.relay.enqueueTask({
       messages: [{ text: 'synthetic relay request; no web page is opened' }],
       meta: { source: 'native-smoke' },
     });
-    const polled = await relayRequest({ action: 'poll', sessionSecret });
+    const polled = await currentPoll;
     check(polled.task?.id === taskID, 'relay poll delivered queued task');
     const updated = await relayRequest({
       action: 'update', sessionSecret, id: taskID,
@@ -240,6 +254,50 @@ async function runSyntheticNativeChecks(paper, pdf) {
     const disconnected = await relayRequest({ action: 'disconnect', sessionSecret });
     check(disconnected.status === 'disconnected', 'relay disconnect');
 
+    await stage('compact chat prompt and explicit full-paper material');
+    await relayRequest({ action: 'connect', sessionSecret, ai: 'Gemini' });
+    const ordinaryPoll = relayRequest({ action: 'poll', sessionSecret });
+    const input = body.querySelector('[data-testid="webai-chat-input"]');
+    input.value = 'Explain that briefly.';
+    body.querySelector('[data-testid="webai-chat-send"]').click();
+    const ordinary = await ordinaryPoll;
+    const ordinaryText = ordinary.task?.messages[0]?.text || '';
+    check(ordinaryText.includes('Explain that briefly.') && ordinaryText.length < 250,
+      'ordinary outbound prompt is compact');
+    check(!/参考材料|任务要求|文献标识|twelve percent/.test(ordinaryText),
+      'ordinary chat does not append PDF excerpts or repeated instructions');
+    await relayRequest({ action: 'update', sessionSecret, id: ordinary.task.id,
+      text: 'A synthetic short answer.', isDone: true });
+    const overviewPoll = relayRequest({ action: 'poll', sessionSecret });
+    body.querySelector('[data-testid="quick-full-summary"]').click();
+    const overviewTask = await overviewPoll;
+    const overviewText = overviewTask.task?.messages[0]?.text || '';
+    check(overviewText.includes('twelve percent') && overviewText.includes('twenty-four'),
+      'explicit full summary still receives both PDF pages');
+    await relayRequest({ action: 'update', sessionSecret, id: overviewTask.task.id,
+      text: 'A synthetic overview.', isDone: true });
+    await relayRequest({ action: 'disconnect', sessionSecret });
+
+    await stage('packaged relay recovers late text without resending the prompt');
+    let relayClock = 0;
+    const recoveryStore = scope.ZoteroResearchRelay.createRelayStore({
+      now: () => relayClock, setTimeout: () => 0, clearTimeout: () => {},
+    });
+    try {
+      recoveryStore.connect({ sessionSecret, ai: 'Gemini' });
+      const lateID = recoveryStore.enqueueTask({ messages: [{ text: 'synthetic late-answer test' }] });
+      await recoveryStore.poll({ sessionSecret }, 0);
+      recoveryStore.update({ sessionSecret, id: lateID, text: 'prefix' });
+      relayClock = 91000;
+      await recoveryStore.poll({ sessionSecret }, 0);
+      check(recoveryStore.update({ sessionSecret, id: lateID, heartbeat: true }).recoverable,
+        'timed-out latest task remains eligible for text-only recovery');
+      recoveryStore.update({ sessionSecret, id: lateID, text: 'prefix and full answer', isDone: true });
+      check(recoveryStore._tasks.get(lateID).text === 'prefix and full answer'
+        && recoveryStore._tasks.get(lateID).error === '', 'late full answer replaces timed-out prefix');
+      check(!(await recoveryStore.poll({ sessionSecret }, 0)).task, 'recovery never queues the prompt again');
+    } finally { recoveryStore.destroy(); }
+
     return {
       status: 'passed',
       production: 'current packaged XPI loaded in Gecko sandbox; original registries untouched',
@@ -247,7 +305,9 @@ async function runSyntheticNativeChecks(paper, pdf) {
       sidebar: 'real Gecko DOM panel restored Markdown with native MathML',
       pdf: 'current physical page 1 and full two-page text extracted by Zotero.PDFWorker',
       chat: 'save, restore, and clear archive verified in isolated profile',
-      relay: 'local connect/poll/update/disconnect verified; no web request',
+      prompt: 'ordinary chat is compact without excerpts; explicit full summary contains both PDF pages',
+      relay: 'local connect/reconnect/poll-retry/update/disconnect verified; abandoned polls cannot claim tasks; no web request',
+      lateRecovery: 'packaged relay replaces timed-out prefix with full answer; no prompt resend',
       modelExecution: 'not configured or invoked; no GPU/Python bridge',
     };
   } finally {

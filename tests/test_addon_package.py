@@ -450,7 +450,7 @@ def test_build_addon_selects_highest_lower_manifest_version_not_mtime(tmp_path: 
     _write_release_package(older, "0.7.9")
     _write_release_package(nearer, "0.8.1")
     _write_release_package(same, PACKAGE_VERSION)
-    _write_release_package(future, "0.8.3", sidecar_version="0.8.1")
+    _write_release_package(future, "99.0.0", sidecar_version="0.8.1")
     _write_release_package(
         unrelated,
         "0.8.1",
@@ -643,7 +643,7 @@ def test_build_addon_without_lower_candidate_preserves_existing_rollback(
     }
     for path, content in originals.items():
         path.write_bytes(content)
-    _write_release_package(output_dir / "future.xpi", "0.8.3")
+    _write_release_package(output_dir / "future.xpi", "99.0.0")
     _write_release_package(
         output_dir / "unrelated.xpi", "0.8.1", addon_id="other@example.invalid"
     )

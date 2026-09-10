@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "test:js": "node --test tests-js/*.test.cjs",
-    "test:gecko": "playwright test tests-browser/sidebar-layout.spec.cjs --browser=firefox --workers=1"
+    "test:gecko": "playwright test tests-browser/sidebar-layout.spec.cjs --browser=firefox --workers=1",
+    "test:webai": "playwright test tests-browser/webai-relay.spec.cjs --browser=chromium --workers=1",
+    "test:webai:gecko": "playwright test tests-browser/webai-relay.spec.cjs --browser=firefox --workers=1"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
