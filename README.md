@@ -44,7 +44,9 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 要求：**Zotero 10.0.x**。
 
-1. 从本仓库 [Releases](https://github.com/daxiaxiong88/zotero-research/releases) 下载最新版 `zotero-research-*.xpi`。
+当前版本 **0.8.3**：[下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.3/zotero-research-0.8.3.xpi) · [下载网页连接脚本 1.0.12](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.3/zotero-research-webai.user.js) · [完整发布说明与附件](https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.8.3)。
+
+1. 从本仓库 [Releases](https://github.com/daxiaxiong88/zotero-research/releases) 下载最新版 XPI；本次请选择 `zotero-research-0.8.3.xpi`，不要把 `previous-stable` 回滚包当成最新版。
 2. 打开 Zotero，进入“工具 → 插件”。
 3. 点击右上角齿轮，选择“从文件安装插件”。
 4. 选择下载的 XPI，按提示完成安装并重启 Zotero。
