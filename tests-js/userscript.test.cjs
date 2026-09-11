@@ -369,6 +369,53 @@ test('background Gemini streams past its frozen first DOM sentence without foreg
   assert.equal(api.window.document.querySelector('message-content').textContent, '第一句。');
 });
 
+test('Gemini forwards a newer visible answer while a network snapshot is still behind', (t) => {
+  const { api, c } = backgroundGemini(t);
+  c.proxy.handleCapture(geminiWire('第一句。'), c.currentTaskId);
+  const full = '第一句。接下来的解释已经在网页显示，但网络快照尚未追上。';
+  api.window.document.querySelector('message-content').textContent = full;
+  c.sampleGeminiAnswer();
+  assert.equal(c.accumulatedText, full, 'available page text must not wait for the next network snapshot');
+  assert.equal(c.doneSignal, false, 'more text alone does not mean completion');
+  c.proxy.handleCapture(geminiWire('第一句。接下来的解释'), c.currentTaskId);
+  assert.equal(c.accumulatedText, full, 'a lagging prefix must not roll back displayed text');
+  c.proxy.handleCapture(geminiWire(full + '现在网络也继续了。'), c.currentTaskId);
+  assert.equal(c.accumulatedText, full + '现在网络也继续了。');
+  c.sampleGeminiAnswer();
+  assert.equal(c.accumulatedText, full + '现在网络也继续了。', 'source arbitration works in both directions');
+});
+
+test('Gemini accepts DOM extensions across whitespace and a separate network thinking block', (t) => {
+  const { api, c } = backgroundGemini(t);
+  const result = []; result[1] = ['第一句。\n\n已有解释。']; result[37] = [['推理过程']];
+  const inner = []; inner[4] = [result];
+  c.proxy.handleCapture(JSON.stringify([['wrb.fr', null, JSON.stringify(inner)]]), c.currentTaskId);
+  const full = '第一句。\n已有解释。\n新的一段内容。';
+  api.window.document.querySelector('message-content').textContent = full;
+  c.sampleGeminiAnswer();
+  assert.equal(c.accumulatedText, full);
+  assert.equal(c.doneSignal, false);
+});
+
+test('Gemini still accepts network corrections and a shorter terminal answer after a DOM extension', (t) => {
+  const { api, c, wakeups, wake } = backgroundGemini(t);
+  c.proxy.handleCapture(geminiWire('第一句。'), c.currentTaskId);
+  api.window.document.querySelector('message-content').textContent = '第一句。网页提前显示的解释。';
+  c.sampleGeminiAnswer();
+  assert.equal(c.accumulatedText, '第一句。网页提前显示的解释。');
+  c.proxy.handleCapture(geminiWire('更正：这是新的解释。'), c.currentTaskId);
+  assert.equal(c.accumulatedText, '更正：这是新的解释。', 'not a choose-longest policy');
+  api.window.document.querySelector('message-content').textContent += '过时的后续内容。';
+  c.sampleGeminiAnswer();
+  assert.equal(c.accumulatedText, '更正：这是新的解释。', 'an incompatible DOM answer cannot override a correction');
+  c.proxy.handleCapture(geminiWire('结论。', true), c.currentTaskId);
+  const completion = wakeups.findLast(message => message.ms === 3500);
+  assert.ok(completion);
+  wake(completion);
+  assert.equal(c.accumulatedText, '结论。');
+  assert.equal(c.doneSignal, true);
+});
+
 test('background Gemini completes on terminal plus closed transport using the worker, not stale UI', (t) => {
   const { c, wakeups, wake } = backgroundGemini(t);
   const release = c.proxy.beginRequest(c.currentTaskId);

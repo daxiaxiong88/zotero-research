@@ -13,6 +13,7 @@ for (const scenario of [
   { provider: 'chatgpt', upload: 'drag' },
   { provider: 'gemini', upload: 'paste' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr' },
+  { provider: 'gemini', upload: 'paste', capture: 'network-lag' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'lost-callback' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'relay-timeout' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background' },
@@ -42,13 +43,22 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
     window.store = ZoteroResearchRelay.createRelayStore({ now: () => Date.now() + clockOffset });
     window.expireFirstProgress = scenario.fault === 'relay-timeout';
     window.events = [];
-    store.subscribe(event => events.push(event));
+    store.subscribe(event => events.push({ ...event, receivedAt: Date.now() }));
     const host = document.createElement('div'); host.style.width = '360px'; document.body.append(host);
     window.panel = ZoteroResearchPanel.mount(host, {
       relay: store, getProvider: () => scenario.provider, retrieveEvidence: async () => [],
       loadChatSession: async () => ({ messages: [] }), saveChatSession: async () => {},
     });
     panel.setContext({ item_key: 'BROWSER1', attachment_key: 'PDF00001', library_id: 1, title: 'Browser regression fixture' });
+    if (scenario.capture === 'network-lag') {
+      const rendered = new MutationObserver(() => {
+        if (host.querySelector('.zrp-message-assistant')?.textContent.includes('完整回答的最后一句。')) {
+          window.answerRenderedAt = Date.now();
+          rendered.disconnect();
+        }
+      });
+      rendered.observe(host, { childList: true, subtree: true, characterData: true });
+    }
   }, scenario);
   await web.exposeFunction('relayRequest', payload => sidebar.evaluate(async value => {
     if (value.action === 'poll') return store.poll(value, 500);
@@ -106,15 +116,30 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
     // cutoff. The DOM also pauses, then adds a formula and the final sentence.
     window.fetch = async () => new Response(new ReadableStream({
       async start(controller) {
-        const write = text => controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify({ message: {
-          id: 'answer-new', author: { role: 'assistant' }, channel: 'final',
-          content: { content_type: 'text', parts: [text] },
-        } }) + '\n\n'));
+        const write = text => {
+          if (scenario.capture === 'network-lag') {
+            const result = []; result[1] = [text];
+            const inner = []; inner[4] = [result];
+            controller.enqueue(new TextEncoder().encode(JSON.stringify([['wrb.fr', null, JSON.stringify(inner)]]) + '\n'));
+          } else {
+            controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify({ message: {
+              id: 'answer-new', author: { role: 'assistant' }, channel: 'final',
+              content: { content_type: 'text', parts: [text] },
+            } }) + '\n\n'));
+          }
+        };
         write('回答前半段');
-        await new Promise(resolve => setTimeout(resolve, 4200));
+        await new Promise(resolve => setTimeout(resolve, scenario.capture === 'network-lag' ? 600 : 4200));
+        window.answerAvailableAt = Date.now();
         window.appendAnswer();
+        // Do not close the network until the test has seen the advanced DOM
+        // answer arrive and display in the sidebar. Waiting for DONE cannot
+        // accidentally make this latency regression pass.
+        if (scenario.capture === 'network-lag') {
+          await new Promise(resolve => { window.finishFixtureStream = resolve; });
+        }
         write('回答前半段\n\\[\\frac{a}{b}\\]\n完整回答的最后一句。');
-        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n')); controller.close();
+        controller.enqueue(new TextEncoder().encode(scenario.capture === 'network-lag' ? '\n[["e",10,null]]' : 'data: [DONE]\n\n')); controller.close();
       },
     }), { headers: { 'Content-Type': 'text/event-stream' } });
     document.addEventListener('DOMContentLoaded', () => {
@@ -187,7 +212,10 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
             nativeTimeout(() => request.send('fixture'), scenario.capture === 'xhr-dom' ? 600 : 0);
             if (background) window.fixtureBackground = true;
           } else {
-            void fetch(gemini ? '/fixture-unintercepted-response' : '/backend-api/f/conversation').then(response => response.text());
+            const url = scenario.capture === 'network-lag'
+              ? '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'
+              : (gemini ? '/fixture-unintercepted-response' : '/backend-api/f/conversation');
+            void fetch(url).then(response => response.text());
           }
         }, 3000);
       });
@@ -227,6 +255,19 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
   }, PNG);
   await expect(sidebar.locator('.zrp-image-chip')).toBeVisible();
   await input.press('Enter');
+  if (scenario.capture === 'network-lag') {
+    await expect(sidebar.locator('.zrp-message-assistant')).toContainText('完整回答的最后一句。', { timeout: 20000 });
+    const progressAt = await sidebar.evaluate(() => events.find(event => event.type === 'progress'
+      && event.text?.includes('完整回答的最后一句。'))?.receivedAt);
+    const availableAt = await web.evaluate(() => window.answerAvailableAt);
+    const renderedAt = await sidebar.evaluate(() => window.answerRenderedAt);
+    expect(progressAt - availableAt).toBeLessThan(1000);
+    expect(renderedAt - availableAt).toBeLessThan(1000);
+    expect(await sidebar.evaluate(() => events.some(event => event.type === 'answer'))).toBe(false);
+    test.info().annotations.push({ type: 'relay-latency-ms', description: String(progressAt - availableAt) });
+    test.info().annotations.push({ type: 'display-latency-ms', description: String(renderedAt - availableAt) });
+    await web.evaluate(() => window.finishFixtureStream());
+  }
   await expect.poll(() => sidebar.evaluate(() => events.filter(event => event.type === 'answer' && !event.error).length), { timeout: 45000 }).toBe(1);
   const result = await sidebar.evaluate(() => ({
     answer: events.findLast(event => event.type === 'answer'),

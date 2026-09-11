@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.19
+// @version      1.0.20
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -224,6 +224,18 @@
       else { index = start + 1; }
     }
     return frames;
+  }
+
+  function isGeminiTextExtension(text, prefix) {
+    // Both sources serialize Markdown, but may differ in whitespace or keep
+    // the network-only thinking block separate. Only a compatible extension
+    // may outrun the other source; unrelated/shorter corrections still belong
+    // to the network, especially its terminal snapshot.
+    const normalize = value => String(value || '').replace(/^<think>[\s\S]*?<\/think>\s*/, '')
+      .replace(/\s+/g, ' ').trim();
+    const before = normalize(prefix);
+    const after = normalize(text);
+    return Boolean(before) && after.length > before.length && after.startsWith(before);
   }
 
   function parseGemini(raw) {
@@ -759,7 +771,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'relay-background-3',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'relay-latency-1',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -1037,7 +1049,14 @@
       const chatGPTDom = this.config.name === 'ChatGPT' && source === 'chatgpt-dom';
       const geminiDom = this.config.name === 'Gemini' && source === 'gemini-dom';
       if (networkData && this.lastDataSource === 'chatgpt-dom') { return; }
-      if (geminiDom && this.geminiNetworkText && !isDone) { return; }
+      if (geminiDom && this.geminiNetworkText && !isDone) {
+        if (this.geminiTransportDone || !isGeminiTextExtension(nextText, this.geminiNetworkText)
+          || !isGeminiTextExtension(nextText, this.accumulatedText)) { return; }
+      }
+      if (networkData && this.config.name === 'Gemini' && !isDone && !this.geminiTransportDone
+        && this.lastDataSource === 'gemini-dom' && isGeminiTextExtension(this.accumulatedText, nextText)) {
+        return; // The page already supplied this prefix plus more of the same answer.
+      }
       if (source === 'dom' && this.lastDataSource === 'network') { return; }
       if (networkData && this.config.output?.type === 'network' && !['ChatGPT', 'Gemini'].includes(this.config.name)) { this.stopDomWatcher(); }
       // Network parsers return the latest complete value, so even a shorter

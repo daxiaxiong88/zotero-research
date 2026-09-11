@@ -44,7 +44,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 要求：**Zotero 10.0.x**。
 
-当前版本 **0.8.10**：[下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.10/zotero-research-0.8.10.xpi) · [下载网页连接脚本 1.0.19](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.10/zotero-research-webai.user.js) · [完整发布说明与附件](https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.8.10)。
+当前版本 **0.8.10**：[下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.10/zotero-research-0.8.10.xpi) · [下载网页连接脚本 1.0.20](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.10/zotero-research-webai.user.js) · [完整发布说明与附件](https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.8.10)。
 
 本版优先从 Gemini 响应流回传正文，避免后台页面停在第一句时必须切回网页才能继续；同时保留独立超时、迟到正文补回和轻量提示词。**请同时更新 XPI 和油猴脚本**。详见 [0.8.10 说明](docs/releases/v0.8.10.md)。浏览器完全冻结/丢弃标签页时脚本无法继续执行，不保证突破浏览器休眠策略。
 
@@ -60,7 +60,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 uv run python scripts/build_addon.py
 ```
 
-当前源码默认生成的安装包位于 `dist/zotero-research-0.8.10.xpi`。发布附件包含上一可用版本 0.8.8 的 `previous-stable` 回滚 XPI，与 1.0.19 脚本兼容。XPI 采用手动更新，安装新版即可保留设置和对话。
+当前源码默认生成的安装包位于 `dist/zotero-research-0.8.10.xpi`。发布附件包含上一可用版本 0.8.8 的 `previous-stable` 回滚 XPI，与 1.0.20 脚本兼容。XPI 采用手动更新，安装新版即可保留设置和对话。
 
 ### 2. 安装网页连接脚本
 
@@ -70,7 +70,7 @@ uv run python scripts/build_addon.py
 2. <img width="1028" height="425" alt="图片对比_20260909_150702" src="https://github.com/user-attachments/assets/d395c165-9f26-413c-8ebc-7168cab48546" />
 
 3. 打开 [网页 AI 连接脚本](https://github.com/daxiaxiong88/zotero-research/raw/refs/heads/main/userscripts/zotero-research-webai.user.js)，让 Tampermonkey 安装它。
-4. 如果以前装过旧版，请更新原脚本，不要同时保留多个副本；0.8.10 配套 **1.0.19**。更新后刷新 AI 网页，不必清空原有网页对话。
+4. 如果以前装过旧版，请更新原脚本，不要同时保留多个副本；0.8.10 配套 **1.0.20**。更新后刷新 AI 网页，不必清空原有网页对话。
 5. 打开并登录任一支持的 AI 网站，然后刷新页面。
 6. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
 
