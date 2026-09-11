@@ -147,6 +147,9 @@ function runtime({ protocol = 'openai', baseUrl, model = 'test-model', apiKey = 
   sandbox.Services = {
     scriptloader: {
       loadSubScript(url) {
+        if (url.endsWith('browser.js')) {
+          vm.runInContext(fs.readFileSync(path.join(__dirname, '../addon/content/browser.js'), 'utf8'), context);
+        }
         if (url.endsWith('panel.js')) {
           sandbox.ZoteroResearchPanel = {
             mount(_body, adapter) {

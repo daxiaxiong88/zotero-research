@@ -26,6 +26,7 @@ _RUNTIME_FILES = (
     "bootstrap.js",
     "prefs.js",
     "content/native.js",
+    "content/browser.js",
     "content/relay.js",
     "content/katex.min.js",
     "content/katex.LICENSE.txt",

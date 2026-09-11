@@ -55,6 +55,7 @@ async function runSyntheticNativeChecks(paper, pdf) {
       : String(await Zotero.Plugins.resolveURI(id, ''));
     for (const resource of [
       'content/native.js',
+      'content/browser.js',
       'content/relay.js',
       'content/katex.min.js',
       'content/markdown.js',
@@ -71,6 +72,8 @@ async function runSyntheticNativeChecks(paper, pdf) {
       'current relay adapter loaded');
     check(typeof scope.ZoteroResearchPanel?.mount === 'function',
       'current sidebar adapter loaded');
+    check(typeof scope.ZoteroResearchBrowser?.createLauncher === 'function',
+      'packaged browser launcher loaded');
     check(typeof scope.ZoteroResearchMarkdown?.renderMarkdown === 'function',
       'current Markdown adapter loaded');
     check(typeof scope.AbortController === 'function', 'sandbox AbortController global');
@@ -110,6 +113,16 @@ async function runSyntheticNativeChecks(paper, pdf) {
     shadowZotero.getMainWindows = () => [];
     scope.Zotero = shadowZotero;
 
+    // Exercise Gecko loading, URL validation and native Chrome path lookup,
+    // but intercept both process-launch boundaries: no user browser is opened.
+    const browserCalls = [];
+    const createLauncher = scope.ZoteroResearchBrowser.createLauncher;
+    scope.ZoteroResearchBrowser.createLauncher = (adapter) => createLauncher({
+      ...adapter,
+      launch: (executable, args) => { browserCalls.push({ executable, args }); },
+      openDefault: (url) => { browserCalls.push({ url }); },
+    });
+
     const packagedMount = scope.ZoteroResearchPanel.mount;
     scope.ZoteroResearchPanel.mount = (target, adapter) => {
       registrations.adapter = adapter;
@@ -143,6 +156,12 @@ async function runSyntheticNativeChecks(paper, pdf) {
     section.onRender(props);
     check(panel && registrations.adapter, 'production panel mounted with captured adapter');
     check(body.querySelector('[data-zrp-root="true"]'), 'real Gecko sidebar root mounted');
+    await registrations.adapter.openWebAI('https://gemini.google.com/app/synthetic#zra-connect=1');
+    check(browserCalls.length === 1, 'browser startup requested exactly once through the native adapter');
+    if (browserCalls[0].args) {
+      check(browserCalls[0].args[0] === '--disable-backgrounding-occluded-windows', 'only scoped occlusion switch used');
+      check(browserCalls[0].args[1].includes('/app/synthetic#zra-connect=1'), 'conversation URL preserved');
+    }
     const apiConfig = registrations.adapter.getAPIConfig();
     check(apiConfig && !apiConfig.baseUrl && !apiConfig.model && !apiConfig.apiKey,
       'isolated profile has no external model configuration');
@@ -308,6 +327,7 @@ async function runSyntheticNativeChecks(paper, pdf) {
       prompt: 'ordinary chat is compact without excerpts; explicit full summary contains both PDF pages',
       relay: 'local connect/reconnect/poll-retry/update/disconnect verified; abandoned polls cannot claim tasks; no web request',
       lateRecovery: 'packaged relay replaces timed-out prefix with full answer; no prompt resend',
+      browser: 'packaged launcher validates URL and locates Chrome in Gecko; OS launch intercepted, no user browser opened',
       modelExecution: 'not configured or invoked; no GPU/Python bridge',
     };
   } finally {

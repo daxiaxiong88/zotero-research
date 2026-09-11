@@ -327,12 +327,9 @@
         setError('没有记录上次的网页对话地址。');
         return;
       }
-      if (!adapter || typeof adapter.openExternal !== 'function') {
-        setError('当前环境无法打开浏览器。');
-        return;
-      }
-      try { adapter.openExternal(sessionMeta.aiUrl); }
-      catch (error) { setError(text(error && error.message, '打开网页失败。')); }
+      openBrowserPage(sessionMeta.aiUrl).catch(function failed(error) {
+        if (!destroyed) setError(text(error && error.message, '打开网页失败。'));
+      });
     }
 
     var root = createElement(document, 'section', {
@@ -540,6 +537,11 @@
         className: 'zrp-chat-status', 'data-testid': 'webai-chat-status', role: 'status',
       }, '等待网页连接');
       chatSection.appendChild(refs.chatStatus);
+      refs.browserNotice = createElement(document, 'div', {
+        className: 'zrp-hint', 'data-testid': 'browser-notice', role: 'status',
+      });
+      refs.browserNotice.hidden = true;
+      chatSection.appendChild(refs.browserNotice);
       var deepProgress = createElement(document, 'div', {
         className: 'zrp-progress', 'data-testid': 'deep-progress',
       });
@@ -925,7 +927,16 @@
       setError('');
       renderMessages();
       Promise.resolve()
+        .then(function ensureBrowser() {
+          if (destroyed || generation !== contextGeneration || isApiMode()
+            || typeof adapter.openWebAI !== 'function') return;
+          var connected = typeof relayAdapter.state === 'function' && relayAdapter.state();
+          // Do not steal focus or open another conversation on every turn.
+          if (connected && connected.connected) return;
+          return openBrowserPage(webConversationURL());
+        })
         .then(function gatherEvidence() {
+          if (destroyed || generation !== contextGeneration) return [];
           if (distill || task === 'upload-material') {
             material.kind = distill ? 'conversation' : 'upload';
             return [];
@@ -1151,16 +1162,42 @@
         });
     }
 
+    function webConversationURL() {
+      var base = PROVIDERS[state.provider].url;
+      try {
+        var saved = new view.URL(sessionMeta.aiUrl);
+        if (saved.origin === new view.URL(base).origin) base = saved.href;
+      } catch (_) { /* no matching saved conversation */ }
+      return base.split('#')[0] + '#zra-connect=1';
+    }
+
+    function openBrowserPage(url) {
+      var generation = contextGeneration;
+      var open = adapter && (adapter.openWebAI || adapter.openExternal);
+      if (typeof open !== 'function') return Promise.reject(new Error('当前环境无法打开浏览器。'));
+      return Promise.resolve().then(function launch() {
+        if (destroyed || generation !== contextGeneration) return;
+        return open.call(adapter, url);
+      })
+        .then(function opened(result) {
+          if (destroyed || generation !== contextGeneration) return;
+          var notice = text(result && result.message);
+          setText(refs.browserNotice, notice);
+          refs.browserNotice.hidden = !notice;
+        }).catch(function openError(error) {
+          if (destroyed || generation !== contextGeneration) return;
+          throw error;
+        });
+    }
+
     function openWebAI() {
       var provider = refs.webaiProvider.value;
       state.provider = PROVIDERS[provider] ? provider : 'gemini';
       setError('');
-      if (!adapter || typeof adapter.openExternal !== 'function') {
-        setError('当前环境无法打开浏览器。');
-        return;
-      }
-      try { adapter.openExternal(PROVIDERS[state.provider].url + '#zra-connect=1'); }
-      catch (error) { setError(text(error && error.message, '打开网页失败。')); }
+      if (isApiMode()) return;
+      openBrowserPage(webConversationURL()).catch(function failed(error) {
+        if (!destroyed) setError(text(error && error.message, '打开网页失败。'));
+      });
     }
 
     function cancelPendingRelayTask() {

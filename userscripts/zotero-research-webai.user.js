@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.0.20
+// @version      1.0.21
 // @description  捕获已打开网页 AI 的回答流并自动回传 Zotero 侧边栏；支持 Gemini、DeepSeek、ChatGPT、Kimi、Claude、AI Studio。
 // @match        https://gemini.google.com/*
 // @match        https://aistudio.google.com/*
@@ -218,10 +218,13 @@
         if (character === '[') { depth += 1; }
         else if (character === ']' && --depth === 0) { end = cursor + 1; break; }
       }
-      if (end < 0) { index = start + 1; continue; }
+      // An incomplete outer frame ends the available stream. Starting over
+      // at every nested/quoted '[' both misreads text as protocol and makes
+      // long partial responses quadratic, blocking DOM + heartbeat callbacks.
+      if (end < 0) { break; }
       const parsed = parseJson(source.slice(start, end));
       if (Array.isArray(parsed)) { frames.push(parsed); index = end; }
-      else { index = start + 1; }
+      else { index = end; }
     }
     return frames;
   }
@@ -551,7 +554,13 @@
       }
       const outputConfig = this.connector.config.output;
       if (!outputConfig?.parser) { return; }
+      const parseStarted = performance.now();
       const parsed = this.parseOutput(outputConfig, allText);
+      if (this.connector.lastTask) {
+        const elapsed = Math.round(performance.now() - parseStarted);
+        this.connector.lastTask.networkParsingTotalMs = (this.connector.lastTask.networkParsingTotalMs || 0) + elapsed;
+        this.connector.lastTask.networkParsingMaxMs = Math.max(this.connector.lastTask.networkParsingMaxMs || 0, elapsed);
+      }
       if (this.connector.lastTask) { this.connector.lastTask.networkDone = parsed.done; }
       if (this.connector.config.name === 'Gemini') {
         const connector = this.connector;
@@ -661,21 +670,32 @@
             && outputConfig?.type === 'network' && outputConfig.regex?.test(urlStr)) {
             const taskId = self.connector.currentTaskId;
             let release = null;
+            let capturedLength = -1;
             const started = () => { release = self.beginRequest(taskId); };
             const captured = function () {
               if (self.connector.currentTaskId !== taskId) { return; }
               if (![3, 4].includes(this.readyState)) { return; }
-              try { self.handleCapture(this.responseText, taskId); }
+              try {
+                const body = this.responseText;
+                // progress and readystatechange may describe the same bytes.
+                // Parse once, including the final transport tail at loadend.
+                if (body.length === capturedLength) { return; }
+                capturedLength = body.length;
+                self.handleCapture(body, taskId);
+              }
               catch (error) { console.warn('[Zotero relay] xhr parse', error); }
             };
             const ended = () => {
+              captured.call(this);
               if (release) { release(); }
               this.removeEventListener('loadstart', started);
               this.removeEventListener('readystatechange', captured);
+              this.removeEventListener('progress', captured);
               this.removeEventListener('loadend', ended);
             };
             this.addEventListener('loadstart', started, { once: true });
             this.addEventListener('readystatechange', captured);
+            this.addEventListener('progress', captured);
             this.addEventListener('loadend', ended, { once: true });
           }
         }
@@ -771,16 +791,39 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'relay-latency-1',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'relay-lifecycle-1',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
       };
       this.traceEvents = [];
+      this.lifecycle = { frozen: false, events: [], maxHeartbeatDelayMs: 0 };
       this.traceStorageAvailable = true;
       this.recordDiagnostic('startup');
       for (const event of ['pagehide', 'pageshow']) {
         window.addEventListener(event, () => this.recordDiagnostic(event));
+      }
+      for (const event of ['freeze', 'resume', 'visibilitychange']) {
+        document.addEventListener(event, () => {
+          if (event === 'freeze') { this.lifecycle.frozen = true; }
+          if (event === 'resume') { this.lifecycle.frozen = false; }
+          this.lifecycle.events.push({ event, at: new Date().toISOString(),
+            visibility: document.visibilityState, taskId: this.currentTaskId });
+          this.lifecycle.events = this.lifecycle.events.slice(-12);
+          this.recordDiagnostic(event);
+          // Resume the current task, never its prompt/upload. Timers and DOM
+          // observers can be delayed independently after background suspension.
+          if ((event === 'resume' || document.visibilityState === 'visible')
+            && this.isRunning && this.currentTaskId) {
+            try {
+              if (this.config.name === 'Gemini') { this.sampleGeminiAnswer(); }
+              else if (this.config.name === 'ChatGPT') { this.sampleChatGPTAnswer(); }
+              this.flushData();
+            } catch (error) {
+              if (this.lastTask) { this.lastTask.resumeError = String(error?.message || error).slice(0, 300); }
+            }
+          }
+        });
       }
     }
 
@@ -802,9 +845,19 @@
       this.lastTraceAt = now;
       this.traceEvents.push({ at: new Date(now).toISOString(), event });
       this.traceEvents = this.traceEvents.slice(-20);
+      // Keep task evidence separate from idle polls. A report exported a few
+      // minutes later must not lose the very stall we are trying to diagnose.
+      if (this.lastTask && (this.currentTaskId === this.lastTask.id
+        || event === 'reset-delivered') && !/^(poll-|diagnostic-)/.test(event)) {
+        this.lastTask.timeline = [...(this.lastTask.timeline || []), {
+          at: new Date(now).toISOString(), event,
+          chars: this.lastTask.capturedChars || 0, visibility: document.visibilityState,
+        }].slice(-24);
+      }
       // Freeze the snapshot: later mutations must not rewrite prior evidence.
       const entry = JSON.parse(JSON.stringify({
         runtime: this.runtime, recordedAt: new Date(now).toISOString(), events: this.traceEvents,
+        lifecycle: this.lifecycle,
         lastTask: this.lastTask || null, lastUpload: this.lastUpload || null,
         lastPoll: this.lastPoll || null, lastTaskPoll: this.lastTaskPoll || null,
         connection: this.lastConnection || null,
@@ -1170,8 +1223,15 @@
         while (this.heartbeatToken === token && this.isRunning && this.isConnected) {
           // Use the existing worker pacer; background page intervals may be
           // suspended while the user is reading in Zotero instead of Chrome.
+          const beforeSleep = Date.now();
           await sleep(10000);
           if (this.heartbeatToken !== token || !this.isRunning || !this.isConnected) { break; }
+          const delay = Math.max(0, Date.now() - beforeSleep - 10000);
+          this.lifecycle.maxHeartbeatDelayMs = Math.max(this.lifecycle.maxHeartbeatDelayMs, delay);
+          if (delay > 20000) {
+            if (this.lastTask) { this.lastTask.heartbeatSchedulingDelayMs = delay; }
+            this.recordDiagnostic('heartbeat-delayed');
+          }
           if (this.hasLock()) { this.forceLock(); }
           await this.sendHeartbeat();
         }
@@ -1801,6 +1861,7 @@
       return {
         scriptVersion: GM_info.script.version, site: location.host,
         collectedAt: new Date().toISOString(), runtime: this.runtime,
+        lifecycle: this.lifecycle,
         connected: this.isConnected, taskActive: Boolean(this.currentTaskId),
         lastTask: this.lastTask || null,
         recentRuntimes: [this.lastTrace, ...this.readDiagnosticHistory().filter(entry => entry.runtime.id !== this.runtime.id)].slice(0, 4),

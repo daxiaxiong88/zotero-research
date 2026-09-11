@@ -896,6 +896,37 @@ function mountMineruAdapter(h, itemID = 42) {
   return adapter;
 }
 
+test('native browser adapter finds Chrome and launches Unicode argument arrays without a shell', async () => {
+  const h = runtime();
+  h.context.URL = URL;
+  h.context.Zotero.isWin = true;
+  h.context.Services.env = { get: key => key === 'LOCALAPPDATA' ? 'C:\\Users\\测试\\AppData\\Local' : '' };
+  h.context.PathUtils = { join: path.win32.join };
+  h.context.IOUtils = { exists: async value => value.endsWith('Chrome\\Application\\chrome.exe') };
+  const calls = [];
+  const file = { initWithPath: value => calls.push(['file', value]) };
+  const process = { init: value => assert.equal(value, file), runwAsync: (args, length, observer, weak) => {
+    calls.push(['launch', Array.from(args)]);
+    assert.equal(length, 2); assert.equal(observer, null); assert.equal(weak, false);
+  } };
+  h.context.Ci = { nsIFile: 'file', nsIProcess: 'process' };
+  h.context.Cc = {
+    '@mozilla.org/file/local;1': { createInstance: () => file },
+    '@mozilla.org/process/util;1': { createInstance: () => process },
+  };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///' }, 3);
+  const adapter = mountMineruAdapter(h);
+  assert.deepEqual(calls, []);
+  await adapter.openWebAI('https://gemini.google.com/app/saved#zra-connect=1');
+  assert.deepEqual(calls, [
+    ['file', 'C:\\Users\\测试\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'],
+    ['launch', ['--disable-backgrounding-occluded-windows', 'https://gemini.google.com/app/saved#zra-connect=1']],
+  ]);
+  await h.context.shutdown({}, 4);
+  await assert.rejects(adapter.openWebAI('https://gemini.google.com/app'));
+  assert.equal(calls.length, 2);
+});
+
 function configureMineruFixture(h, options = {}) {
   const executable = options.executable || 'D:\\fixture\\mineru.exe';
   const modelPath = options.modelPath || 'D:\\fixture\\models';

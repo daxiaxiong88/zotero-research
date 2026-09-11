@@ -335,6 +335,54 @@ function geminiWire(text, done = false) {
   return JSON.stringify([['wrb.fr', null, JSON.stringify(inner)]]) + (done ? '\n[["e",10,null]]' : '');
 }
 
+test('an unfinished large Gemini frame is scanned once, not restarted at every bracket in its text', (t) => {
+  const api = setup();
+  t.after(() => api.window.close());
+  const prefix = geminiWire('第一句。') + '\n';
+  const complete = geminiWire('知识沉淀：' + '['.repeat(1000) + '长公式与推导。'.repeat(20000), true);
+  const partial = prefix + complete.slice(0, -45);
+  const original = api.window.String.prototype.indexOf;
+  let scans = 0;
+  api.window.String.prototype.indexOf = function (needle, from) {
+    if (needle === '[' && this.length === partial.length) scans++;
+    return original.call(this, needle, from);
+  };
+  const start = performance.now();
+  const parsed = api.parseGemini(partial);
+  t.diagnostic('partial chars=' + partial.length + ', search restarts=' + scans + ', milliseconds=' + Math.round(performance.now() - start));
+  assert.equal(parsed.text, '第一句。');
+  assert.equal(parsed.done, false);
+  assert.ok(scans <= 3, 'incomplete outer frame must wait for more bytes, not rescan nested text: ' + scans);
+  const final = api.parseGemini(prefix + complete);
+  assert.ok(final.text.endsWith('长公式与推导。'));
+  assert.equal(final.done, true);
+});
+
+test('partial Gemini frames remain pending and malformed closed frames do not swallow the next answer', (t) => {
+  const api = setup();
+  t.after(() => api.window.close());
+  const partial = geminiWire('已收到的正文') + '\n[["wrb.fr",null,"an unfinished string with [[1,2]] and [[[3]]';
+  const parsed = api.parseGemini(partial);
+  assert.equal(parsed.text, '已收到的正文');
+  assert.equal(parsed.done, false);
+  // Malformed *closed* frame does not prevent parsing the next complete one.
+  assert.equal(api.parseGemini('[invalid]\n' + geminiWire('有效正文', true)).text, '有效正文');
+});
+
+test('completed task timing survives subsequent idle polls in the exported diagnostic', (t) => {
+  const api = setup();
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.currentTaskId = 'timing'; c.lastTask = { id: 'timing', capturedChars: 100 };
+  c.recordDiagnostic('answer-progress');
+  c.recordDiagnostic('update-response');
+  c.currentTaskId = null;
+  for (let index = 0; index < 30; index++) c.recordDiagnostic('poll-response');
+  const report = c.diagnosticReport();
+  assert.deepEqual(Array.from(report.lastTask.timeline, event => event.event), ['answer-progress', 'update-response']);
+  assert.ok(!report.recentRuntimes[0].events.some(event => event.event === 'answer-progress'));
+});
+
 function backgroundGemini(t) {
   let worker;
   const wakeups = [];
@@ -367,6 +415,25 @@ test('background Gemini streams past its frozen first DOM sentence without foreg
   assert.equal(c.accumulatedText, full, 'stale DOM cannot overwrite newer network text');
   assert.equal(c.doneSignal, false, 'partial response is not completion');
   assert.equal(api.window.document.querySelector('message-content').textContent, '第一句。');
+});
+
+test('page resume immediately samples the current long answer and retains lifecycle evidence without replay', (t) => {
+  const { api, c } = backgroundGemini(t);
+  c.lastTask = { id: c.currentTaskId };
+  const id = c.currentTaskId;
+  api.window.document.dispatchEvent(new api.window.Event('freeze'));
+  const full = '第一句。\n知识沉淀的后续结论。';
+  api.window.document.querySelector('message-content').textContent = full;
+  api.window.document.dispatchEvent(new api.window.Event('resume'));
+  assert.equal(c.accumulatedText, full);
+  assert.equal(c.currentTaskId, id);
+  assert.equal(c.doneSignal, false, 'resume does not claim completion without terminal evidence');
+  const report = c.diagnosticReport();
+  assert.equal(report.lifecycle.frozen, false);
+  assert.deepEqual(Array.from(report.lifecycle.events, entry => entry.event), ['freeze', 'resume']);
+  const stored = c.readDiagnosticHistory()[0];
+  assert.equal(stored.lifecycle.events.at(-1).event, 'resume');
+  assert.ok(!JSON.stringify(stored).includes(full), 'diagnostics store timing, not the answer body');
 });
 
 test('Gemini forwards a newer visible answer while a network snapshot is still behind', (t) => {
@@ -457,6 +524,32 @@ test('Gemini captures the page XMLHttpRequest when the userscript sandbox has a 
   assert.equal(connector.proxy.activeRequests.size, 0);
   await new Promise(resolve => setTimeout(resolve, 3600));
   assert.equal(connector.doneSignal, true);
+});
+
+test('long Gemini XHR progress grows the answer before readyState changes or DOM repaints', (t) => {
+  let PageXHR;
+  const api = setup('https://gemini.google.com/app', '<!doctype html><body></body>', window => {
+    PageXHR = class extends window.EventTarget { open() {} };
+    window.unsafeWindow = { XMLHttpRequest: PageXHR };
+  });
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true; c.currentTaskId = 'long-distill'; c.isSendingUpdate = true;
+  const xhr = new PageXHR();
+  xhr.open('POST', '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate');
+  xhr.dispatchEvent(new api.window.Event('loadstart'));
+  xhr.readyState = 3; xhr.responseText = geminiWire('第一句。');
+  xhr.dispatchEvent(new api.window.Event('readystatechange'));
+  assert.equal(c.accumulatedText, '第一句。');
+  const full = '第一句。\n' + '沉淀知识及推导。\n'.repeat(1000) + '最终结论';
+  xhr.responseText += '\n' + geminiWire(full);
+  xhr.dispatchEvent(new api.window.Event('progress'));
+  assert.equal(c.accumulatedText.length, full.length, 'stream progress must not depend on DOM visibility or a readyState transition');
+  assert.ok(c.accumulatedText === full);
+  assert.equal(c.doneSignal, false);
+  xhr.readyState = 4;
+  xhr.dispatchEvent(new api.window.Event('loadend'));
+  assert.equal(c.proxy.activeRequests.size, 0);
 });
 
 test('background Gemini pauses, new requests and cancellation cannot finish an old response', (t) => {

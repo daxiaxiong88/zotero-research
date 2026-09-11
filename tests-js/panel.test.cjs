@@ -92,6 +92,51 @@ const CONTEXT = {
   library_id: 7,
 };
 
+test('首次发送自动打开联动浏览器并恢复旧网页地址，连接后不重复打开', async (t) => {
+  const h = makeRelayHarness();
+  const opened = [];
+  const adapter = makeAdapter(h, {
+    openWebAI: async url => { opened.push(url); return { status: 'started' }; },
+    loadChatSession: async () => ({ aiUrl: 'https://gemini.google.com/app/abc', messages: [
+      { role: 'user', content: '旧问题' }, { role: 'assistant', content: '旧答案' },
+    ] }),
+  });
+  const { panel, root, dom } = setup(adapter);
+  t.after(() => { panel.destroy(); dom.window.close(); });
+  panel.setContext(CONTEXT); await settle();
+  assert.equal(opened.length, 0, 'changing papers alone must not open the browser');
+  root.querySelector('[data-testid="webai-chat-input"]').value = '继续';
+  root.querySelector('[data-testid="webai-chat-send"]').click(); await settle();
+  assert.deepEqual(opened, ['https://gemini.google.com/app/abc#zra-connect=1']);
+  assert.equal(h.relay.calls.length, 1);
+  h.relay.emit({ type: 'answer', id: 'task-1', text: '答案', done: true });
+  h.relay.connected = true;
+  root.querySelector('[data-testid="webai-chat-input"]').value = '再解释';
+  root.querySelector('[data-testid="webai-chat-send"]').click(); await settle();
+  assert.equal(opened.length, 1);
+  assert.equal(h.relay.calls.length, 2);
+});
+
+test('浏览器启动失败保留输入，启动期间切换文献不发送旧问题', async (t) => {
+  const h = makeRelayHarness();
+  let release;
+  const adapter = makeAdapter(h, { openWebAI: () => new Promise(resolve => { release = resolve; }) });
+  const { panel, root, dom } = setup(adapter);
+  t.after(() => { panel.destroy(); dom.window.close(); });
+  panel.setContext(CONTEXT);
+  root.querySelector('[data-testid="webai-chat-input"]').value = '旧文献问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click(); await settle();
+  panel.setContext({ ...CONTEXT, item_key: 'ITEM-2' });
+  release({ status: 'started' }); await settle();
+  assert.equal(h.relay.calls.length, 0);
+  adapter.openWebAI = async () => { throw new Error('启动失败'); };
+  root.querySelector('[data-testid="webai-chat-input"]').value = '新问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click(); await settle();
+  assert.equal(root.querySelector('[data-testid="webai-chat-input"]').value, '新问题');
+  assert.match(root.textContent, /启动失败/);
+  assert.equal(h.relay.calls.length, 0);
+});
+
 test('侧栏使用清晰的产品名和对话区名称', () => {
   const harness = makeRelayHarness();
   const { root, panel } = setup(makeAdapter(harness));
@@ -204,6 +249,7 @@ test('清空重置消息；更换文献清空会话；打开网页按钮跳转�
   assert.ok(root.querySelector('[data-testid="webai-chat-empty"]'), 'empty state returns after clear');
 
   root.querySelector('[data-testid="webai-open"]').click();
+  await settle();
   assert.deepEqual(adapter.openedUrls, ['https://gemini.google.com/app#zra-connect=1']);
 
   panel.setContext({ ...CONTEXT, item_key: 'ITEM-2' });
@@ -684,6 +730,7 @@ test('会话持久化：回答后保存，重开文献自动恢复并提示继�
   assert.ok(second.root.textContent.includes('回答一（第2页）'), 'previous answer restored');
   assert.equal(second.root.querySelector('[data-testid="webai-resume"]').hidden, false);
   second.root.querySelector('[data-testid="webai-resume"]').click();
+  await settle();
   assert.deepEqual(second.adapter.openedUrls.at(-1), 'https://gemini.google.com/app/abc123');
   second.panel.destroy();
 });

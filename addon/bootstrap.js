@@ -27,6 +27,29 @@ function zraCreateAddon(data) {
   let alive = true;
   let focusNext = null;
 
+  const browserLauncher = ZoteroResearchBrowser.createLauncher({
+    isWindows: () => Zotero.isWin === true,
+    openDefault: (url) => Zotero.launchURL(url),
+    async findChrome() {
+      for (const name of ['ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA']) {
+        const base = Services.env.get(name);
+        if (!base) continue;
+        const candidate = PathUtils.join(base, 'Google', 'Chrome', 'Application', 'chrome.exe');
+        if (await IOUtils.exists(candidate)) return candidate;
+      }
+      return null;
+    },
+    launch(executable, args) {
+      const file = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsIFile);
+      file.initWithPath(executable);
+      const process = Cc['@mozilla.org/process/util;1'].createInstance(Ci.nsIProcess);
+      process.init(file);
+      // Interactive Chrome, started by opening a page or sending a question.
+      // Separate Unicode arguments: no shell, new profile, or process killing.
+      process.runwAsync(args, args.length, null, false);
+    },
+  });
+
   const serverID = () => {
     try { return Zotero.Server.LocalAPI.getServerID(); } catch (_) { return null; }
   };
@@ -1685,6 +1708,7 @@ function zraCreateAddon(data) {
           openSettings: () => Zotero.Utilities.Internal.openPreferences(preferenceID),
           copyText: (text) => Zotero.Utilities.Internal.copyTextToClipboard(text),
           openExternal: (url) => Zotero.launchURL(url),
+          openWebAI: (url) => browserLauncher.open(url),
         });
       } catch (error) {
         record.panel = null;
@@ -1860,6 +1884,7 @@ function zraCreateAddon(data) {
     },
     async stop() {
       alive = false;
+      browserLauncher.destroy();
       // Existing jobs notice shutdown in their bounded process-wait loop.
       // Never leave a disabled plugin holding a GPU process indefinitely.
       if (mineruJobs.size) {
@@ -1894,7 +1919,7 @@ function zraCreateAddon(data) {
 }
 
 async function startup(data, _reason) {
-  for (const name of ['native.js', 'relay.js', 'katex.min.js', 'markdown.js', 'panel.js']) {
+  for (const name of ['native.js', 'browser.js', 'relay.js', 'katex.min.js', 'markdown.js', 'panel.js']) {
     Services.scriptloader.loadSubScript(data.rootURI + 'content/' + name, globalThis, 'UTF-8');
   }
   ZoteroResearchAddon = zraCreateAddon(data);
