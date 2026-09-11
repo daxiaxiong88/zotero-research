@@ -214,6 +214,10 @@
     var destroyed = false;
     var contextGeneration = 0;
     var cleanups = [];
+    // Completed messages render once (markdown + KaTeX are expensive); their
+    // DOM nodes are cached and re-attached until something changes.
+    var messageDomCache = new Map();
+    var renderThrottleTimer = null;
     var state = {
       context: null,
       selection: null,
@@ -630,6 +634,27 @@
       }
     }
 
+    function messageSignature(message) {
+      return [
+        message.role,
+        String(message.content || '').length,
+        String(message.content || '').slice(0, 48),
+        message.pending ? 1 : 0,
+        message.error ? 1 : 0,
+        message.notice ? 1 : 0,
+        message.contextNotice ? 1 : 0,
+        message.distill ? 1 : 0,
+        Array.isArray(message.evidence) ? message.evidence.length : 0,
+      ].join('|');
+    }
+
+    function pruneMessageCache() {
+      var live = new Set(state.messages);
+      for (var key of Array.from(messageDomCache.keys())) {
+        if (!live.has(key)) messageDomCache.delete(key);
+      }
+    }
+
     function renderMessages() {
       clearChildren(refs.chatMessages);
       if (!state.messages.length) {
@@ -637,8 +662,18 @@
           className: 'zrp-chat-empty', 'data-testid': 'webai-chat-empty',
         }, '先选择一篇论文，点击上方快捷命令，或直接向 AI 提问。'));
       }
+      pruneMessageCache();
       state.messages.forEach(function addMessage(message, index) {
         var role = message.role === 'assistant' ? 'assistant' : 'user';
+        var signature = messageSignature(message);
+        var cached = messageDomCache.get(message);
+        if (cached && cached.signature === signature) {
+          // Unchanged message: re-attach the cached node. Markdown/KaTeX
+          // parsing is far too expensive to repeat on every progress tick.
+          cached.node.setAttribute('data-testid', 'webai-chat-message-' + String(index));
+          refs.chatMessages.appendChild(cached.node);
+          return;
+        }
         var article = createElement(document, 'article', {
           className: 'zrp-message zrp-message-' + role,
           'data-testid': 'webai-chat-message-' + String(index),
@@ -688,6 +723,7 @@
         // saved source context, so a 来源 row under each answer duplicated
         // what the model already sees. The selection card keeps its jump.
         refs.chatMessages.appendChild(article);
+        messageDomCache.set(message, { node: article, signature: signature });
       });
       if (state.pendingTaskId) {
         var pending = findAssistantMessage(state.pendingTaskId);
@@ -832,6 +868,15 @@
         message.content = stripWebAIInternalCitations(event.text);
         message.pending = true;
         message.notice = text(event.notice, '') || message.notice || '';
+        // Network chunks can arrive many times per second; one rebuild per
+        // 150ms keeps streaming visible without a render storm.
+        if (renderThrottleTimer === null) {
+          renderThrottleTimer = view.setTimeout(function renderProgress() {
+            renderThrottleTimer = null;
+            renderMessages();
+          }, 150);
+        }
+        return;
       } else {
         message.content = stripWebAIInternalCitations(event.text)
           || (event.error ? '未收到完整的网页回答。' : '网页 AI 返回了空回答。');
@@ -1550,6 +1595,11 @@
       },
       focusQuestion() { refs.chatInput.focus(); },
       destroy() {
+        if (renderThrottleTimer !== null && typeof view.clearTimeout === 'function') {
+          view.clearTimeout(renderThrottleTimer);
+        }
+        renderThrottleTimer = null;
+        messageDomCache.clear();
         resetDeepParseUI();
         discardPendingImage();
         destroyed = true;

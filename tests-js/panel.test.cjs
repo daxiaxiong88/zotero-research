@@ -132,6 +132,8 @@ test('普通消息精简入队；流式进度与完成都会渲染', async () =>
   assert.equal(root.querySelector('[data-testid="webai-chat-message-1"]').textContent.includes('正在生成'), true);
 
   harness.relay.emit({ type: 'progress', id: 'task-1', text: '部分回答' });
+  // Progress renders are throttled to one rebuild per 150ms; await the tick.
+  await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(
     root.querySelectorAll('[data-testid="webai-chat-message-1"] .zrp-message-content')[0].textContent,
     '部分回答',
@@ -1565,3 +1567,27 @@ for (const action of ['switch', 'clear', 'destroy']) {
     panel.destroy();
   });
 }
+
+test('流式重渲染跳过未变化消息：完成消息的 DOM 节点被复用', async () => {
+  const harness = makeRelayHarness();
+  const { root, panel } = setupWithMarkdown(makeAdapter(harness));
+  panel.setContext(CONTEXT);
+  await settle();
+  root.querySelector('[data-testid="webai-chat-input"]').value = '问题';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'answer', id: 'task-1', done: true, text: '第一轮 **回答**' });
+  await settle();
+  const completedNode = root.querySelector('[data-testid="webai-chat-message-1"]');
+
+  // A second turn streams in; the completed first answer must not be rebuilt.
+  root.querySelector('[data-testid="webai-chat-input"]').value = '追问';
+  root.querySelector('[data-testid="webai-chat-send"]').click();
+  await settle();
+  harness.relay.emit({ type: 'progress', id: 'task-1', text: '第二轮流式内容' });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const nodeAfterStream = root.querySelector('[data-testid="webai-chat-message-1"]');
+  assert.ok(nodeAfterStream === completedNode, 'completed message node identity preserved');
+  assert.equal(nodeAfterStream.querySelector('.zrp-message-content').textContent, '第一轮 回答');
+  panel.destroy();
+});
