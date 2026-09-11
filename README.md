@@ -60,7 +60,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 uv run python scripts/build_addon.py
 ```
 
-当前源码为 **0.8.11 开发候选版**，默认生成 `dist/zotero-research-0.8.11.xpi`，配套网页脚本 **1.0.21**；不表示已经发布到 Releases。侧栏打开网页或未连接时首次提问会自动请求 Chrome 联动启动，无需单独运行启动器。已连接时复用原对话。详见 [候选版说明与限制](docs/releases/v0.8.11.md)。XPI 采用手动更新，安装新版即可保留设置和对话。
+当前版本 **0.8.11** 已发布：[下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.11/zotero-research-0.8.11.xpi) · [下载网页连接脚本 1.0.21](https://github.com/daxiong88/zotero-research/releases/download/v0.8.11/zotero-research-webai.user.js) · [完整发布说明](https://github.com/daxiong88/zotero-research/releases/tag/v0.8.11)。侧栏打开网页或未连接时首次提问会自动请求 Chrome 联动启动，无需单独运行启动器。已连接时复用原对话。详见 [候选版说明与限制](docs/releases/v0.8.11.md)。XPI 采用手动更新，安装新版即可保留设置和对话。
 
 ### 2. 安装网页连接脚本
 
