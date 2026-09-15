@@ -18,7 +18,7 @@
 - **页码联动**：选文和证据保留 PDF 物理页码，可从侧栏跳回原文位置。
 - **公式与 Markdown 排版**：标题、列表、表格、代码和 LaTeX 公式直接渲染；复杂分式、求和、上下标和矩阵使用本地 KaTeX MathML 显示。
 - **API 直连**：可配置 OpenAI 或 Anthropic 兼容接口，也可从 CC Switch 导入当前配置。
-- **MinerU 深度解析（可选）**：对公式多、表格复杂或双栏排版的论文重新解析，成功后后续提问自动使用增强文本。
+- **MinerU 深度解析（可选）**：对公式多、表格复杂或双栏排版的论文重新解析，成功后本页、全文等取材命令优先使用缓存中的增强文本。
 
 ## 工作方式
 
@@ -40,39 +40,39 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ## 安装
 
+要求：**Zotero 10.0.x**。当前正式版为 **0.8.11**，配套网页连接脚本为 **1.0.21**。
+
+| 组件 | 下载 | 用途 |
+| --- | --- | --- |
+| Zotero 插件 0.8.11 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.11/zotero-research-0.8.11.xpi) | 在 Zotero 中安装 |
+| 网页连接脚本 1.0.21 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.11/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
+
+[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.8.11.md)
+
+**网页模式升级时，请同时更新 XPI 和油猴脚本。** 安装后重启 Zotero、刷新 AI 网页即可，不需要清空设置、文献或对话。XPI 当前采用手动更新；不要把源码压缩包或 `previous-stable` 回滚包当作最新版插件。
+
+本版增加按需启动 Chrome，无需单独运行启动器；优化 Gemini 长回答解析、流式捕获和页面恢复后的补回。浏览器完全冻结或丢弃标签页时脚本仍无法执行，不保证突破浏览器休眠策略。
+
 ### 1. 安装 Zotero 插件
 
-要求：**Zotero 10.0.x**。
-
-当前版本 **0.8.10**：[下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.10/zotero-research-0.8.10.xpi) · [下载网页连接脚本 1.0.20](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.10/zotero-research-webai.user.js) · [完整发布说明与附件](https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.8.10)。
-
-本版优先从 Gemini 响应流回传正文，避免后台页面停在第一句时必须切回网页才能继续；同时保留独立超时、迟到正文补回和轻量提示词。**请同时更新 XPI 和油猴脚本**。详见 [0.8.10 说明](docs/releases/v0.8.10.md)。浏览器完全冻结/丢弃标签页时脚本无法继续执行，不保证突破浏览器休眠策略。
-
-1. 从本仓库 [Releases](https://github.com/daxiaxiong88/zotero-research/releases) 下载最新版 XPI；本次请选择 `zotero-research-0.8.10.xpi`，不要把 `previous-stable` 回滚包当成最新版。
+1. 下载上方的 `zotero-research-0.8.11.xpi`。
 2. 打开 Zotero，进入“工具 → 插件”。
 3. 点击右上角齿轮，选择“从文件安装插件”。
 4. 选择下载的 XPI，按提示完成安装并重启 Zotero。
 5. 在“设置 → 高级”中开启“允许此计算机上的其他应用程序与 Zotero 通信”。
-
-如果你从源码构建，运行：
-
-```powershell
-uv run python scripts/build_addon.py
-```
-
-当前版本 **0.8.11** 已发布：[下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.11/zotero-research-0.8.11.xpi) · [下载网页连接脚本 1.0.21](https://github.com/daxiong88/zotero-research/releases/download/v0.8.11/zotero-research-webai.user.js) · [完整发布说明](https://github.com/daxiong88/zotero-research/releases/tag/v0.8.11)。侧栏打开网页或未连接时首次提问会自动请求 Chrome 联动启动，无需单独运行启动器。已连接时复用原对话。详见 [候选版说明与限制](docs/releases/v0.8.11.md)。XPI 采用手动更新，安装新版即可保留设置和对话。
 
 ### 2. 安装网页连接脚本
 
 只有使用“网页 AI 模式”时需要这一步。
 
 1. 在 Chrome 或 Edge 中安装并启用 Tampermonkey。
-2. <img width="1028" height="425" alt="图片对比_20260909_150702" src="https://github.com/user-attachments/assets/d395c165-9f26-413c-8ebc-7168cab48546" />
 
-3. 打开 [网页 AI 连接脚本](https://github.com/daxiaxiong88/zotero-research/raw/refs/heads/main/userscripts/zotero-research-webai.user.js)，让 Tampermonkey 安装它。
-4. 如果以前装过旧版，请更新原脚本，不要同时保留多个副本；0.8.10 配套 **1.0.20**。更新后刷新 AI 网页，不必清空原有网页对话。
-5. 打开并登录任一支持的 AI 网站，然后刷新页面。
-6. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
+   <img width="1028" height="425" alt="Tampermonkey 配置示意" src="https://github.com/user-attachments/assets/d395c165-9f26-413c-8ebc-7168cab48546" />
+
+2. 点击上方的“下载网页连接脚本”，在 Tampermonkey 中安装；若浏览器只下载文件，可在 Tampermonkey 编辑器中粘贴文件全文并保存。
+3. 如果以前装过，请更新原脚本，不要同时保留多个副本。确认脚本版本为 **1.0.21**。
+4. 打开并登录任一支持的 AI 网站；更新脚本后刷新已打开的 AI 页面，不必清空原有网页对话。
+5. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
 
 ## 使用
 
@@ -87,11 +87,11 @@ uv run python scripts/build_addon.py
 
 ### 关于自动启动浏览器（重要）
 
-侧栏“打开网页”按钮会调用 Zotero 原生进程接口打开 Chrome，并携带 `--disable-backgrounding-occluded-windows` 参数以降低后台标签页被暂停的概率。**建议始终通过这个按钮启动网页 AI**，原因：
+Windows 上，侧栏“打开网页”按钮会调用 Zotero 原生进程接口打开 Chrome，并携带 `--disable-backgrounding-occluded-windows` 参数，减少窗口被完全遮挡时的后台暂停影响。**建议通过这个按钮启动网页 AI**，原因：
 
 - **如果 Chrome 已经在运行**（哪怕是别的窗口），新开的地址只会转交给已有进程——启动参数不会生效，后台回传仍可能被浏览器暂停。想用到该参数，需先保存工作、从 Chrome 菜单完全退出，再从侧栏“打开网页”启动。
 - 网页未连接时首次发送问题也会自动请求启动浏览器（同一机制的兜底），但推荐主动用“打开网页”按钮——启动结果可控、状态可见，失败时提示直接显示在侧栏。
-- 插件永远不会关闭你的浏览器窗口，也不会修改浏览器配置；找不到 Chrome 时退回系统默认浏览器（此时无后台参数）。
+- 插件永远不会关闭你的浏览器窗口，也不会修改浏览器配置；找不到 Chrome 或使用非 Windows 系统时退回系统默认浏览器（此时无后台参数）。
 - 每次从侧栏打开时，若本地记录了同一提供方的上次对话地址，会优先回到那个会话页面以延续上下文。
 
 ### 快捷命令
@@ -153,11 +153,11 @@ API 模式的「附带全文 PDF」当前仅支持 Anthropic 兼容协议，所�
 
 ### 公式仍显示为 LaTeX 原文
 
-0.8.0 起插件内置离线 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`。请确认已安装 0.8.0 或更高版本；语法不完整的公式会保留原文，避免错误排版。
+当前插件内置离线 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`。请先确认 XPI 和油猴脚本都与上方下载版本一致；语法不完整的公式会保留原文，避免错误排版。
 
-0.8.1 修复了长块级公式在 Zotero 侧栏中撑宽整段对话的问题；公式本身过宽时可在公式区域内横向滚动，普通正文仍会随侧栏宽度自动换行。
+公式本身过宽时可在公式区域内横向滚动，普通正文仍会随侧栏宽度自动换行。ChatGPT 回答优先提取原始 LaTeX，并尝试渲染标记为 `latex`、`tex`、`math` 的纯公式代码块；完整 LaTeX 文档和普通程序代码保持原样。
 
-0.8.2 会清理 ChatGPT 回答中的内部 `filecite` 标记，包括实时回传和已经保存在本机的旧对话。
+ChatGPT 的内部 `filecite` 标记会在实时回传和恢复本机对话时自动清理。若旧记录已经缺少正文或公式结构，更新不会凭空补全，需重新提问。
 
 ## 开发与测试
 
@@ -174,4 +174,4 @@ uv run python scripts/build_addon.py
 
 更完整的操作细节见 [Zotero 10 使用指南](docs/USAGE_ZOTERO10.md)。
 
-本次修复、已执行的测试及尚需真实网页验收的项目见 [0.8.3 发布前检查](docs/RELEASE_AUDIT.md)。
+本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.8.11.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
