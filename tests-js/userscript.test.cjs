@@ -1419,6 +1419,131 @@ test('ChatGPT editor receives one paste transaction, not a DOM-only or duplicate
   assert.equal(api.connector.inputAccepts(api.connector.config.input.text, 'question'), false);
 });
 
+test('ChatGPT long pasted-text attachment commits even when the editor stays empty', async (t) => {
+  const api = setup('https://chatgpt.com/', '<body><form>'
+    + '<div contenteditable="true" id="prompt-textarea"><p><br></p></div>'
+    + '<button id="composer-submit-button" disabled>发送</button></form></body>');
+  t.after(() => api.window.close());
+  const document = api.window.document;
+  const input = document.querySelector('#prompt-textarea');
+  input.getBoundingClientRect = () => ({ width: 300, height: 40 });
+  api.window.DataTransfer = class {
+    setData(type, value) { this.value = value; }
+    getData() { return this.value; }
+  };
+  let pastes = 0;
+  input.addEventListener('paste', event => {
+    event.preventDefault(); pastes++;
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.innerHTML = '<span>论文：SeisMoLLM Advanci...</span><span>已粘贴的文本</span>';
+    input.before(card);
+    document.querySelector('#composer-submit-button').disabled = false;
+  });
+  const prompt = '论文：SeisMoLLM Advancing Seismic Modeling\n请整理知识沉淀。\n'
+    + '完整历史问题与回答。'.repeat(2000);
+  assert.equal(await api.connector.fillInput(api.connector.config.input.text, prompt), true);
+  assert.equal(api.connector.inputAccepts(api.connector.config.input.text, prompt), true,
+    'the send preflight must recognize the same attachment accepted during fill');
+  assert.equal(api.connector.readText(input), '');
+  assert.equal(pastes, 1, 'an attachment accepted by ChatGPT must not be pasted a second time');
+  assert.equal(api.connector.inputAccepts(api.connector.config.input.text, 'different question'), false);
+  api.connector.resetTaskState();
+  assert.equal(api.connector.inputAccepts(api.connector.config.input.text, prompt), false,
+    'a card from a previous task cannot authorize a new send');
+});
+
+test('ChatGPT pasted-text snapshots reject old cards, history, images and composer remounts', (t) => {
+  const api = setup('https://chatgpt.com/', '<body><main></main><form>'
+    + '<button type="button" id="old"><span>Previous title</span><span>Pasted text</span></button>'
+    + '<div contenteditable="true" id="prompt-textarea"></div></form></body>');
+  t.after(() => api.window.close());
+  const c = api.connector, doc = api.window.document;
+  const before = c.pastedTextSnapshot();
+  assert.equal(before.nodes.size, 1);
+  c.chatGPTTextPaste = { taskId: c.currentTaskId, text: 'next', before };
+  const check = () => c.inputAccepts(c.config.input.text, 'next');
+  assert.equal(check(), false, 'an existing text card is not a new paste');
+  doc.querySelector('#old').replaceWith(doc.querySelector('#old').cloneNode(true));
+  assert.equal(check(), false, 're-rendering an old card is not registration');
+  const duplicateTitle = doc.querySelector('#old').cloneNode(true);
+  duplicateTitle.removeAttribute('id'); doc.querySelector('form').appendChild(duplicateTitle);
+  assert.equal(check(), true, 'a genuinely additional text card may have the same paper title');
+  duplicateTitle.remove();
+  assert.equal(check(), false);
+  doc.querySelector('main').innerHTML = '<button><span>new</span><span>Pasted text</span></button>';
+  doc.querySelector('form').insertAdjacentHTML('beforeend', '<img src="blob:screenshot"><div aria-busy="true"></div>');
+  assert.equal(check(), false, 'history, image previews and progress mutations are not text attachments');
+  const newCard = doc.createElement('button');
+  newCard.type = 'button'; newCard.innerHTML = '<span>next</span><span>Pasted text</span>';
+  doc.querySelector('form').appendChild(newCard);
+  assert.equal(check(), true);
+  newCard.hidden = true;
+  assert.equal(check(), false, 'hidden cards do not count');
+  newCard.hidden = false;
+  doc.querySelector('#prompt-textarea').textContent = 'unrelated draft';
+  assert.equal(check(), false, 'a text card must not authorize sending another draft');
+  doc.querySelector('#prompt-textarea').textContent = '';
+  doc.querySelector('form').replaceWith(doc.querySelector('form').cloneNode(true));
+  assert.equal(check(), false, 'another composer cannot inherit the paste acknowledgment');
+});
+
+test('ChatGPT text-card readiness waits for processing, then sends exactly once', async (t) => {
+  const api = setup('https://chatgpt.com/', '<body><main></main><form>'
+    + '<div contenteditable="true" id="prompt-textarea"></div>'
+    + '<button id="composer-submit-button" disabled>Send</button></form></body>');
+  t.after(() => api.window.close());
+  const c = api.connector, doc = api.window.document;
+  const input = doc.querySelector('#prompt-textarea'), send = doc.querySelector('#composer-submit-button');
+  input.getBoundingClientRect = send.getBoundingClientRect = () => ({ width: 300, height: 40 });
+  api.window.DataTransfer = class {
+    setData(type, value) { this.value = value; }
+    getData() { return this.value; }
+  };
+  let pastes = 0, sends = 0, processed = false;
+  const prompt = 'FIRST QUESTION\n' + 'full history '.repeat(2000) + '\nLAST ANSWER';
+  input.addEventListener('paste', event => {
+    event.preventDefault(); pastes++;
+    assert.equal(event.clipboardData.getData('text/plain'), prompt, 'the full transcript is preserved');
+    const card = doc.createElement('button'); card.type = 'button';
+    card.innerHTML = '<span>FIRST QUESTION</span><span>Pasted text</span><span role="progressbar"></span>';
+    input.before(card);
+    setTimeout(() => { processed = true; card.querySelector('[role="progressbar"]').remove(); send.disabled = false; }, 250);
+  });
+  send.addEventListener('click', event => {
+    event.preventDefault(); sends++;
+    assert.equal(processed, true, 'processing finishes before Send');
+    send.setAttribute('aria-label', 'Stop generating');
+  });
+  c.isRunning = true;
+  c.startDomWatcher = () => {};
+  const failures = [];
+  c.reportFailure = async message => { failures.push(message); };
+  await c.executeTask({ id: 'long-distill', messages: [{ type: 'text', text: prompt }] });
+  assert.deepEqual(failures, []);
+  assert.equal(pastes, 1); assert.equal(sends, 1);
+  assert.equal(c.lastTask.sendAcknowledged, true);
+  assert.equal(c.lastTask.inputDelivery.mode, 'pasted-text');
+  assert.equal(c.lastTask.inputDelivery.textLength, prompt.length);
+  assert.doesNotMatch(JSON.stringify(c.diagnosticReport()), /FIRST QUESTION|LAST ANSWER/);
+});
+
+test('ChatGPT text attachment upload errors fail without Send or a second paste', async (t) => {
+  const api = setup('https://chatgpt.com/', '<body><form>'
+    + '<div contenteditable="true" id="prompt-textarea"></div></form></body>');
+  t.after(() => api.window.close());
+  const input = api.window.document.querySelector('#prompt-textarea');
+  input.getBoundingClientRect = () => ({ width: 300, height: 40 });
+  api.window.DataTransfer = class { setData() {} };
+  let pastes = 0;
+  input.addEventListener('paste', event => {
+    event.preventDefault(); pastes++;
+    input.insertAdjacentHTML('beforebegin', '<button type="button"><span>Pasted text</span><span>Upload failed</span></button>');
+  });
+  await assert.rejects(api.connector.fillInput(api.connector.config.input.text, 'long text'), /文本附件上传失败/);
+  assert.equal(pastes, 1);
+});
+
 test('an active task cannot be replaced by the next queued task', async (t) => {
   const api = setup('https://chatgpt.com/');
   t.after(() => api.window.close());

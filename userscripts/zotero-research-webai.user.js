@@ -782,6 +782,7 @@
       this.hasPendingData = false;
       this.awaitingManualSend = false;
       this.manualBaseline = null;
+      this.chatGPTTextPaste = null;
       this.pollReq = null;
       this.pollDelayTimer = null;
       this.reconnectTimer = null;
@@ -791,7 +792,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'relay-lifecycle-1',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'chatgpt-text-paste-1',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -1073,6 +1074,7 @@
       this.hasPendingData = false;
       this.awaitingManualSend = false;
       this.manualBaseline = null;
+      this.chatGPTTextPaste = null;
       // Stale timing from a finished task must not leak into the next one.
       this.taskStartedAt = null;
       this.chatGPTBaseline = null;
@@ -1462,9 +1464,11 @@
       if (!el || this.currentTaskId !== taskId) { return false; }
       el.focus();
       if (inputConfig.method === 'chatgpt') {
+        this.chatGPTTextPaste = null;
         // ProseMirror must see a paste transaction: mutating textContent can
         // show the right words while its internal document (and Send) stays empty.
         if (!('value' in el)) {
+          const before = this.pastedTextSnapshot();
           const selection = window.getSelection();
           const range = document.createRange(); range.selectNodeContents(el);
           selection?.removeAllRanges(); selection?.addRange(range);
@@ -1475,11 +1479,23 @@
             accepted = !el.dispatchEvent(event) || event.defaultPrevented;
           } catch (_) { /* no paste support: compatibility path below */ }
           if (accepted) {
+            // ChatGPT can convert this exact paste into a text attachment,
+            // leaving ProseMirror empty. Only this task's new cards count.
+            this.chatGPTTextPaste = { taskId, text, before };
             const committed = await this.waitForValue(() => this.currentTaskId !== taskId
               || this.inputAccepts(inputConfig, text), 5000);
             selection?.removeAllRanges();
             if (this.currentTaskId !== taskId) { return false; }
             if (!committed) { throw new Error('ChatGPT 已接收文字粘贴，但输入框尚未完成更新；请检查网页输入框后再发送。'); }
+            const attachments = this.newAttachments(before);
+            if (attachments.length) {
+              await this.waitAttachmentsReady(before, taskId);
+              if (this.currentTaskId !== taskId) { return false; }
+            }
+            if (this.lastTask) {
+              this.lastTask.inputDelivery = { mode: attachments.length ? 'pasted-text' : 'editor',
+                textLength: text.length, attachmentCount: attachments.length };
+            }
             return true;
           }
         }
@@ -1775,10 +1791,45 @@
     }
 
     newAttachments(before) {
-      const now = this.attachmentSnapshot();
+      const now = before.kind === 'pasted-text' ? this.pastedTextSnapshot() : this.attachmentSnapshot();
       if (now.scope !== before.scope) { return []; }
+      if (before.kind === 'pasted-text') {
+        // Re-rendering a previous card is not a newly received paste. A new
+        // identical title is valid only when the number of those cards grows.
+        const counts = nodes => {
+          const result = new Map();
+          for (const value of nodes.values()) { result.set(value, (result.get(value) || 0) + 1); }
+          return result;
+        };
+        const previousCounts = counts(before.nodes), currentCounts = counts(now.nodes);
+        return [...now.nodes.keys()].filter(node => !before.nodes.has(node)
+          && currentCounts.get(now.nodes.get(node)) > (previousCounts.get(now.nodes.get(node)) || 0));
+      }
       return Array.from(now.nodes.keys()).filter(node => !before.nodes.has(node)
         || before.nodes.get(node) !== now.nodes.get(node));
+    }
+
+    /** Pasted-text cards are not image previews and may have no file test-id. */
+    pastedTextSnapshot() {
+      const scope = this.composerWatchScope();
+      const nodes = new Map();
+      const snapshot = { kind: 'pasted-text', scope, nodes };
+      if (this.config.name !== 'ChatGPT' || scope === document.body) { return snapshot; }
+      const input = scope.querySelector(this.config.input.text.selector);
+      if (!input) { return snapshot; }
+      for (const marker of scope.querySelectorAll('span, div, p, button, [role="button"], [aria-label]')) {
+        if (input.contains(marker) || marker.closest('[data-message-author-role], article, [role="tooltip"]')
+          || !this.controlIsVisible(marker)) { continue; }
+        const labels = [marker.textContent, marker.getAttribute('aria-label')];
+        if (!labels.some(label => /^(?:pasted text|已?粘贴的文本|已貼上的文字|貼上的文字)$/i
+          .test(String(label || '').replace(/\s+/g, ' ').trim()))) { continue; }
+        const card = marker.closest('button, [role="button"], [data-testid*="file" i], [class*="attachment" i], [class*="file-preview" i]')
+          || marker.parentElement;
+        if (!card || card === scope || card.contains(input) || !this.controlIsVisible(card)) { continue; }
+        nodes.set(card, [card.textContent, card.getAttribute('title'), card.getAttribute('aria-label')]
+          .join('|').replace(/\s+/g, ' ').trim());
+      }
+      return snapshot;
     }
 
     registeredSince(before) {
@@ -1909,14 +1960,15 @@
     }
 
     async waitAttachmentsReady(before, taskId) {
+      const label = before.kind === 'pasted-text' ? '文本附件' : '图片';
       let readySince = null;
       const result = await this.waitForValue(() => {
-        if (this.currentTaskId !== taskId || (taskId && !this.isRunning)) { return { error: '图片任务已取消。' }; }
+        if (this.currentTaskId !== taskId || (taskId && !this.isRunning)) { return { error: label + '任务已取消。' }; }
         const cards = this.newAttachments(before);
         if (!cards.length) { readySince = null; return null; }
         const evidence = cards.map(node => [node.textContent, node.getAttribute('aria-label'), node.getAttribute('title')].join(' ')).join(' ');
         if (/upload failed|failed to upload|上传失败|上传出错|文件太大|file too large|unsupported file/i.test(evidence)) {
-          return { error: '网页报告图片上传失败，请查看附件旁的具体错误后重试。' };
+          return { error: '网页报告' + label + '上传失败，请查看附件旁的具体错误后重试。' };
         }
         const pending = /\b(uploading|processing|scanning)\b|上传中|正在上传|处理中|正在处理/i.test(evidence)
           || cards.some(node => node.matches('[aria-busy="true"], [role="progressbar"]')
@@ -1926,7 +1978,7 @@
         return Date.now() - readySince >= 750 ? { ready: true } : null;
       }, 60000);
       if (result?.error) { throw new Error(result.error); }
-      if (!result) { throw new Error('图片已到网页，但上传处理仍未完成；请检查网页附件状态，无需再次粘贴。'); }
+      if (!result) { throw new Error(label + '已到网页，但上传处理仍未完成；请检查网页附件状态，无需再次粘贴。'); }
     }
 
     /** Match the whole prompt; a long stale draft or matching tail is not enough. */
@@ -1939,7 +1991,11 @@
       // normal. Check the unrendered text as well, still matching the WHOLE
       // prompt rather than accepting a suffix or a longer unrelated draft.
       const values = 'value' in current ? [this.readText(current)] : [this.readText(current), current.textContent];
-      return values.some(value => String(value || '').replace(/\s+/g, ' ').trim() === wanted);
+      if (values.some(value => String(value || '').replace(/\s+/g, ' ').trim() === wanted)) { return true; }
+      const paste = this.chatGPTTextPaste;
+      return inputConfig.method === 'chatgpt' && Boolean(paste) && paste.taskId === this.currentTaskId
+        && paste.text === expected && !values.some(value => String(value || '').trim())
+        && this.newAttachments(paste.before).length > 0;
     }
 
     /** Select-all + insertText, forcing frameworks to accept the text. */
