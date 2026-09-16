@@ -1,8 +1,8 @@
 # ChatGPT 知识沉淀：长文字变成附件后被误报未填入
 
-状态：本地修补，未发布。只修改网页连接脚本，不涉及 XPI。
-脚本头仍为当前发布系列 1.0.21；本地修补可由诊断中的
-`runtime.sourceRevision = chatgpt-text-paste-1` 区分，不能仅凭版本号认定已更新。
+状态：纳入 **0.8.12 / 网页脚本 1.0.22** 正式发布。
+修复只涉及网页连接脚本，XPI 功能未变，打包时仅更新发布版本号。
+诊断标识为 `runtime.sourceRevision = chatgpt-text-paste-1`。
 
 ## 证据与根因
 
@@ -36,7 +36,8 @@ Chromium / Firefox 各验证 2 项长文本知识沉淀和 2 项原有图片发�
 附件只投递一次、只点击一次发送，首尾历史均保留，完整答案与公式返回侧栏。
 浏览器集成使用自有隔离页面，所有 URL 被拦截，并非真实登录账号实测。
 
-在 Tampermonkey 编辑原有脚本，使用本地 `userscripts/zotero-research-webai.user.js`
-的全文覆盖并保存，然后刷新 ChatGPT 页面。无需重装 Zotero XPI。
+从 [当前发布页面](https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.8.12)
+获取网页脚本，在 Tampermonkey 中更新原脚本至 1.0.22，并刷新 ChatGPT 页面。
+已安装上一正式版的用户无需重装 Zotero XPI。
 若上次失败的文本卡片仍留在网页输入区，先手动发送或移除它，避免重试叠加旧草稿。
-正式发布时再统一更新脚本版本、安装文档和 GitHub 下载附件；本次未替换公开版本。
+安装文档与下载附件随本次发布同步更新，历史版本不作为当前安装入口。

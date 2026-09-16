@@ -40,22 +40,22 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ## 安装
 
-要求：**Zotero 10.0.x**。当前正式版为 **0.8.11**，配套网页连接脚本为 **1.0.21**。
+要求：**Zotero 10.0.x**。当前正式版为 **0.8.12**，配套网页连接脚本为 **1.0.22**。
 
 | 组件 | 下载 | 用途 |
 | --- | --- | --- |
-| Zotero 插件 0.8.11 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.11/zotero-research-0.8.11.xpi) | 在 Zotero 中安装 |
-| 网页连接脚本 1.0.21 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.11/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
+| Zotero 插件 0.8.12 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.12/zotero-research-0.8.12.xpi) | 在 Zotero 中安装 |
+| 网页连接脚本 1.0.22 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.8.12/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
 
-[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.8.11.md)
+[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.8.12.md)
 
-**网页模式升级时，请同时更新 XPI 和油猴脚本。** 安装后重启 Zotero、刷新 AI 网页即可，不需要清空设置、文献或对话。XPI 当前采用手动更新；不要把源码压缩包或 `previous-stable` 回滚包当作最新版插件。
+**已安装上一正式版的用户，本次只需更新油猴脚本并刷新 AI 网页，无需重装 XPI。** 本次 XPI 仅更新发布版本号，功能未变；新用户请安装上方两个配套文件。无需清空设置、文献或对话。XPI 当前采用手动更新；不要把源码压缩包或 `previous-stable` 回滚包当作最新版插件。
 
-本版增加按需启动 Chrome，无需单独运行启动器；优化 Gemini 长回答解析、流式捕获和页面恢复后的补回。浏览器完全冻结或丢弃标签页时脚本仍无法执行，不保证突破浏览器休眠策略。
+本版修复 ChatGPT 将知识沉淀等长文本转成“已粘贴的文本”附件后，被误报为输入失败的问题；附件就绪后继续发送，不重复粘贴、不截短历史。按需启动 Chrome、Gemini 长回答解析和页面恢复补回等功能保持不变。浏览器完全冻结或丢弃标签页时脚本仍无法执行，不保证突破浏览器休眠策略。
 
 ### 1. 安装 Zotero 插件
 
-1. 下载上方的 `zotero-research-0.8.11.xpi`。
+1. 下载上方的 `zotero-research-0.8.12.xpi`。
 2. 打开 Zotero，进入“工具 → 插件”。
 3. 点击右上角齿轮，选择“从文件安装插件”。
 4. 选择下载的 XPI，按提示完成安装并重启 Zotero。
@@ -70,7 +70,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
    <img width="1028" height="425" alt="Tampermonkey 配置示意" src="https://github.com/user-attachments/assets/d395c165-9f26-413c-8ebc-7168cab48546" />
 
 2. 点击上方的“下载网页连接脚本”，在 Tampermonkey 中安装；若浏览器只下载文件，可在 Tampermonkey 编辑器中粘贴文件全文并保存。
-3. 如果以前装过，请更新原脚本，不要同时保留多个副本。确认脚本版本为 **1.0.21**。
+3. 如果以前装过，请更新原脚本，不要同时保留多个副本。确认脚本版本为 **1.0.22**。
 4. 打开并登录任一支持的 AI 网站；更新脚本后刷新已打开的 AI 页面，不必清空原有网页对话。
 5. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
 
@@ -151,6 +151,10 @@ API 模式的「附带全文 PDF」当前仅支持 Anthropic 兼容协议，所�
 
 先清空网页输入框并刷新页面。网页结构更新时，脚本可能找不到发送按钮；此时在网页中手动点击发送，回答仍可继续返回 Zotero。
 
+### ChatGPT 把长文本变成附件后提示输入失败
+
+请确认油猴脚本已更新至 **1.0.22** 并刷新 ChatGPT 页面。当前脚本能识别本轮新增的“已粘贴的文本”附件，等待其就绪后继续发送；普通短文本和截图发送保持原有方式。若上次失败的文本附件仍留在网页输入区，先手动发送或移除它，再重试，避免叠加旧草稿。
+
 ### 公式仍显示为 LaTeX 原文
 
 当前插件内置离线 KaTeX，支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`。请先确认 XPI 和油猴脚本都与上方下载版本一致；语法不完整的公式会保留原文，避免错误排版。
@@ -174,4 +178,4 @@ uv run python scripts/build_addon.py
 
 更完整的操作细节见 [Zotero 10 使用指南](docs/USAGE_ZOTERO10.md)。
 
-本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.8.11.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
+本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.8.12.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
