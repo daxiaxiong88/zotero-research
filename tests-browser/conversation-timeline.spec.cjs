@@ -59,7 +59,7 @@ for (const [name, url, question, answer] of sites) {
   });
 }
 
-test('Zotero narrow sidebar timeline navigates without overflow or streaming scroll reset', async ({ page }, testInfo) => {
+test('Zotero narrow sidebar timeline stays left-centered beside the reading area without overflow or scroll reset', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 360, height: 900 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setContent('<!doctype html><body style="margin:0"><div id="panel" style="width:100%;height:880px"></div></body>');
@@ -80,15 +80,27 @@ test('Zotero narrow sidebar timeline navigates without overflow or streaming scr
   const rail = page.getByTestId('conversation-timeline');
   const dots = rail.locator('[data-entry-id]');
   await expect(dots).toHaveCount(40);
-  const height = (await rail.boundingBox()).height;
-  expect(height).toBeGreaterThan(700);
-  expect(height).toBeLessThanOrEqual(880);
+  const scroller = page.getByTestId('webai-chat-messages');
+  async function expectLeftReadingRail() {
+    const reading = await scroller.boundingBox();
+    const panelBox = await page.locator('.zrp-panel').boundingBox();
+    const composer = await page.getByTestId('webai-chat-input').boundingBox();
+    const railBox = await rail.boundingBox();
+    const top = Math.max(0, panelBox.y, reading.y);
+    const bottom = Math.min(page.viewportSize().height, panelBox.y + panelBox.height, reading.y + reading.height);
+    expect(railBox.x).toBeGreaterThanOrEqual(panelBox.x);
+    expect(railBox.x + railBox.width).toBeLessThanOrEqual((await page.locator('.zrp-chat-card').boundingBox()).x);
+    expect(Math.abs(railBox.y + railBox.height / 2 - (top + bottom) / 2)).toBeLessThan(2);
+    expect(railBox.height).toBeLessThanOrEqual(360);
+    expect(railBox.y).toBeGreaterThanOrEqual(top);
+    expect(railBox.y + railBox.height).toBeLessThanOrEqual(Math.min(bottom, composer.y));
+  }
+  await expectLeftReadingRail();
   const chatBox = await page.locator('.zrp-chat-card').boundingBox();
   const railBox = await rail.boundingBox();
-  expect(railBox.y).toBeLessThan(40);
-  expect(railBox.x).toBeGreaterThanOrEqual(chatBox.x + chatBox.width);
+  expect(railBox.x + railBox.width).toBeLessThanOrEqual(chatBox.x);
+  expect(await dots.first().evaluate(el => getComputedStyle(el, '::before').display)).toBe('none');
   await dots.nth(20).click();
-  const scroller = page.getByTestId('webai-chat-messages');
   const position = await scroller.evaluate(el => el.scrollTop);
   expect(position).toBeGreaterThan(1000);
   await expect(dots.nth(20)).toHaveAttribute('aria-current', 'step');
@@ -107,15 +119,38 @@ test('Zotero narrow sidebar timeline navigates without overflow or streaming scr
   expect(await rail.locator('[data-track]').evaluate(el => el.scrollTop)).toBe(0);
   await dots.first().hover();
   await expect(rail.getByRole('tooltip')).toContainText('问题 1');
+  const preview = await rail.getByRole('tooltip').boundingBox();
+  expect(preview.x).toBeGreaterThanOrEqual(railBox.x + railBox.width);
+  expect(preview.x + preview.width).toBeLessThanOrEqual(360);
+  await page.mouse.move(350, 0);
+  await dots.nth(20).scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('timeline-sidebar.png') });
   await page.locator('.zrp-panel').evaluate(el => { el.scrollTop = 120; });
   await page.waitForTimeout(100);
-  expect((await rail.boundingBox()).y).toBe(railBox.y);
+  await expectLeftReadingRail();
   await page.setViewportSize({ width: 300, height: 650 });
-  await expect.poll(async () => (await rail.boundingBox()).x).toBeLessThan(280);
-  const resized = await rail.boundingBox();
-  expect(resized.y + resized.height).toBeLessThanOrEqual(650);
+  await page.waitForTimeout(100);
+  await expectLeftReadingRail();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await rail.getByRole('button', { name: '收起对话时间轴' }).click();
+  await page.waitForTimeout(100);
+  await expectLeftReadingRail();
+  await expect(dots.first()).toBeHidden();
+  await rail.getByRole('button', { name: '展开对话时间轴' }).click();
+  await page.waitForTimeout(100);
+  await expectLeftReadingRail();
+  // A short history remains a compact cluster, not dots stretched along the whole side.
+  await page.setViewportSize({ width: 360, height: 900 });
+  await page.evaluate(() => {
+    archive = { messages: [1, 2, 3].flatMap(i => [
+      { role: 'user', content: '短对话 ' + i },
+      { role: 'assistant', content: '这是一段有依据的回答。\n'.repeat(20) },
+    ]) };
+    panel.setContext({ item_key: 'T2', attachment_key: 'A2', title: '另一篇论文', library_id: 1 });
+  });
+  await expect(dots).toHaveCount(3);
+  await expect.poll(async () => (await rail.boundingBox()).height).toBeLessThan(150);
+  await expectLeftReadingRail();
   await page.locator('#panel').evaluate(el => { el.hidden = true; });
   await expect(rail).toBeHidden();
 });

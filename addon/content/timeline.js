@@ -68,6 +68,11 @@
       [data-entry-id]::before { content:""; position:absolute; width:2px; top:0; bottom:0; left:12px; background:var(--line); }
       .tick { position:relative; display:inline-block; width:9px; height:9px; border:2px solid var(--paper);
         border-radius:50%; background:var(--line); vertical-align:middle; }
+      :host([data-mode="sidebar"]) nav { min-height:26px; }
+      :host([data-mode="sidebar"]) [data-action="toggle"] { background:transparent; }
+      :host([data-mode="sidebar"]) .markers { justify-content:center; gap:4px; }
+      :host([data-mode="sidebar"]) [data-entry-id]::before { display:none; }
+      :host([data-mode="sidebar"]) .tick { border:0; }
       [aria-current="step"] .tick { background:var(--accent); width:13px; height:13px; }
       [aria-pressed="true"] .tick { background:none; border:none; width:16px; height:20px; color:var(--star); }
       [aria-pressed="true"] .tick::after { content:"★"; font-size:16px; }
@@ -113,8 +118,9 @@
       const side = options.sideRoot;
       if (!side) { return; }
       const rect = side.getBoundingClientRect();
-      let top = Math.max(0, rect.top), bottom = Math.min(view.innerHeight, rect.bottom);
-      let left = Math.max(0, rect.left), right = Math.min(view.innerWidth, rect.left + side.clientLeft + side.clientWidth);
+      const reading = scrollRoot.getBoundingClientRect();
+      let top = Math.max(0, rect.top, reading.top), bottom = Math.min(view.innerHeight, rect.bottom, reading.bottom);
+      let left = Math.max(0, rect.left + side.clientLeft), right = Math.min(view.innerWidth, rect.left + side.clientLeft + side.clientWidth);
       for (let node = side.parentElement; node && node !== doc.documentElement; node = node.parentElement) {
         const css = view.getComputedStyle(node);
         const box = node.getBoundingClientRect();
@@ -123,9 +129,10 @@
       }
       const visible = side.isConnected && rect.width > 0 && bottom - top >= 80 && right - left >= 80;
       host.style.visibility = visible ? '' : 'hidden';
-      host.style.left = (right - 30) + 'px';
-      host.style.top = (top + 12) + 'px';
-      host.style.height = Math.max(0, bottom - top - 24) + 'px';
+      const height = enabled ? Math.max(0, Math.min(360, bottom - top - 16, entries.length * 28 + 24)) : 28;
+      host.style.left = (left + 4) + 'px';
+      host.style.top = (top + (bottom - top - height) / 2) + 'px';
+      host.style.height = height + 'px';
     }
     function syncPosition() {
       if (destroyed || doc.hidden) { return; }
@@ -149,7 +156,15 @@
       tooltip.appendChild(create('span', { class: 'help' }, '点击跳转 · 长按或按 S 标星'));
       tooltip.hidden = false;
       const rect = dot.getBoundingClientRect();
-      tooltip.style.left = Math.max(8, Math.min(view.innerWidth - 276, rect.left - 270)) + 'px';
+      if (options.sideRoot) {
+        const side = options.sideRoot, box = side.getBoundingClientRect();
+        const left = Math.max(8, rect.right + 8);
+        const right = Math.min(view.innerWidth, box.left + side.clientLeft + side.clientWidth);
+        tooltip.style.width = Math.max(0, Math.min(260, right - left - 8)) + 'px';
+        tooltip.style.left = left + 'px';
+      } else {
+        tooltip.style.left = Math.max(8, Math.min(view.innerWidth - 276, rect.left - 270)) + 'px';
+      }
       tooltip.style.top = Math.max(8, Math.min(view.innerHeight - tooltip.offsetHeight - 8, rect.top - 12)) + 'px';
       dot.setAttribute('aria-describedby', 'timeline-preview');
     }
@@ -175,7 +190,7 @@
       toggle.setAttribute('aria-expanded', String(enabled));
       toggle.setAttribute('aria-label', enabled ? '收起对话时间轴' : '展开对话时间轴');
       toggle.title = enabled ? '收起时间轴' : '展开时间轴';
-      hidePreview(); if (enabled) { schedulePosition(); }
+      hidePreview(); schedulePosition();
     }
     listen(toggle, 'click', () => { setEnabled(!enabled); options.onToggle?.(enabled); });
     listen(markers, 'click', event => {

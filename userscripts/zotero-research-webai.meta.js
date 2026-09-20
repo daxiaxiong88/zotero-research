@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.1.1
+// @version      1.1.2
 // @updateURL    https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.meta.js
 // @downloadURL  https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.user.js
 // @supportURL   https://github.com/daxiaxiong88/zotero-research/issues

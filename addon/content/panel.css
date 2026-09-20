@@ -267,7 +267,7 @@
   overflow: auto;
 }
 
-.zrp-panel[data-timeline="true"] { padding-right: 38px; }
+.zrp-panel[data-timeline="true"] { padding-left: 38px; }
 .zrp-timeline-host { margin: 0; }
 
 .zrp-chat-empty {
