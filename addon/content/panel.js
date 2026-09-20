@@ -218,6 +218,8 @@
     // DOM nodes are cached and re-attached until something changes.
     var messageDomCache = new Map();
     var renderThrottleTimer = null;
+    var timeline = null;
+    var timelineApi = view.ZoteroResearchTimeline || global.ZoteroResearchTimeline;
     var state = {
       context: null,
       selection: null,
@@ -259,6 +261,7 @@
             // writable to a note and copyable.
             distill: Boolean(m.distill),
             distillRequest: Boolean(m.distillRequest),
+            timelineStar: Boolean(m.timelineStar),
           };
         });
       if (!messages.length) return;
@@ -505,7 +508,26 @@
       refs.chatMessages = createElement(document, 'div', {
         className: 'zrp-chat-messages', 'data-testid': 'webai-chat-messages',
       });
-      chatSection.appendChild(refs.chatMessages);
+      var chatBody = createElement(document, 'div', { className: 'zrp-chat-body' });
+      chatBody.appendChild(refs.chatMessages);
+      refs.timelineHost = createElement(document, 'div', { 'data-testid': 'conversation-timeline', className: 'zrp-timeline-host' });
+      chatBody.appendChild(refs.timelineHost);
+      chatSection.appendChild(chatBody);
+      if (timelineApi) {
+        timeline = timelineApi.mount(refs.timelineHost, {
+          scrollRoot: refs.chatMessages,
+          enabled: !adapter.getTimelineEnabled || adapter.getTimelineEnabled() !== false,
+          onToggle: function saveTimelinePreference(enabled) {
+            if (adapter.setTimelineEnabled) adapter.setTimelineEnabled(enabled);
+          },
+          onStar: function starMessage(id, value) {
+            var message = state.messages[Number(id)];
+            if (!message || message.role !== 'user') return;
+            message.timelineStar = value;
+            persistSession();
+          },
+        });
+      } else refs.timelineHost.hidden = true;
 
       var attachRow = createElement(document, 'div', { className: 'zrp-attach-row' });
       refs.attachPdf = createElement(document, 'input', {
@@ -658,6 +680,7 @@
     }
 
     function renderMessages() {
+      var previousScrollTop = refs.chatMessages.scrollTop;
       clearChildren(refs.chatMessages);
       if (!state.messages.length) {
         refs.chatMessages.appendChild(createElement(document, 'div', {
@@ -727,6 +750,15 @@
         refs.chatMessages.appendChild(article);
         messageDomCache.set(message, { node: article, signature: signature });
       });
+      refs.chatMessages.scrollTop = previousScrollTop;
+      if (timeline) {
+        timeline.update(state.messages.map(function timelineEntry(message, index) {
+          return message.role === 'user' ? {
+            id: String(index), text: message.distillRequest ? '知识沉淀' : message.content,
+            target: messageDomCache.get(message).node, starred: Boolean(message.timelineStar),
+          } : null;
+        }).filter(Boolean));
+      }
       if (state.pendingTaskId) {
         var pending = findAssistantMessage(state.pendingTaskId);
         setStatus(pending && pending.notice ? pending.notice
@@ -1571,6 +1603,7 @@
               contextNotice: text(m.contextNotice),
               distill: Boolean(m.distill),
               distillRequest: Boolean(m.distillRequest),
+              timelineStar: Boolean(m.timelineStar),
             };
           });
           var turns = Math.floor(state.messages.length / 2);
@@ -1632,6 +1665,7 @@
       },
       focusQuestion() { refs.chatInput.focus(); },
       destroy() {
+        if (timeline) timeline.destroy();
         if (renderThrottleTimer !== null && typeof view.clearTimeout === 'function') {
           view.clearTimeout(renderThrottleTimer);
         }

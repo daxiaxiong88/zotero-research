@@ -260,11 +260,15 @@
 }
 
 .zrp-chat-messages {
+  flex: 1 1 0;
   min-width: 0;
   max-height: 440px;
   margin: 9px 0;
   overflow: auto;
 }
+
+.zrp-chat-body { display: flex; gap: 4px; min-width: 0; }
+.zrp-timeline-host { align-self: stretch; margin: 9px 0; }
 
 .zrp-chat-empty {
   padding: 20px 8px;

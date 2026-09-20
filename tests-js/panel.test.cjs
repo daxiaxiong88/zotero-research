@@ -73,6 +73,8 @@ function setup(adapter) {
     pretendToBeVisual: true,
   });
   dom.window.eval(RELAY_SOURCE);
+  const timelinePath = path.join(__dirname, '../addon/content/timeline.js');
+  if (fs.existsSync(timelinePath)) dom.window.eval(fs.readFileSync(timelinePath, 'utf8'));
   dom.window.eval(PANEL_SOURCE);
   const panel = dom.window.ZoteroResearchPanel.mount(dom.window.document.body, adapter);
   const root = dom.window.document.querySelector('[data-zrp-root]');
@@ -91,6 +93,40 @@ const CONTEXT = {
   attachment_key: 'ATT-1',
   library_id: 7,
 };
+
+test('侧栏时间轴只索引提问、保存星标、切换文献不串记录', async (t) => {
+  const h = makeRelayHarness();
+  const archives = new Map([['ITEM-1', { messages: [
+    { role: 'user', content: '第一个问题' }, { role: 'assistant', content: '第一个答案' },
+    { role: 'user', content: '沉淀长提示词', distillRequest: true, timelineStar: true },
+    { role: 'assistant', content: '沉淀内容', distill: true },
+  ] }]]);
+  const adapter = makeAdapter(h, {
+    loadChatSession: async key => archives.get(key),
+    saveChatSession: async (key, session) => { archives.set(key, session); },
+    clearChatSession: async key => { archives.delete(key); },
+  });
+  const { panel, root, dom } = setup(adapter);
+  t.after(() => { panel.destroy(); dom.window.close(); });
+  panel.setContext(CONTEXT); await settle();
+  const host = root.querySelector('[data-testid="conversation-timeline"]');
+  assert.ok(host, 'panel should mount a timeline beside its messages');
+  let dots = host.shadowRoot.querySelectorAll('[data-entry-id]');
+  assert.equal(dots.length, 2);
+  assert.match(dots[1].getAttribute('aria-label'), /知识沉淀/);
+  assert.equal(dots[1].getAttribute('aria-pressed'), 'true');
+  dots[0].dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 's', bubbles: true }));
+  await settle();
+  assert.equal(archives.get('ITEM-1').messages[0].timelineStar, true);
+  panel.setContext({ ...CONTEXT, item_key: 'ITEM-2', attachment_key: 'ATT-2' }); await settle();
+  assert.equal(host.hidden, true);
+  assert.equal(host.shadowRoot.querySelectorAll('[data-entry-id]').length, 0);
+  panel.setContext(CONTEXT); await settle();
+  dots = host.shadowRoot.querySelectorAll('[data-entry-id]');
+  assert.equal(dots[0].getAttribute('aria-pressed'), 'true');
+  root.querySelector('[data-testid="webai-clear"]').click(); await settle();
+  assert.equal(host.hidden, true);
+});
 
 test('首次发送自动打开联动浏览器并恢复旧网页地址，连接后不重复打开', async (t) => {
   const h = makeRelayHarness();

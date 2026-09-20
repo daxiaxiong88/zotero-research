@@ -457,6 +457,7 @@ test('session storage keeps all 500 messages while reducing evidence payload and
       score: 4, text: 'evidence '.repeat(120) }] : [],
     distill: index % 7 === 0,
     distillRequest: index % 11 === 0,
+    timelineStar: index === 0,
   }));
   const before = Buffer.byteLength(JSON.stringify({ messages }), 'utf8');
   assert.equal(await adapter.saveChatSession('VOLUME01', { title: 'Volume', messages }), true);
@@ -467,6 +468,8 @@ test('session storage keeps all 500 messages while reducing evidence payload and
   assert.equal(saved.messages[0].content, messages[0].content);
   assert.equal(saved.messages[499].content, messages[499].content);
   assert.equal(saved.messages[0].sourceContext, messages[0].sourceContext);
+  assert.equal(saved.messages[0].timelineStar, true, 'archive compaction must preserve timeline bookmarks');
+  assert.equal((await adapter.loadChatSession('VOLUME01')).messages[0].timelineStar, true);
   assert.ok(after < before, `expected compacted UTF-8 bytes: ${before} -> ${after}`);
   await fixture.h.context.shutdown({}, 4);
 });

@@ -32,6 +32,7 @@ _RUNTIME_FILES = (
     "content/katex.LICENSE.txt",
     "content/markdown.js",
     "content/panel.js",
+    "content/timeline.js",
     "content/panel.css",
     "content/icon.svg",
     "content/preferences.xhtml",

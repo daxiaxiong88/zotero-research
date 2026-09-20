@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_VERSION = "0.8.12"
+PACKAGE_VERSION = "0.9.0"
 EXPECTED_ADDON_ID = "zotero-research@local.invalid"
 EXPECTED_ZOTERO_MIN_VERSION = "10.0"
 EXPECTED_ZOTERO_MAX_VERSION = "10.0.*"
@@ -39,6 +39,7 @@ ALLOWED_RUNTIME_FILES = frozenset(
         "content/katex.LICENSE.txt",
         "content/markdown.js",
         "content/panel.js",
+        "content/timeline.js",
         "content/panel.css",
         "content/icon.svg",
         "content/preferences.xhtml",

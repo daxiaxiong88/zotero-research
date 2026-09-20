@@ -812,7 +812,7 @@ test('heartbeat has an independent deadline when Tampermonkey fetch ignores time
   await pending;
   assert.equal(aborted, 1);
   assert.match(connector.lastHeartbeatError, /Timeout/);
-  assert.equal(timers.size, 0, 'deadline must be released');
+  assert.equal([...timers.values()].includes(deadline), false, 'heartbeat deadline must be released (navigation may own a debounce timer)');
   reply(request, { ok: true, complete: true });
   await Promise.resolve();
   assert.equal(connector.currentTaskId, 'hung-heartbeat', 'a late callback cannot end the current task');

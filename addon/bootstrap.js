@@ -197,6 +197,7 @@ function zraCreateAddon(data) {
     if (Object.prototype.hasOwnProperty.call(source, 'distillRequest')) {
       snapshot.distillRequest = cloneSessionValue(source.distillRequest);
     }
+    if (source.timelineStar === true) snapshot.timelineStar = true;
     // The panel may add a short explanation when history/material was
     // narrowed. It is display/context data, so preserve it verbatim.
     if (Object.prototype.hasOwnProperty.call(source, 'contextNotice')) {
@@ -1692,6 +1693,8 @@ function zraCreateAddon(data) {
           getAttachmentMediaType,
           getFontSize,
           setFontSize,
+          getTimelineEnabled: () => Zotero.Prefs.get('researchAssistant.timelineEnabled') !== false,
+          setTimelineEnabled: (enabled) => Zotero.Prefs.set('researchAssistant.timelineEnabled', enabled),
           loadChatSession,
           saveChatSession,
           clearChatSession,
@@ -1919,7 +1922,7 @@ function zraCreateAddon(data) {
 }
 
 async function startup(data, _reason) {
-  for (const name of ['native.js', 'browser.js', 'relay.js', 'katex.min.js', 'markdown.js', 'panel.js']) {
+  for (const name of ['native.js', 'browser.js', 'relay.js', 'katex.min.js', 'markdown.js', 'timeline.js', 'panel.js']) {
     Services.scriptloader.loadSubScript(data.rootURI + 'content/' + name, globalThis, 'UTF-8');
   }
   ZoteroResearchAddon = zraCreateAddon(data);
