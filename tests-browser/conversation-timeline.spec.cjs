@@ -64,7 +64,7 @@ test('Zotero narrow sidebar timeline navigates without overflow or streaming scr
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setContent('<!doctype html><body style="margin:0"><div id="panel" style="width:100%;height:880px"></div></body>');
   await page.addStyleTag({ content: source('addon/content/panel.css') });
-  for (const file of ['relay.js', 'timeline.js', 'panel.js']) await page.addScriptTag({ content: source('addon/content/' + file) });
+  for (const file of ['relay.js', 'timeline.js', 'updates.js', 'panel.js']) await page.addScriptTag({ content: source('addon/content/' + file) });
   await page.evaluate(() => {
     const messages = [];
     for (let i = 0; i < 40; i++) messages.push({ role: 'user', content: '问题 ' + (i + 1) }, { role: 'assistant', content: '解释公式的每个变量。\n'.repeat(25) });
@@ -73,6 +73,7 @@ test('Zotero narrow sidebar timeline navigates without overflow or streaming scr
       relay: { subscribe: fn => { window.progress = fn; return () => {}; }, state: () => ({ connected: true }), enqueueTask: () => 'pending' },
       loadChatSession: async () => archive, saveChatSession: async (_, value) => { window.archive = value; },
       retrieveEvidence: async () => [],
+      checkUpdates: async () => ({ status: 'current' }),
     });
     panel.setContext({ item_key: 'T1', attachment_key: 'A1', title: 'SeisLM · 阅读记录', library_id: 1 });
   });
@@ -80,8 +81,12 @@ test('Zotero narrow sidebar timeline navigates without overflow or streaming scr
   const dots = rail.locator('[data-entry-id]');
   await expect(dots).toHaveCount(40);
   const height = (await rail.boundingBox()).height;
-  expect(height).toBeGreaterThan(300);
-  expect(height).toBeLessThanOrEqual(440);
+  expect(height).toBeGreaterThan(700);
+  expect(height).toBeLessThanOrEqual(880);
+  const chatBox = await page.locator('.zrp-chat-card').boundingBox();
+  const railBox = await rail.boundingBox();
+  expect(railBox.y).toBeLessThan(40);
+  expect(railBox.x).toBeGreaterThanOrEqual(chatBox.x + chatBox.width);
   await dots.nth(20).click();
   const scroller = page.getByTestId('webai-chat-messages');
   const position = await scroller.evaluate(el => el.scrollTop);
@@ -103,4 +108,14 @@ test('Zotero narrow sidebar timeline navigates without overflow or streaming scr
   await dots.first().hover();
   await expect(rail.getByRole('tooltip')).toContainText('问题 1');
   await page.screenshot({ path: testInfo.outputPath('timeline-sidebar.png') });
+  await page.locator('.zrp-panel').evaluate(el => { el.scrollTop = 120; });
+  await page.waitForTimeout(100);
+  expect((await rail.boundingBox()).y).toBe(railBox.y);
+  await page.setViewportSize({ width: 300, height: 650 });
+  await expect.poll(async () => (await rail.boundingBox()).x).toBeLessThan(280);
+  const resized = await rail.boundingBox();
+  expect(resized.y + resized.height).toBeLessThanOrEqual(650);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.locator('#panel').evaluate(el => { el.hidden = true; });
+  await expect(rail).toBeHidden();
 });

@@ -33,6 +33,7 @@ _RUNTIME_FILES = (
     "content/markdown.js",
     "content/panel.js",
     "content/timeline.js",
+    "content/updates.js",
     "content/panel.css",
     "content/icon.svg",
     "content/preferences.xhtml",

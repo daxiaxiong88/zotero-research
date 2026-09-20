@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_VERSION = "0.9.0"
+PACKAGE_VERSION = "0.9.1"
 EXPECTED_ADDON_ID = "zotero-research@local.invalid"
 EXPECTED_ZOTERO_MIN_VERSION = "10.0"
 EXPECTED_ZOTERO_MAX_VERSION = "10.0.*"
@@ -40,6 +40,7 @@ ALLOWED_RUNTIME_FILES = frozenset(
         "content/markdown.js",
         "content/panel.js",
         "content/timeline.js",
+        "content/updates.js",
         "content/panel.css",
         "content/icon.svg",
         "content/preferences.xhtml",
@@ -389,8 +390,7 @@ def _read_manifest(path: Path) -> dict[str, Any]:
             "manifest applications.zotero.strict_max_version must be "
             f"{EXPECTED_ZOTERO_MAX_VERSION!r}, got {maximum!r}"
         )
-    # Zotero 10's ExtensionData.parseManifest requires this field even when
-    # distribution currently uses manual installation rather than auto-update.
+    # Zotero 10 requires this field; the release feed enables native updates.
     if not _is_nonempty_text(zotero.get("update_url")):
         raise PackageError(
             "manifest applications.zotero.update_url must be a non-empty string"

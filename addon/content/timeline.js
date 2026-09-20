@@ -52,6 +52,7 @@
         font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
       :host([hidden]) { display:none!important; }
       :host([data-mode="web"]) { position:fixed; right:8px; top:18vh; height:64vh; z-index:2147483645; }
+      :host([data-mode="sidebar"]) { position:fixed; z-index:20; }
       :host([data-dark="true"]) { --ink:#e4def0; --line:#60596c; --accent:#b9a9ff; --paper:#26232e; --star:#ffce73; }
       * { box-sizing:border-box; }
       [hidden] { display:none!important; }
@@ -82,7 +83,7 @@
     const markers = create('div', { class: 'markers' });
     const tooltip = create('div', { role: 'tooltip', id: 'timeline-preview', hidden: '' });
     track.appendChild(markers); nav.append(toggle, track, tooltip); shadow.append(style, nav);
-    host.setAttribute('data-mode', options.web ? 'web' : 'panel');
+    host.setAttribute('data-mode', options.web ? 'web' : options.sideRoot ? 'sidebar' : 'panel');
     let entries = [], nodes = new Map(), enabled = options.enabled !== false;
     let destroyed = false, frame = null, pressTimer = null, suppressed = null, previewId = null;
     let scrollRoot = options.scrollRoot || doc.scrollingElement || doc.documentElement;
@@ -108,8 +109,28 @@
         }
       }
     }
+    function dockToSidebar() {
+      const side = options.sideRoot;
+      if (!side) { return; }
+      const rect = side.getBoundingClientRect();
+      let top = Math.max(0, rect.top), bottom = Math.min(view.innerHeight, rect.bottom);
+      let left = Math.max(0, rect.left), right = Math.min(view.innerWidth, rect.left + side.clientLeft + side.clientWidth);
+      for (let node = side.parentElement; node && node !== doc.documentElement; node = node.parentElement) {
+        const css = view.getComputedStyle(node);
+        const box = node.getBoundingClientRect();
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowY)) { top = Math.max(top, box.top); bottom = Math.min(bottom, box.bottom); }
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowX)) { left = Math.max(left, box.left); right = Math.min(right, box.right); }
+      }
+      const visible = side.isConnected && rect.width > 0 && bottom - top >= 80 && right - left >= 80;
+      host.style.visibility = visible ? '' : 'hidden';
+      host.style.left = (right - 30) + 'px';
+      host.style.top = (top + 12) + 'px';
+      host.style.height = Math.max(0, bottom - top - 24) + 'px';
+    }
     function syncPosition() {
-      if (destroyed || !enabled || doc.hidden) { return; }
+      if (destroyed || doc.hidden) { return; }
+      dockToSidebar();
+      if (!enabled) { return; }
       const reference = topEdge() + Math.min(100, (scrollRoot.clientHeight || view.innerHeight) * .25);
       let current = entries[0];
       for (const entry of entries) {
@@ -241,6 +262,7 @@
         host.hidden = !entries.length;
         resizeObserver?.disconnect();
         if (entries.length) { resizeObserver?.observe(scrollRoot); }
+        if (options.sideRoot) { resizeObserver?.observe(options.sideRoot); }
         schedulePosition();
       },
       setEnabled,

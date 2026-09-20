@@ -220,6 +220,7 @@
     var renderThrottleTimer = null;
     var timeline = null;
     var timelineApi = view.ZoteroResearchTimeline || global.ZoteroResearchTimeline;
+    var updateApi = view.ZoteroResearchUpdates || global.ZoteroResearchUpdates;
     var state = {
       context: null,
       selection: null,
@@ -423,6 +424,15 @@
       brand.appendChild(createElement(document, 'span', { className: 'zrp-brand-caption' }, '科研阅读助手'));
       addButton(brand, 'settings', '⚙', 'settings', 'zrp-icon-button');
       header.appendChild(brand);
+      var updateRow = createElement(document, 'div', { className: 'zrp-row' });
+      if (adapter.checkUpdates) {
+        refs.checkUpdates = addButton(updateRow, 'check-updates', '检查更新', 'check-updates', 'zrp-plain-button');
+      }
+      refs.updateStatus = createElement(document, 'span', { className: 'zrp-hint', 'data-testid': 'update-status', role: 'status' });
+      updateRow.appendChild(refs.updateStatus);
+      header.appendChild(updateRow);
+      refs.updateNotice = createElement(document, 'div', { 'data-testid': 'update-notice', hidden: true });
+      header.appendChild(refs.updateNotice);
       var sizeRow = createElement(document, 'div', { className: 'zrp-size-row' });
       refs.fontDecrease = addButton(sizeRow, 'font-decrease', 'A−', 'font-decrease', 'zrp-plain-button');
       refs.fontLabel = createElement(document, 'span', { className: 'zrp-hint' }, '字号');
@@ -508,14 +518,13 @@
       refs.chatMessages = createElement(document, 'div', {
         className: 'zrp-chat-messages', 'data-testid': 'webai-chat-messages',
       });
-      var chatBody = createElement(document, 'div', { className: 'zrp-chat-body' });
-      chatBody.appendChild(refs.chatMessages);
+      chatSection.appendChild(refs.chatMessages);
       refs.timelineHost = createElement(document, 'div', { 'data-testid': 'conversation-timeline', className: 'zrp-timeline-host' });
-      chatBody.appendChild(refs.timelineHost);
-      chatSection.appendChild(chatBody);
+      root.appendChild(refs.timelineHost);
       if (timelineApi) {
         timeline = timelineApi.mount(refs.timelineHost, {
           scrollRoot: refs.chatMessages,
+          sideRoot: root,
           enabled: !adapter.getTimelineEnabled || adapter.getTimelineEnabled() !== false,
           onToggle: function saveTimelinePreference(enabled) {
             if (adapter.setTimelineEnabled) adapter.setTimelineEnabled(enabled);
@@ -752,6 +761,7 @@
       });
       refs.chatMessages.scrollTop = previousScrollTop;
       if (timeline) {
+        root.setAttribute('data-timeline', String(state.messages.some(function hasUser(message) { return message.role === 'user'; })));
         timeline.update(state.messages.map(function timelineEntry(message, index) {
           return message.role === 'user' ? {
             id: String(index), text: message.distillRequest ? '知识沉淀' : message.content,
@@ -1203,6 +1213,23 @@
       return base.split('#')[0] + '#zra-connect=1';
     }
 
+    async function checkUpdates(force) {
+      if (destroyed || !adapter.checkUpdates || !updateApi || document.hidden) return;
+      if (force) setText(refs.updateStatus, '正在检查更新…');
+      try {
+        var release = await adapter.checkUpdates(Boolean(force));
+        if (destroyed) return;
+        if (release.status === 'available' && release.notify) {
+          updateApi.showNotice(refs.updateNotice, release, { kind: 'addon', open: function openUpdate(url) { adapter.openExternal(url); } });
+          if (adapter.markUpdateNotified) adapter.markUpdateNotified(release.version);
+        }
+        if (force) setText(refs.updateStatus, release.status === 'unavailable' ? '暂时无法检查更新，请检查网络后重试。'
+          : release.status === 'available' ? '有新版本可用。' : '已是当前 Zotero 可用的最新版本。');
+      } catch (_) {
+        if (!destroyed && force) setText(refs.updateStatus, '暂时无法检查更新，请稍后重试。');
+      }
+    }
+
     function openBrowserPage(url) {
       var generation = contextGeneration;
       var open = adapter && (adapter.openWebAI || adapter.openExternal);
@@ -1460,6 +1487,7 @@
       else if (action === 'font-decrease') changeFontSize(-1);
       else if (action === 'font-increase') changeFontSize(1);
       else if (action === 'settings') openSettings();
+      else if (action === 'check-updates') void checkUpdates(true);
     }
 
     function onChange(event) {
@@ -1557,6 +1585,12 @@
     }
 
     buildUi();
+    void checkUpdates(false);
+    listen(document, 'visibilitychange', function visibleUpdateCheck() { void checkUpdates(false); });
+    if (adapter.checkUpdates && typeof view.setInterval === 'function') {
+      var updateTimer = view.setInterval(function dailyUpdateCheck() { void checkUpdates(false); }, 3600000);
+      cleanups.push(function stopUpdateTimer() { view.clearInterval(updateTimer); });
+    }
     if (adapter && typeof adapter.getFontSize === 'function') {
       try { state.fontSize = adapter.getFontSize() || 'm'; } catch (_) { state.fontSize = 'm'; }
     }

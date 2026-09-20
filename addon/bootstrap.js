@@ -26,6 +26,22 @@ function zraCreateAddon(data) {
   let relayStore = null;
   let alive = true;
   let focusNext = null;
+  const updateChecker = ZoteroResearchUpdates.createChecker({
+    kind: 'addon', currentVersion: data.version,
+    readState: () => Zotero.Prefs.get('researchAssistant.updateState'),
+    writeState: (value) => Zotero.Prefs.set('researchAssistant.updateState', JSON.stringify(value)),
+    compatible: (item) => {
+      const app = item.applications?.zotero;
+      if (!app || !Zotero.version) return false;
+      const minimum = app.strict_min_version || '0';
+      const maximum = String(app.strict_max_version || '*').replace('*', '999999');
+      return Services.vc.compare(Zotero.version, minimum) >= 0 && Services.vc.compare(Zotero.version, maximum) <= 0;
+    },
+    fetchCatalog: async (url) => {
+      const response = await Zotero.HTTP.request('GET', url, { responseType: 'json', timeout: 8000 });
+      return response.response;
+    },
+  });
 
   const browserLauncher = ZoteroResearchBrowser.createLauncher({
     isWindows: () => Zotero.isWin === true,
@@ -1695,6 +1711,8 @@ function zraCreateAddon(data) {
           setFontSize,
           getTimelineEnabled: () => Zotero.Prefs.get('researchAssistant.timelineEnabled') !== false,
           setTimelineEnabled: (enabled) => Zotero.Prefs.set('researchAssistant.timelineEnabled', enabled),
+          checkUpdates: (force) => updateChecker.check(force),
+          markUpdateNotified: (version) => updateChecker.markNotified(version),
           loadChatSession,
           saveChatSession,
           clearChatSession,
@@ -1922,7 +1940,7 @@ function zraCreateAddon(data) {
 }
 
 async function startup(data, _reason) {
-  for (const name of ['native.js', 'browser.js', 'relay.js', 'katex.min.js', 'markdown.js', 'timeline.js', 'panel.js']) {
+  for (const name of ['native.js', 'browser.js', 'relay.js', 'katex.min.js', 'markdown.js', 'timeline.js', 'updates.js', 'panel.js']) {
     Services.scriptloader.loadSubScript(data.rootURI + 'content/' + name, globalThis, 'UTF-8');
   }
   ZoteroResearchAddon = zraCreateAddon(data);

@@ -128,6 +128,36 @@ test('disabling the plugin removes its stylesheet and Fluent link from open wind
   assert.deepEqual(removed.sort(), ['css', 'ftl']);
 });
 
+test('native update adapter reads the public feed once, respects compatibility, and preserves app preferences', async () => {
+  const h = runtime();
+  const prefs = new Map(), requests = [];
+  h.context.Zotero.Prefs = { get: key => prefs.get(key), set: (key, value) => prefs.set(key, value) };
+  h.context.Zotero.version = '10.0.1';
+  h.context.Services.vc = { compare: (a, b) => a.localeCompare(b, undefined, { numeric: true }) };
+  h.context.Zotero.HTTP = { request: async (method, url, options) => {
+    requests.push({ method, url, options });
+    return { response: { addons: { 'zotero-research@local.invalid': { updates: [{
+      version: '0.9.2', update_link: 'https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.2/zotero-research-0.9.2.xpi',
+      applications: { zotero: { strict_min_version: '10.0', strict_max_version: '10.0.*' } },
+    }] } } } };
+  } };
+  await h.context.startup({ id: 'zotero-research@local.invalid', rootURI: 'test:///', version: '0.9.1' }, 3);
+  let adapter;
+  h.context.ZoteroResearchPanel.mount = (_body, value) => { adapter = value; return { setContext() {}, destroy() {} }; };
+  const doc = { defaultView: {}, createElementNS: () => ({}), documentElement: { appendChild() {} }, getElementById: () => null, querySelector: () => null };
+  const body = { ownerDocument: doc, appendChild() {}, querySelector: () => null, querySelectorAll: () => [] };
+  h.registrations.section.onRender({ body, doc, item: { id: 1 } });
+  const update = await adapter.checkUpdates();
+  assert.equal(update.version, '0.9.2');
+  adapter.markUpdateNotified(update.version);
+  assert.equal((await adapter.checkUpdates()).notify, false);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://raw.githubusercontent.com/daxiaxiong88/zotero-research/main/updates.json');
+  assert.equal(requests[0].method, 'GET'); assert.equal(requests[0].options.timeout, 8000);
+  assert.deepEqual([...prefs.keys()], ['researchAssistant.updateState']);
+  await h.context.shutdown({}, 4);
+});
+
 test('evidence extraction uses Zotero 10 getFullText with attachment ID and preserves physical pages', async () => {
   const h = runtime();
   h.context.zraHash = () => 'fixture-hash';

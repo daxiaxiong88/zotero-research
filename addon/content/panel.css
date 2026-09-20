@@ -267,8 +267,8 @@
   overflow: auto;
 }
 
-.zrp-chat-body { display: flex; gap: 4px; min-width: 0; }
-.zrp-timeline-host { align-self: stretch; margin: 9px 0; }
+.zrp-panel[data-timeline="true"] { padding-right: 38px; }
+.zrp-timeline-host { margin: 0; }
 
 .zrp-chat-empty {
   padding: 20px 8px;

@@ -73,6 +73,8 @@ function setup(adapter) {
     pretendToBeVisual: true,
   });
   dom.window.eval(RELAY_SOURCE);
+  const updatesPath = path.join(__dirname, '../addon/content/updates.js');
+  if (fs.existsSync(updatesPath)) dom.window.eval(fs.readFileSync(updatesPath, 'utf8'));
   const timelinePath = path.join(__dirname, '../addon/content/timeline.js');
   if (fs.existsSync(timelinePath)) dom.window.eval(fs.readFileSync(timelinePath, 'utf8'));
   dom.window.eval(PANEL_SOURCE);
@@ -94,6 +96,29 @@ const CONTEXT = {
   library_id: 7,
 };
 
+test('更新提示独立于聊天：打开检查、提示可关闭，手动失败不冒充最新版', async t => {
+  const h = makeRelayHarness();
+  const marked = [];
+  const release = { status: 'available', version: '0.9.2', notify: true,
+    url: 'https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.2/zotero-research-0.9.2.xpi',
+    notesUrl: 'https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.9.2' };
+  const adapter = makeAdapter(h, { checkUpdates: async () => release, markUpdateNotified: version => marked.push(version) });
+  const { panel, root, dom } = setup(adapter);
+  t.after(() => { panel.destroy(); dom.window.close(); });
+  panel.setContext(CONTEXT); await settle();
+  const notice = root.querySelector('[data-testid="update-notice"]');
+  assert.ok(notice && !notice.hidden, 'new releases must be visible without opening GitHub');
+  assert.match(notice.shadowRoot.textContent, /0\.9\.2/);
+  assert.deepEqual(marked, ['0.9.2']);
+  notice.shadowRoot.querySelector('a').click();
+  assert.equal(adapter.openedUrls[0], release.url);
+  notice.shadowRoot.querySelector('button').click(); assert.equal(notice.hidden, true);
+  adapter.checkUpdates = async () => ({ status: 'unavailable' });
+  root.querySelector('[data-testid="check-updates"]').click(); await settle();
+  assert.match(root.querySelector('[data-testid="update-status"]').textContent, /无法检查/);
+  assert.equal(h.relay.calls.length, 0);
+});
+
 test('侧栏时间轴只索引提问、保存星标、切换文献不串记录', async (t) => {
   const h = makeRelayHarness();
   const archives = new Map([['ITEM-1', { messages: [
@@ -110,7 +135,8 @@ test('侧栏时间轴只索引提问、保存星标、切换文献不串记录',
   t.after(() => { panel.destroy(); dom.window.close(); });
   panel.setContext(CONTEXT); await settle();
   const host = root.querySelector('[data-testid="conversation-timeline"]');
-  assert.ok(host, 'panel should mount a timeline beside its messages');
+  assert.ok(host, 'panel should mount a timeline at the sidebar edge');
+  assert.equal(host.parentElement, root, 'timeline must not be inside the lower chat card');
   let dots = host.shadowRoot.querySelectorAll('[data-entry-id]');
   assert.equal(dots.length, 2);
   assert.match(dots[1].getAttribute('aria-label'), /知识沉淀/);
