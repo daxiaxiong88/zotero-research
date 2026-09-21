@@ -49,12 +49,13 @@ var ZoteroResearchPreferences = {
 
   bindControls() {
     if (this._controlsBound) return;
-    const ids = ['zra-reconnect', 'zra-api-import', 'zra-api-test', 'zra-api-save'];
+    const ids = ['zra-reconnect', 'zra-api-import', 'zra-api-test', 'zra-api-save', 'zra-browser-save'];
     const actions = {
       'zra-reconnect': () => this.reconnect(),
       'zra-api-import': () => this.importFromCCSwitch(),
       'zra-api-test': () => this.testAPI(),
       'zra-api-save': () => this.save(),
+      'zra-browser-save': () => this.saveBrowser(),
     };
     for (const id of ids) {
       const element = document.getElementById(id);
@@ -62,6 +63,7 @@ var ZoteroResearchPreferences = {
         element.addEventListener('click', actions[id]);
       }
     }
+    this.field('zra-browser-mode')?.addEventListener?.('change', () => this.updateBrowserFields());
     this._controlsBound = true;
   },
 
@@ -76,6 +78,11 @@ var ZoteroResearchPreferences = {
 
   init() {
     this.bindControls();
+    const browserMode = this.field('zra-browser-mode');
+    if (browserMode) browserMode.value = Zotero.Prefs.get('researchAssistant.browserMode') || (Zotero.isWin ? 'chrome' : 'default');
+    const executable = this.field('zra-browser-executable');
+    if (executable) executable.value = Zotero.Prefs.get('researchAssistant.browserExecutable') || '';
+    this.updateBrowserFields();
     const protocol = this.field('zra-api-protocol');
     if (protocol) protocol.value = Zotero.Prefs.get('researchAssistant.apiProtocol') || 'auto';
     for (const [id, preference] of Object.entries(API_FIELDS)) {
@@ -91,6 +98,32 @@ var ZoteroResearchPreferences = {
     if (backendPath) {
       backendPath.textContent = '网页 AI 通过 Zotero 本机端口 23119 直连本插件；'
         + '“设置 → 高级 → 允许其他应用与 Zotero 通信”需保持开启。';
+    }
+  },
+
+  updateBrowserFields() {
+    const custom = this.field('zra-browser-custom');
+    if (custom) custom.hidden = this.field('zra-browser-mode')?.value !== 'custom';
+  },
+
+  saveBrowser() {
+    const status = this.field('zra-browser-status');
+    try {
+      const mode = this.field('zra-browser-mode')?.value;
+      if (!['default', 'chrome', 'edge', 'custom'].includes(mode)) throw new Error('请选择有效的浏览器。');
+      if (!Zotero.isWin && (mode === 'chrome' || mode === 'edge')) throw new Error('当前系统请使用“系统默认”或“自定义路径”。');
+      let executable = (this.field('zra-browser-executable')?.value || '').trim();
+      if (mode === 'custom') {
+        executable = ZoteroResearchBrowser.normalizeExecutablePath(executable, Zotero.isWin === true);
+        const file = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsIFile);
+        file.initWithPath(executable);
+        if (!file.exists() || !file.isFile() || !file.isExecutable()) throw new Error('浏览器路径不存在或不是可执行文件。');
+      }
+      Zotero.Prefs.set('researchAssistant.browserExecutable', executable);
+      Zotero.Prefs.set('researchAssistant.browserMode', mode);
+      if (status) status.textContent = '已保存，下次打开网页时生效，无需重启 Zotero。若要切换当前已连接的浏览器，请先在原网页的油猴菜单中断开连接。';
+    } catch (error) {
+      if (status) status.textContent = '未保存：' + String(error?.message || error);
     }
   },
 

@@ -12,6 +12,7 @@
 
 - **在 Zotero 内直接对话**：无需来回复制问题和回答，网页 AI 的输出会流式显示在右侧栏。
 - **连接现有网页 AI**：复用浏览器里已经登录的 AI 页面，无需为网页模式填写 API Key。
+- **选择启动浏览器**：在 Zotero 设置的“科研助手”页面选择系统默认、Chrome、Edge 或自定义路径，不占用侧栏。
 - **轻量提问**：普通聊天只带论文标题、问题及当前选文/截图，不自动追加检索摘录；需要原文时使用本页或全文快捷命令。
 - **连续追问**：同一篇论文保留独立对话；重新打开文献后可恢复侧栏记录。
 - **对话时间轴**：Zotero 侧栏和全部六个 AI 网页都提供提问导航，支持悬停预览、点击跳转、当前位置高亮和长按标星；星标在本机保存。
@@ -41,18 +42,18 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ## 安装
 
-要求：**Zotero 10.0.x**。当前正式版为 **0.9.2**，配套网页连接脚本为 **1.1.2**。
+要求：**Zotero 10.0.x**。当前正式版为 **0.9.3**，配套网页连接脚本为 **1.1.2**。
 
 | 组件 | 下载 | 用途 |
 | --- | --- | --- |
-| Zotero 插件 0.9.2 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.2/zotero-research-0.9.2.xpi) | 在 Zotero 中安装 |
-| 网页连接脚本 1.1.2 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.2/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
+| Zotero 插件 0.9.3 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.3/zotero-research-0.9.3.xpi) | 在 Zotero 中安装 |
+| 网页连接脚本 1.1.2 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.3/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
 
-[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.9.2.md)
+[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.9.3.md)
 
 **已安装带有效更新源的版本，可直接检查更新**；更早缺少更新地址的旧版，仍需手动安装新版 XPI 和油猴脚本一次。安装后重启 Zotero、刷新 AI 网页。无需清空设置、文献或对话；API 直连用户只更新 XPI。不要把源码压缩包、`.meta.js` 或 `previous-stable` 回滚包当作安装文件。
 
-本版将 Zotero 时间轴调整为**对话区左侧、垂直居中的圆点导航**，不遮挡正文、快捷命令和输入框；网页时间轴位置不变。原有更新检查、ChatGPT 长文本附件、图片发送、公式渲染及 Gemini 长回答回传保持原有流程。浏览器完全冻结或丢弃标签页时脚本仍无法执行，不保证突破浏览器休眠策略。
+本版新增**设置页中的浏览器选择**，系统默认、Chrome、Edge、自定义路径均可配置。已有脚本 **1.1.2** 的用户本次只需更新 XPI。原有左侧时间轴、更新检查、ChatGPT 长文本附件、图片发送、公式渲染及 Gemini 长回答回传保持原有流程。浏览器完全冻结或丢弃标签页时脚本仍无法执行，不保证突破浏览器休眠策略。
 
 ### 以后如何获得更新
 
@@ -64,7 +65,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ### 1. 安装 Zotero 插件
 
-1. 下载上方的 `zotero-research-0.9.2.xpi`。
+1. 下载上方的 `zotero-research-0.9.3.xpi`。
 2. 打开 Zotero，进入“工具 → 插件”。
 3. 点击右上角齿轮，选择“从文件安装插件”。
 4. 选择下载的 XPI，按提示完成安装并重启 Zotero。
@@ -94,13 +95,20 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 5. 在输入框提问，按 **Enter** 发送；按 **Shift+Enter** 换行。
 6. 回答会自动显示在 Zotero 的“AI 对话”区域，直接继续输入即可追问。
 
-### 关于自动启动浏览器（重要）
+### 选择和启动浏览器
 
-Windows 上，侧栏“打开网页”按钮会调用 Zotero 原生进程接口打开 Chrome，并携带 `--disable-backgrounding-occluded-windows` 参数，减少窗口被完全遮挡时的后台暂停影响。**建议通过这个按钮启动网页 AI**，原因：
+进入 **Zotero 设置 → 科研助手 → 网页 AI 浏览器**（与 API、MinerU 配置在同一页），选择后点“保存浏览器设置”：
 
-- **如果 Chrome 已经在运行**（哪怕是别的窗口），新开的地址只会转交给已有进程——启动参数不会生效，后台回传仍可能被浏览器暂停。想用到该参数，需先保存工作、从 Chrome 菜单完全退出，再从侧栏“打开网页”启动。
-- 网页未连接时首次发送问题也会自动请求启动浏览器（同一机制的兜底），但推荐主动用“打开网页”按钮——启动结果可控、状态可见，失败时提示直接显示在侧栏。
-- 插件永远不会关闭你的浏览器窗口，也不会修改浏览器配置；找不到 Chrome 或使用非 Windows 系统时退回系统默认浏览器（此时无后台参数）。
+- **系统默认**：严格跟随系统默认浏览器，不再优先找 Chrome，不附加启动参数。
+- **Chrome / Edge**：Windows 自动查找常见安装位置，使用现有用户配置；找不到明确选中的浏览器会提示错误，不擅自换成另一个。
+- **自定义路径**：填写浏览器可执行文件的绝对路径，不附加参数。Windows 使用 `.exe`；macOS 填写 `.app` 内的可执行文件。保存前检查文件，不使用 shell 拼接命令。Chrome / Edge 自动定位目前仅支持 Windows，其他系统可使用系统默认或自定义路径。
+
+保存后下次“打开网页”或未连接时首次发送即生效，无需重启 Zotero。**不会强制切换已连接的网页**；需要换浏览器时，先在原网页的油猴菜单断开，再打开新浏览器并连接。目标浏览器须安装油猴和配套脚本；能启动某浏览器不等于其网页联动已完整验证。
+
+未配置时保留原行为：Windows 优先 Chrome，找不到才走系统默认；其他系统默认走系统浏览器。插件不修改系统默认浏览器，也不关闭已有窗口。
+
+- Windows 的 Chrome / Edge（含自定义路径中的 `chrome.exe` / `msedge.exe`）会携带 `--disable-backgrounding-occluded-windows`，减少窗口被完全遮挡后的后台暂停。**若该浏览器已在运行**，新参数不会改变旧进程；需先保存工作、正常退出其全部窗口，再从侧栏打开。系统默认模式不附加该参数。
+- 网页未连接时首次发送问题也会自动请求启动所选浏览器；已有连接时不另外打开页面。
 - 每次从侧栏打开时，若本地记录了同一提供方的上次对话地址，会优先回到那个会话页面以延续上下文。
 
 ### 快捷命令
@@ -197,6 +205,6 @@ uv run python scripts/build_release_metadata.py --check
 
 更完整的操作细节见 [Zotero 10 使用指南](docs/USAGE_ZOTERO10.md)。
 
-本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.9.2.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
+本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.9.3.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
 
 时间轴交互参考 [Reborn14/chatgpt-conversation-timeline](https://github.com/Reborn14/chatgpt-conversation-timeline)（MIT），本项目针对 Zotero 与六个平台独立实现了共享导航组件；没有照搬其三个站点的完整扩展或 React 内部状态读取逻辑。

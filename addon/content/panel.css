@@ -270,6 +270,11 @@
 .zrp-panel[data-timeline="true"] { padding-left: 38px; }
 .zrp-timeline-host { margin: 0; }
 
+#zra-preferences-root .zra-browser-fields { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+#zra-preferences-root .zra-browser-fields[hidden] { display: none !important; }
+#zra-preferences-root .zra-browser-fields input,
+#zra-preferences-root .zra-browser-fields select { width: 100%; max-width: 100%; box-sizing: border-box; }
+
 .zrp-chat-empty {
   padding: 20px 8px;
   color: var(--zrp-muted);

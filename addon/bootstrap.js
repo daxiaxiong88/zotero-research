@@ -45,6 +45,7 @@ function zraCreateAddon(data) {
 
   const browserLauncher = ZoteroResearchBrowser.createLauncher({
     isWindows: () => Zotero.isWin === true,
+    getSettings: () => ({ mode: Zotero.Prefs.get('researchAssistant.browserMode') || '', executable: Zotero.Prefs.get('researchAssistant.browserExecutable') || '' }),
     openDefault: (url) => Zotero.launchURL(url),
     async findChrome() {
       for (const name of ['ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA']) {
@@ -55,12 +56,28 @@ function zraCreateAddon(data) {
       }
       return null;
     },
+    async findEdge() {
+      for (const name of ['ProgramFiles(x86)', 'ProgramFiles', 'LOCALAPPDATA']) {
+        const base = Services.env.get(name);
+        if (!base) continue;
+        const candidate = PathUtils.join(base, 'Microsoft', 'Edge', 'Application', 'msedge.exe');
+        if (await IOUtils.exists(candidate)) return candidate;
+      }
+      return null;
+    },
+    isExecutable(path) {
+      try {
+        const file = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsIFile);
+        file.initWithPath(path);
+        return file.exists() && file.isFile() && file.isExecutable();
+      } catch (_) { return false; }
+    },
     launch(executable, args) {
       const file = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsIFile);
       file.initWithPath(executable);
       const process = Cc['@mozilla.org/process/util;1'].createInstance(Ci.nsIProcess);
       process.init(file);
-      // Interactive Chrome, started by opening a page or sending a question.
+      // Interactive browser, started by opening a page or sending a question.
       // Separate Unicode arguments: no shell, new profile, or process killing.
       process.runwAsync(args, args.length, null, false);
     },
@@ -1877,7 +1894,7 @@ function zraCreateAddon(data) {
       if (!sectionID) throw new Error('无法注册 Zotero 科研助手侧边栏。');
       preferenceID = await Zotero.PreferencePanes.register({
         pluginID: data.id, label: '科研助手', src: 'content/preferences.xhtml',
-        scripts: ['content/preferences.js'], stylesheets: ['content/panel.css'], image: 'content/icon.svg',
+        scripts: ['content/browser.js', 'content/preferences.js'], stylesheets: ['content/panel.css'], image: 'content/icon.svg',
       });
       Zotero.Reader.registerEventListener('renderTextSelectionPopup', selectionListener, data.id);
       Services.obs.addObserver(reconnectObserver, ZRA_TOPIC);

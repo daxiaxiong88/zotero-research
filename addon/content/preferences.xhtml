@@ -7,6 +7,27 @@
     <html:p>安装配套油猴脚本（userscripts/zotero-research-webai.user.js），打开网页 AI 页面等待“已连接”即可。</html:p>
   </groupbox>
   <groupbox>
+    <html:h2>网页 AI 浏览器</html:h2>
+    <html:p>侧栏“打开网页”及尚未连接时的首次发送，使用这里选择的浏览器；不会切换已经连接的网页。</html:p>
+    <html:div class="zra-browser-fields">
+      <html:label for="zra-browser-mode">打开网页时使用</html:label>
+      <html:select id="zra-browser-mode">
+        <html:option value="default">系统默认</html:option>
+        <html:option value="chrome">Chrome</html:option>
+        <html:option value="edge">Edge</html:option>
+        <html:option value="custom">自定义路径</html:option>
+      </html:select>
+      <html:div id="zra-browser-custom" class="zra-browser-fields" hidden="hidden">
+        <html:label for="zra-browser-executable">浏览器可执行文件的完整路径</html:label>
+        <html:input id="zra-browser-executable" type="text" placeholder="例如 C:\Program Files\Mozilla Firefox\firefox.exe" />
+        <html:span>填写程序本身，不附带参数；macOS 请填写 .app 内的可执行文件，而非 .app 目录。</html:span>
+      </html:div>
+      <html:div><html:button id="zra-browser-save" type="button">保存浏览器设置</html:button></html:div>
+    </html:div>
+    <html:p>Windows 的 Chrome / Edge（含自定义其程序路径）保留后台优化参数；系统默认不附加参数。其他系统请用系统默认或自定义路径。目标浏览器需安装油猴和配套脚本。</html:p>
+    <html:p id="zra-browser-status" role="status"></html:p>
+  </groupbox>
+  <groupbox>
     <html:h2>API 直连（可选）</html:h2>
     <html:p>在侧栏提供方中选择“API 直连”后，问题直接发送到下面配置的模型接口，不经过网页。密钥只保存在本机 Zotero 配置中。</html:p>
     <html:label>接口协议</html:label>
