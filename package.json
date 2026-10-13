@@ -6,12 +6,13 @@
     "check:userscript": "node scripts/build_userscript.cjs --check",
     "test:js": "node --test tests-js/*.test.cjs",
     "test:gecko": "playwright test tests-browser/sidebar-layout.spec.cjs --browser=firefox --workers=1",
-    "test:webai": "playwright test tests-browser/webai-relay.spec.cjs --browser=chromium --workers=1",
-    "test:webai:gecko": "playwright test tests-browser/webai-relay.spec.cjs --browser=firefox --workers=1"
+    "test:webai": "playwright test tests-browser/webai-relay.spec.cjs tests-browser/chatgpt-text-paste.spec.cjs tests-browser/gemini-editor.spec.cjs --browser=chromium --workers=1",
+    "test:webai:gecko": "playwright test tests-browser/webai-relay.spec.cjs tests-browser/chatgpt-text-paste.spec.cjs tests-browser/gemini-editor.spec.cjs --browser=firefox --workers=1"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "jsdom": "^26.1.0",
-    "katex": "^0.18.7"
+    "katex": "^0.18.7",
+    "quill": "2.0.3"
   }
 }

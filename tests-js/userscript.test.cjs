@@ -258,6 +258,104 @@ test('a new ChatGPT request invalidates the previous transport terminal', (t) =>
   release();
 });
 
+for (const layout of ['missing-user', 'missing-assistant', 'stale-ui']) {
+  test(`ChatGPT network terminal completes independently of ${layout}`, (t) => {
+    let worker;
+    const wakeups = [];
+    const api = setup('https://chatgpt.com/', '<body><main><article><div data-message-author-role="user" data-message-id="old-user">旧问题</div>'
+      + '<div data-message-author-role="assistant" data-message-id="old-answer">旧答案</div></article></main>'
+      + '<form><textarea id="prompt-textarea"></textarea></form></body>', window => {
+      window.URL.createObjectURL = () => 'blob:timer'; window.URL.revokeObjectURL = () => {};
+      window.Worker = class { constructor() { worker = this; } postMessage(message) { wakeups.push(message); } };
+    });
+    t.after(() => api.window.close());
+    const c = api.connector;
+    c.isRunning = true; c.currentTaskId = 'network-terminal'; c.isSendingUpdate = true;
+    c.captureChatGPTTurn();
+    if (layout !== 'missing-user') api.window.document.querySelector('main').insertAdjacentHTML('beforeend', '<div data-message-author-role="user">新问题</div>');
+    if (layout !== 'missing-assistant') api.window.document.querySelector('main').insertAdjacentHTML('beforeend', '<article><div data-message-author-role="assistant">页面滞留的前半段</div></article>');
+    if (layout === 'stale-ui') api.window.document.querySelector('form').insertAdjacentHTML('beforeend', '<div aria-busy="true"></div><button data-testid="stop-button">停止生成</button>');
+    const release = c.proxy.beginRequest(c.currentTaskId);
+    const full = '**网络完整回答**\n\n| 任务 | 数据集 |\n| --- | --- |\n| 地震相分类 | Parihaka |\n\n最后的结论。';
+    const raw = 'data: ' + JSON.stringify({ message: {
+      id: 'current-answer', author: { role: 'assistant' }, channel: 'final', recipient: 'all',
+      content: { content_type: 'text', parts: [full] }, end_turn: true,
+    } }) + '\n\ndata: [DONE]\n\n';
+    c.proxy.handleCapture(raw, c.currentTaskId);
+    c.sampleChatGPTAnswer();
+    const completion = wakeups.findLast(message => message.ms === 1500);
+    assert.ok(completion, 'a terminal answer must schedule completion without requiring a DOM user boundary');
+    worker.onmessage({ data: completion.id });
+    assert.equal(c.doneSignal, true, 'completed answer must not remain pending because the page DOM is unavailable or stale');
+    assert.equal(c.accumulatedText, full, 'final network text must retain the answer tail despite partial DOM');
+    release();
+  });
+}
+
+test('ChatGPT terminal completion is cancelled by a new request or task reset', (t) => {
+  let worker;
+  const wakeups = [];
+  const api = setup('https://chatgpt.com/', '<body></body>', window => {
+    window.URL.createObjectURL = () => 'blob:timer'; window.URL.revokeObjectURL = () => {};
+    window.Worker = class { constructor() { worker = this; } postMessage(message) { wakeups.push(message); } };
+  });
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true; c.currentTaskId = 'continuation'; c.isSendingUpdate = true;
+  const first = c.proxy.beginRequest(c.currentTaskId);
+  const raw = 'data: ' + JSON.stringify({ message: { author: { role: 'assistant' }, channel: 'final',
+    content: { content_type: 'text', parts: ['第一条响应'] }, end_turn: true } }) + '\n\ndata: [DONE]\n\n';
+  c.proxy.handleCapture(raw, c.currentTaskId, first.captureEpoch);
+  const pending = wakeups.findLast(message => message.ms === 1500);
+  assert.ok(pending);
+  const second = c.proxy.beginRequest(c.currentTaskId);
+  worker.onmessage({ data: pending.id });
+  assert.equal(c.doneSignal, false);
+  c.proxy.handleCapture(raw, c.currentTaskId, first.captureEpoch);
+  assert.equal(c.chatGPTTransportDone, false, 'a late terminal from the superseded stream must not finish the new request');
+  c.proxy.handleCapture(raw, c.currentTaskId, second.captureEpoch);
+  const next = wakeups.findLast(message => message.ms === 1500);
+  assert.notEqual(next.id, pending.id);
+  c.resetTaskState('cancelled');
+  worker.onmessage({ data: next.id });
+  assert.equal(c.doneSignal, false);
+  assert.equal(c.currentTaskId, null);
+  first(); second();
+});
+
+for (const ending of ['late-tail', 'closed-transport']) {
+  test(`ChatGPT message end waits for the stream terminal or ${ending}`, (t) => {
+    let worker;
+    const wakeups = [];
+    const api = setup('https://chatgpt.com/', '<body></body>', window => {
+      window.URL.createObjectURL = () => 'blob:timer'; window.URL.revokeObjectURL = () => {};
+      window.Worker = class { constructor() { worker = this; } postMessage(message) { wakeups.push(message); } };
+    });
+    t.after(() => api.window.close());
+    const c = api.connector;
+    c.isRunning = true; c.currentTaskId = 'message-end'; c.isSendingUpdate = true;
+    const release = c.proxy.beginRequest(c.currentTaskId);
+    const frame = text => 'data: ' + JSON.stringify({ message: {
+      author: { role: 'assistant' }, channel: 'final', end_turn: true,
+      content: { content_type: 'text', parts: [text] },
+    } }) + '\n\n';
+    c.proxy.handleCapture(frame('回答前半段'), c.currentTaskId, release.captureEpoch);
+    assert.equal(wakeups.some(message => message.ms === 1500), false,
+      'a message end with a live response must not schedule early completion');
+    let expected = '回答前半段';
+    if (ending === 'late-tail') {
+      expected += '\n最终结论。';
+      c.proxy.handleCapture(frame(expected) + 'data: [DONE]\n\n', c.currentTaskId, release.captureEpoch);
+    } else release();
+    const completion = wakeups.findLast(message => message.ms === 1500);
+    assert.ok(completion, 'an explicit stream terminal or a closed message-ended transport must finish');
+    worker.onmessage({ data: completion.id });
+    assert.equal(c.doneSignal, true);
+    assert.equal(c.accumulatedText, expected);
+    release();
+  });
+}
+
 test('parseChatGPT treats the latest message snapshot as authoritative', () => {
   const api = setup('https://chatgpt.com/');
   const raw = [
@@ -1488,6 +1586,125 @@ test('disabled send control alone does not count as sent and never retries into 
   assert.equal(clicks, 1, 'an uncertain click is not retried as a possible cancel');
   assert.equal(connector.awaitingManualSend, true);
   t.after(() => api.window.close());
+});
+
+for (const effect of ['outside-stop-before', 'outside-stop-after', 'input-cleared', 'history-remount', 'request-before', 'request-after']) {
+  test(`Gemini does not acknowledge an unsent prompt from ${effect}`, async (t) => {
+    const api = setup('https://gemini.google.com/app', '<body><main><user-query><user-query-content><div class="user-query-container">旧问题</div></user-query-content></user-query></main>'
+      + '<aside></aside><form><rich-textarea><div class="textarea" contenteditable="true">本轮问题</div></rich-textarea>'
+      + '<button class="send-button" type="button" aria-label="Send message">发送</button></form></body>');
+    t.after(() => api.window.close());
+    const c = api.connector;
+    c.isRunning = true; c.currentTaskId = 'gemini-unsent';
+    let injected = false;
+    c.waitForValue = async check => {
+      if (effect === 'request-before' && !injected) {
+        injected = true; c.proxy.beginRequest(c.currentTaskId)();
+      }
+      return check() || null;
+    };
+    c.notifySidebar = async () => {};
+    const input = api.window.document.querySelector('.textarea');
+    const send = api.window.document.querySelector('.send-button');
+    input.getBoundingClientRect = () => ({ width: 300, height: 40 });
+    send.getBoundingClientRect = () => ({ width: 80, height: 32 });
+    const outsideStop = () => api.window.document.querySelector('aside').insertAdjacentHTML('beforeend', '<button aria-label="Stop generating">停止生成</button>');
+    if (effect === 'outside-stop-before') outsideStop();
+    let clicks = 0;
+    send.addEventListener('click', () => {
+      clicks++;
+      if (effect === 'outside-stop-after') outsideStop();
+      if (effect === 'input-cleared') input.textContent = '';
+      if (effect === 'history-remount') api.window.document.querySelector('main').innerHTML = api.window.document.querySelector('main').innerHTML;
+      if (effect === 'request-after') c.proxy.beginRequest(c.currentTaskId)();
+    });
+    await c.handleSend(c.config.input.send, c.config.input.message);
+    assert.equal(clicks, 1, 'an unrelated control must not suppress the real send click');
+    assert.equal(c.awaitingManualSend, true, 'an unrelated request or DOM change does not prove this prompt was submitted');
+  });
+}
+
+test('Gemini send baseline counts each nested user turn once', (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><main><user-query><user-query-content>旧问题</user-query-content></user-query></main></body>');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  const baseline = c.captureBaseline(c.config.input.message);
+  assert.equal(baseline.count, 1);
+  api.window.document.querySelector('user-query-content').replaceWith(api.window.document.createElement('user-query-content'));
+  api.window.document.querySelector('user-query-content').textContent = '旧问题';
+  assert.equal(c.conversationAdvanced(baseline), false, 'remounting a nested content node is not a new turn');
+});
+
+for (const effect of ['repeated-prompt', 'cancelled']) {
+  test(`Gemini send confirmation handles ${effect}`, async (t) => {
+    const api = setup('https://gemini.google.com/app', '<body><main><user-query><div class="query-text">问题</div></user-query></main>'
+      + '<div class="input-area"><form><rich-textarea><div class="textarea" contenteditable="true">问题</div></rich-textarea></form>'
+      + '<button class="send-button" type="button">发送</button></div></body>');
+    t.after(() => api.window.close());
+    const c = api.connector;
+    c.isRunning = true; c.currentTaskId = 'gemini-confirmation';
+    c.waitForValue = async check => check() || null;
+    c.notifySidebar = async () => {};
+    const input = api.window.document.querySelector('.textarea');
+    input.getBoundingClientRect = () => ({ width: 300, height: 40 });
+    const send = api.window.document.querySelector('.send-button');
+    send.getBoundingClientRect = () => ({ width: 80, height: 32 });
+    let clicks = 0;
+    send.addEventListener('click', () => {
+      clicks++;
+      if (effect === 'cancelled') { c.resetTaskState('cancelled'); return; }
+      api.window.document.querySelector('main').innerHTML = '<user-query><div class="query-text">问题</div></user-query>';
+      input.textContent = ''; send.setAttribute('aria-label', 'Stop generating');
+    });
+    assert.equal(await c.handleSend(c.config.input.send, c.config.input.message), effect !== 'cancelled');
+    assert.equal(clicks, 1);
+    assert.equal(c.awaitingManualSend, false);
+  });
+}
+
+test('Gemini accepts a new user-query with query-text as send acknowledgement', async (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><main></main><form><rich-textarea><div class="textarea" contenteditable="true">问题</div></rich-textarea>'
+    + '<button class="send-button" type="button">发送</button></form></body>');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true; c.currentTaskId = 'gemini-query-text';
+  c.waitForValue = async check => check() || null;
+  c.notifySidebar = async () => {};
+  api.window.document.querySelector('.textarea').getBoundingClientRect = () => ({ width: 300, height: 40 });
+  const send = api.window.document.querySelector('.send-button');
+  send.getBoundingClientRect = () => ({ width: 80, height: 32 });
+  send.addEventListener('click', () => api.window.document.querySelector('main').insertAdjacentHTML('beforeend', '<user-query><div class="query-text">问题</div></user-query>'));
+  assert.equal(await c.handleSend(c.config.input.send, c.config.input.message), true);
+  assert.equal(c.awaitingManualSend, false, 'the current user turn is sufficient evidence even before the composer clears');
+});
+
+test('Gemini commits text through the editor paste transaction before sending', async (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><form><rich-textarea><div class="textarea ql-editor ql-blank" contenteditable="true"></div></rich-textarea>'
+    + '<button class="send-button" disabled>发送</button></form></body>');
+  t.after(() => api.window.close());
+  const input = api.window.document.querySelector('.textarea');
+  input.getBoundingClientRect = () => ({ width: 300, height: 40 });
+  api.window.DataTransfer = class { setData(type, value) { this.text = value; } getData() { return this.text; } };
+  api.window.document.execCommand = () => false;
+  let pastes = 0;
+  input.addEventListener('paste', event => {
+    event.preventDefault(); pastes++;
+    setTimeout(() => {
+      input.textContent = event.clipboardData.getData('text/plain');
+      input.classList.remove('ql-blank');
+      api.window.document.querySelector('button').disabled = false;
+    }, 80);
+  });
+  assert.equal(await api.connector.fillInput(api.connector.config.input.text, '完整问题\n第二段'), true);
+  assert.equal(pastes, 1, 'Gemini must receive one editor transaction instead of only a textContent mutation');
+  assert.equal(input.classList.contains('ql-blank'), false);
+  assert.equal(api.window.document.querySelector('button').disabled, false);
+});
+
+test('Gemini DOM text in a blank Quill model is not accepted as filled input', (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><rich-textarea><div class="textarea ql-editor ql-blank" contenteditable="true">仅写入 DOM 的问题</div></rich-textarea></body>');
+  t.after(() => api.window.close());
+  assert.equal(api.connector.inputAccepts(api.connector.config.input.text, '仅写入 DOM 的问题'), false);
 });
 
 test('empty message baseline needs a real conversation advance', () => {

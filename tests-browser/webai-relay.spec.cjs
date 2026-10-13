@@ -13,6 +13,10 @@ for (const scenario of [
   { provider: 'chatgpt', upload: 'drag' },
   { provider: 'chatgpt', upload: 'file', capture: 'terminal', actions: 'none', layout: 'turn-wrapper' },
   { provider: 'chatgpt', upload: 'file', capture: 'dom-only', actions: 'localized', layout: 'turn-wrapper' },
+  { provider: 'chatgpt', upload: 'file', capture: 'terminal', layout: 'missing-user', actions: 'none' },
+  { provider: 'chatgpt', upload: 'file', capture: 'terminal', layout: 'missing-assistant', actions: 'none' },
+  { provider: 'chatgpt', upload: 'file', capture: 'keep-open', actions: 'none' },
+  { provider: 'chatgpt', upload: 'file', capture: 'terminal', fault: 'stale-ui' },
   { provider: 'gemini', upload: 'paste' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr' },
   { provider: 'gemini', upload: 'paste', capture: 'network-lag' },
@@ -21,7 +25,7 @@ for (const scenario of [
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background-retry' },
 ]) {
-test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${scenario.fault || 'normal'}: image → one send → complete sidebar math`, async ({ context }) => {
+test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${scenario.layout || 'standard'}/${scenario.fault || 'normal'}: image → one send → complete sidebar math`, async ({ context }) => {
   test.setTimeout(65000);
   const sidebar = await context.newPage();
   const web = await context.newPage();
@@ -142,7 +146,9 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
           await new Promise(resolve => { window.finishFixtureStream = resolve; });
         }
         write('回答前半段\n\\[\\frac{a}{b}\\]\n完整回答的最后一句。');
-        controller.enqueue(new TextEncoder().encode(scenario.capture === 'network-lag' ? '\n[["e",10,null]]' : 'data: [DONE]\n\n')); controller.close();
+        controller.enqueue(new TextEncoder().encode(scenario.capture === 'network-lag' ? '\n[["e",10,null]]' : 'data: [DONE]\n\n'));
+        if (scenario.capture === 'keep-open') window.closeFixtureStream = () => controller.close();
+        else controller.close();
       },
     }), { headers: { 'Content-Type': 'text/event-stream' } });
     document.addEventListener('DOMContentLoaded', () => {
@@ -200,10 +206,10 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
               + (scenario.capture === 'xhr' ? '<fixture-response data-message-id="answer-new"><p>回答前半段</p></fixture-response>'
                 : '<message-content data-message-id="answer-new"><p>回答前半段</p></message-content>')
               + (scenario.capture === 'xhr-dom' ? '<div hidden aria-busy="true"></div>' : '') + '</model-response>'
-            : '<article><div data-message-author-role="user" data-message-id="user-new"></div></article>'
+            : '<article><div ' + (scenario.layout === 'missing-user' ? 'data-turn="user"' : 'data-message-author-role="user"') + ' data-message-id="user-new"></div></article>'
               + (scenario.layout === 'turn-wrapper'
                 ? '<section data-turn="assistant" id="new-turn"><div><div data-message-author-role="assistant" data-message-id="answer-new"><p>回答前半段</p></div></div></section>'
-                : '<article id="new-turn"><div data-message-author-role="assistant" data-message-id="answer-new"><p>回答前半段</p></div></article>'));
+                : '<article id="new-turn"><div ' + (scenario.layout === 'missing-assistant' ? 'data-turn="assistant"' : 'data-message-author-role="assistant"') + ' data-message-id="answer-new"><p>回答前半段</p></div></article>'));
           document.querySelector('[data-message-id="user-new"]').textContent = input.textContent; input.textContent = '';
           send.setAttribute('data-testid', 'stop-button'); send.setAttribute('aria-label', 'Stop generating');
           // Deliberately outside the Gemini hook: the actual DOM fallback,
@@ -226,7 +232,7 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
         }, 3000);
       });
       window.appendAnswer = () => {
-        if (background) return; // Gemini leaves its DOM and Stop button stale until foregrounded
+        if (background || scenario.fault === 'stale-ui') return; // Page and Stop may stay stale after network completion
         document.querySelector('[data-message-id="answer-new"]').insertAdjacentHTML('beforeend', '<div data-math-source="\\frac{a}{b}"><span class="katex-display"><span class="katex"><span class="katex-html">重复字形</span></span></span></div><p>完整回答的最后一句。</p>');
         if (scenario.capture !== 'xhr-dom' && scenario.actions !== 'none') document.querySelector('#new-turn').insertAdjacentHTML('beforeend', gemini
           ? '<button aria-label="Copy response"><mat-icon data-mat-icon-name="copy"></mat-icon></button>'
@@ -305,6 +311,7 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
   await expect(sidebar.locator('.zrp-message-error')).toHaveCount(0);
   await expect(input).toBeEnabled();
   await expect.poll(() => web.evaluate(() => __ZRA_TEST__.connector.currentTaskId)).toBe(null);
+  if (scenario.capture === 'keep-open') await web.evaluate(() => closeFixtureStream());
   if (scenario.fault === 'relay-timeout') {
     expect(await sidebar.evaluate(() => events.some(event => event.type === 'answer' && event.error))).toBe(true);
     await expect(sidebar.getByText('网页联动失败；请查看上方提示。')).toHaveCount(0);

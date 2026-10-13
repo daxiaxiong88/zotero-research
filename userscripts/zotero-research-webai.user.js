@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.1.3
+// @version      1.1.5
 // @updateURL    https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.meta.js
 // @downloadURL  https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.user.js
 // @supportURL   https://github.com/daxiaxiong88/zotero-research/issues
@@ -563,6 +563,7 @@
     let state = { message: { author: { role: 'assistant' }, content: { content_type: 'text', parts: [] } } };
     const messages = new Map();
     let done = false;
+    let streamDone = false;
     let lastPath = '';
     let lastOperation = '';
     const remember = () => {
@@ -595,7 +596,7 @@
       remember();
     };
     for (const payload of ssePayloads(raw)) {
-      if (payload === '[DONE]') { done = true; continue; }
+      if (payload === '[DONE]') { done = true; streamDone = true; continue; }
       const data = parseJson(payload);
       if (!data) { continue; }
       if (data.message) { state = { message: data.message }; remember(); }
@@ -604,7 +605,7 @@
       else if (data.p || data.path || lastPath) { apply(data); }
       if (chatGPTFrameDone(data, state.message)) { done = true; }
     }
-    return { text: stripChatGPTInternalCitations(Array.from(messages.values()).filter(Boolean).join('\n\n')), done };
+    return { text: stripChatGPTInternalCitations(Array.from(messages.values()).filter(Boolean).join('\n\n')), done, streamDone };
   }
 
   function extractGeminiFrames(raw) {
@@ -1038,6 +1039,7 @@
       this.idleTimer = null;
       this.activeStreams = new Map();
       this.activeRequests = new Map();
+      this.requestStarts = new Map();
       this.setupFetch();
       this.setupXHR();
     }
@@ -1051,6 +1053,10 @@
       this.clearIdle();
       if (this.connector.currentTaskId === taskId && this.connector.config.name === 'ChatGPT') {
         this.connector.chatGPTTransportDone = false;
+        this.connector.chatGPTStreamDone = false;
+        this.connector.chatGPTCaptureEpoch += 1;
+        this.connector.cancelChatGPTCompletion?.();
+        this.connector.cancelChatGPTCompletion = null;
       }
       if (this.connector.currentTaskId === taskId && this.connector.config.name === 'Gemini') {
         this.connector.geminiTransportDone = false;
@@ -1058,8 +1064,10 @@
         this.connector.cancelGeminiCompletion = null;
       }
       this.activeRequests.set(taskId, (this.activeRequests.get(taskId) || 0) + 1);
+      this.requestStarts.set(taskId, (this.requestStarts.get(taskId) || 0) + 1);
+      const captureEpoch = this.connector.chatGPTCaptureEpoch;
       let released = false;
-      return () => {
+      const release = () => {
         if (released) { return; }
         released = true;
         const remaining = (this.activeRequests.get(taskId) || 1) - 1;
@@ -1067,6 +1075,8 @@
         else { this.activeRequests.delete(taskId); }
         if (this.connector.currentTaskId === taskId) { this.scheduleIdle(taskId); }
       };
+      release.captureEpoch = captureEpoch;
+      return release;
     }
 
     scheduleIdle(taskId) {
@@ -1077,6 +1087,7 @@
         return;
       }
       if (this.connector.config.name === 'ChatGPT') {
+        this.connector.scheduleChatGPTCompletion();
         this.connector.startDomWatcher();
         return;
       }
@@ -1103,13 +1114,16 @@
       return {
         text: typeof parsed === 'string' ? parsed : String(parsed?.text || ''),
         done: hasDone ? Boolean(parsed.done) : genericNetworkDone(allText),
+        streamDone: Boolean(parsed?.streamDone),
         waitingForResponse: Boolean(parsed?.waitingForResponse),
         hasAnswer: parsed?.hasAnswer !== false,
       };
     }
 
-    handleCapture(allText, taskId) {
+    handleCapture(allText, taskId, captureEpoch) {
       if (this.connector.currentTaskId !== taskId || !this.connector.isRunning) { return; }
+      if (this.connector.config.name === 'ChatGPT' && captureEpoch !== undefined
+        && captureEpoch !== this.connector.chatGPTCaptureEpoch) { return; }
       if (this.connector.lastTask) {
         this.connector.lastTask.networkCaptures += 1;
         this.connector.lastTask.networkChars = allText.length;
@@ -1140,12 +1154,20 @@
         return;
       }
       if (this.connector.config.name === 'ChatGPT') {
-        // A message-level end or a closed transport is only supporting
-        // evidence. ChatGPT can continue in another message/stream.
-        this.connector.chatGPTTransportDone = parsed.done;
-        if (parsed.text) { this.connector.onNewData(parsed.text, false, 'network'); }
-        this.connector.startDomWatcher();
-        return;
+        const connector = this.connector;
+        if (connector.doneSignal) { return; }
+        // A terminal containing this request's visible final/all answer can
+        // finish without a rendered user boundary or a repainted toolbar.
+        // An EOF or thinking-only terminal is never enough.
+        connector.chatGPTTransportDone = parsed.done && Boolean(parsed.text);
+        connector.chatGPTStreamDone = parsed.streamDone;
+        if (parsed.text) {
+          connector.chatGPTNetworkText = parsed.text;
+          connector.onNewData(parsed.text, false, 'network');
+        }
+        connector.scheduleChatGPTCompletion();
+        connector.startDomWatcher();
+        return parsed;
       }
       if (parsed.text) {
         this.connector.onNewData(parsed.text, parsed.done, 'network');
@@ -1176,7 +1198,7 @@
               if (!response.ok) { return; }
               try {
                 const cloned = response.clone();
-                if (cloned.body) { await self.readStream(cloned.body, taskId); }
+                if (cloned.body) { await self.readStream(cloned.body, taskId, release.captureEpoch); }
               } catch (_) { /* ignore */ }
             }).catch(() => {}).finally(release);
           }
@@ -1187,7 +1209,7 @@
       unsafeWindow.fetch = proxy;
     }
 
-    async readStream(stream, taskId) {
+    async readStream(stream, taskId, captureEpoch = this.connector.chatGPTCaptureEpoch) {
       const reader = stream.getReader();
       this.clearIdle();
       this.activeStreams.set(taskId, (this.activeStreams.get(taskId) || 0) + 1);
@@ -1199,12 +1221,18 @@
           if (done) { break; }
           if (this.connector.currentTaskId !== taskId) { break; }
           allText += decoder.decode(value, { stream: true });
-          this.handleCapture(allText, taskId);
+          const parsed = this.handleCapture(allText, taskId, captureEpoch);
+          if (this.connector.config.name === 'ChatGPT' && parsed?.streamDone) {
+            // Cancel only this cloned reader; the page's response stays under
+            // the page's control. Do not wait for an SSE keepalive connection.
+            try { Promise.resolve(reader.cancel?.()).catch(() => {}); } catch (_) { /* already closed */ }
+            break;
+          }
         }
         const tail = decoder.decode();
         if (tail) {
           allText += tail;
-          this.handleCapture(allText, taskId);
+          this.handleCapture(allText, taskId, captureEpoch);
         }
       } catch (error) {
         if (error?.name !== 'AbortError') { console.warn('[Zotero relay] readStream', error); }
@@ -1243,7 +1271,7 @@
                 // Parse once, including the final transport tail at loadend.
                 if (body.length === capturedLength) { return; }
                 capturedLength = body.length;
-                self.handleCapture(body, taskId);
+                self.handleCapture(body, taskId, release?.captureEpoch);
               }
               catch (error) { console.warn('[Zotero relay] xhr parse', error); }
             };
@@ -1340,6 +1368,7 @@
       this.accumulatedText = '';
       this.lastDataSource = null;
       this.doneSignal = false;
+      this.chatGPTCaptureEpoch = 0;
       this.isSendingUpdate = false;
       this.hasPendingData = false;
       this.awaitingManualSend = false;
@@ -1354,7 +1383,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'chatgpt-completion-1',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-terminal-send-3',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -1680,6 +1709,10 @@
         this.lastTask.capturedChars = this.accumulatedText.length;
       }
       this.proxy?.clearIdle();
+      this.proxy?.requestStarts?.delete(this.currentTaskId);
+      this.cancelChatGPTCompletion?.();
+      this.cancelChatGPTCompletion = null;
+      this.chatGPTCompletionText = '';
       this.cancelGeminiCompletion?.();
       this.cancelGeminiCompletion = null;
       this.cancelUpdateRetry?.();
@@ -1699,6 +1732,8 @@
       this.chatGPTStableText = '';
       this.chatGPTStableSince = null;
       this.chatGPTTransportDone = false;
+      this.chatGPTStreamDone = false;
+      this.chatGPTNetworkText = '';
       this.geminiBaseline = null;
       this.geminiUser = null;
       this.geminiStableText = '';
@@ -1720,7 +1755,7 @@
       const networkData = source === 'network';
       const chatGPTDom = this.config.name === 'ChatGPT' && source === 'chatgpt-dom';
       const geminiDom = this.config.name === 'Gemini' && source === 'gemini-dom';
-      if (networkData && this.lastDataSource === 'chatgpt-dom') { return; }
+      if (networkData && this.lastDataSource === 'chatgpt-dom' && !isDone) { return; }
       if (geminiDom && this.geminiNetworkText && !isDone) {
         if (this.geminiTransportDone || !isGeminiTextExtension(nextText, this.geminiNetworkText)
           || !isGeminiTextExtension(nextText, this.accumulatedText)) { return; }
@@ -2038,11 +2073,10 @@
       return this.waitForValue(check, timeout);
     }
 
-    findUsable(selector) {
+    findUsable(selector, root = document) {
       try {
-        for (const element of document.querySelectorAll(selector)) {
-          const style = window.getComputedStyle(element);
-          if (style.display === 'none' || style.visibility === 'hidden') { continue; }
+        for (const element of root.querySelectorAll(selector)) {
+          if (!this.controlIsVisible(element)) { continue; }
           if (element.getBoundingClientRect().width <= 0) { continue; }
           if (element.disabled || element.getAttribute('aria-disabled') === 'true') { continue; }
           return element;
@@ -2080,6 +2114,27 @@
         || document.querySelector(inputConfig.selector);
       if (!el || this.currentTaskId !== taskId) { return false; }
       el.focus();
+      if (inputConfig.method === 'gemini' && !('value' in el)) {
+        const selection = window.getSelection();
+        const range = document.createRange(); range.selectNodeContents(el);
+        selection?.removeAllRanges(); selection?.addRange(range);
+        let accepted = false;
+        try {
+          const transfer = new DataTransfer(); transfer.setData('text/plain', text);
+          const event = this.pasteEvent(transfer);
+          accepted = !el.dispatchEvent(event) || event.defaultPrevented;
+        } catch (_) { /* native editing fallback below */ }
+        if (accepted) {
+          const committed = await this.waitForValue(() => this.currentTaskId !== taskId
+            || this.inputAccepts(inputConfig, text), 5000);
+          selection?.removeAllRanges();
+          if (this.currentTaskId !== taskId) { return false; }
+          if (!committed) { throw new Error('Gemini 已接收文字粘贴，但编辑器尚未确认内容；请检查网页输入框后再发送。'); }
+          if (this.lastTask) { this.lastTask.inputDelivery = { mode: 'editor-paste', textLength: text.length }; }
+          return true;
+        }
+        selection?.removeAllRanges();
+      }
       if (inputConfig.method === 'chatgpt') {
         this.chatGPTTextPaste = null;
         // ProseMirror must see a paste transaction: mutating textContent can
@@ -2542,6 +2597,10 @@
         },
         visibility: document.visibilityState, heartbeatSupported: Boolean(this.supportsHeartbeat),
         lastHeartbeatSecondsAgo: this.lastHeartbeatAt ? Math.round((Date.now() - this.lastHeartbeatAt) / 1000) : null,
+        completion: { transportDone: Boolean(this.chatGPTTransportDone || this.geminiTransportDone),
+          networkAnswerChars: (this.chatGPTNetworkText || this.geminiNetworkText || '').length,
+          activeRequests: this.proxy?.activeRequests.get(this.currentTaskId) || 0,
+          activeStreams: this.proxy?.activeStreams.get(this.currentTaskId) || 0 },
         heartbeatError: this.lastHeartbeatError || '', lastCaptureSource: this.lastDataSource,
         inputAncestors: ancestors, previewScope: label(snapshot.scope), previewCount: snapshot.count,
         previews: Array.from(snapshot.nodes.keys()).slice(0, 20).map(node => ({
@@ -2552,7 +2611,15 @@
         fileInputs: Array.from(document.querySelectorAll('input[type=file]')).slice(0, 10)
           .map(node => ({ element: label(node), accept: node.accept, disabled: node.disabled })),
         lastUpload: this.lastUpload || null,
-        answerStructure: this.config.name === 'Gemini' ? {
+        answerStructure: this.config.name === 'ChatGPT' ? {
+          users: document.querySelectorAll('[data-message-author-role="user"]').length,
+          assistants: document.querySelectorAll('[data-message-author-role="assistant"]').length,
+          userTurns: document.querySelectorAll('[data-turn="user"]').length,
+          assistantTurns: document.querySelectorAll('[data-turn="assistant"]').length,
+          boundUser: Boolean(this.chatGPTUser?.isConnected),
+          baselineUsers: this.chatGPTBaseline?.users.size || 0,
+          baselineAssistants: this.chatGPTBaseline?.answers.size || 0,
+        } : this.config.name === 'Gemini' ? {
           userQuery: document.querySelectorAll('user-query').length,
           userQueryContent: document.querySelectorAll('user-query-content').length,
           modelResponse: document.querySelectorAll('model-response').length,
@@ -2602,6 +2669,10 @@
     inputAccepts(inputConfig, expected) {
       const current = this.findUsable(inputConfig.selector) || document.querySelector(inputConfig.selector);
       if (!current) { return false; }
+      // Quill's blank flag follows its internal document. DOM text by itself
+      // can be visible while Angular still treats the editor as empty.
+      if (inputConfig.method === 'gemini' && current.classList.contains('ql-editor')
+        && current.classList.contains('ql-blank')) { return false; }
       const wanted = String(expected || '').replace(/\s+/g, ' ').trim();
       if (!wanted) { return false; }
       // Gecko innerText may remove a CJK segment break under white-space:
@@ -2617,6 +2688,7 @@
 
     /** Select-all + insertText, forcing frameworks to accept the text. */
     async refillByReplace(inputConfig, text) {
+      if (inputConfig.method === 'gemini') { return this.fillInput(inputConfig, text); }
       const el = this.findUsable(inputConfig.selector) || document.querySelector(inputConfig.selector);
       if (!el) { return false; }
       el.focus();
@@ -2648,11 +2720,17 @@
 
     captureBaseline(messageSelector) {
       let messages = [];
-      try { if (messageSelector) { messages = [...document.querySelectorAll(messageSelector)]; } } catch { }
+      const gemini = this.config.name === 'Gemini';
+      try {
+        if (gemini) { messages = this.geminiUserNodes(); }
+        else if (messageSelector) { messages = [...document.querySelectorAll(messageSelector)]; }
+      } catch { }
       return {
+        gemini,
         selector: messageSelector,
         count: messages.length,
         last: messages.at(-1) || null,
+        lastIdentity: this.messageIdentity(messages.at(-1)),
         lastContent: messages.length ? String(messages.at(-1).innerText ?? messages.at(-1).textContent ?? '') : null,
       };
     }
@@ -2660,12 +2738,20 @@
     conversationAdvanced(baseline) {
       if (!baseline) { return false; }
       let messages;
-      try { messages = [...document.querySelectorAll(baseline.selector || this.config.input.message)]; } catch { return false; }
+      try { messages = baseline.gemini ? this.geminiUserNodes()
+        : [...document.querySelectorAll(baseline.selector || this.config.input.message)]; } catch { return false; }
       const last = messages.at(-1) || null;
       const lastContent = last ? String(last.innerText ?? last.textContent ?? '') : null;
-      return messages.length > baseline.count
-        || (messages.length === baseline.count && last !== baseline.last)
-        || (last === baseline.last && lastContent !== baseline.lastContent);
+      if (!last) { return false; }
+      const identity = this.messageIdentity(last);
+      return (!baseline.last && Boolean(last)) || lastContent !== baseline.lastContent
+        || (Boolean(identity && baseline.lastIdentity) && identity !== baseline.lastIdentity)
+        || (messages.length > baseline.count && last !== baseline.last);
+    }
+
+    messageIdentity(node) {
+      if (!node) { return ''; }
+      return node.getAttribute('data-message-id') || node.getAttribute('data-turn-id') || node.id || '';
     }
 
     controlIsVisible(control) {
@@ -2677,9 +2763,9 @@
       return Boolean(control?.isConnected);
     }
 
-    hasStreamingControl() {
+    hasStreamingControl(root = document) {
       let controls = [];
-      try { controls = [...document.querySelectorAll('button, [role="button"]')]; } catch { }
+      try { controls = [...root.querySelectorAll('button, [role="button"]')]; } catch { }
       return controls.some((control) => {
         if (!this.controlIsVisible(control)) { return false; }
         const label = [control.getAttribute('aria-label'), control.getAttribute('title'), control.textContent]
@@ -2712,7 +2798,9 @@
       const taskId = this.currentTaskId;
       const cancelled = () => this.currentTaskId !== taskId || (taskId && !this.isRunning);
       if (this.config.name === 'ChatGPT' && !this.chatGPTBaseline) { this.captureChatGPTTurn(); }
-      const baseline = this.captureBaseline(messageSelector);
+      const gemini = this.config.name === 'Gemini';
+      const baseline = this.captureBaseline(gemini ? 'user-query, user-query-content' : messageSelector);
+      const requestStarts = this.proxy?.requestStarts.get(taskId) || 0;
       this.killPoll();
       this.isSendingUpdate = true;
       const inputConfig = this.config.input.text;
@@ -2720,6 +2808,9 @@
       const initialInput = this.findUsable(inputConfig?.selector || '')
         || document.querySelector(inputConfig?.selector || '');
       if (this.readText(initialInput).trim()) { inputWasNonEmpty = true; }
+      const sendDiagnostic = { clicked: false, beforeUserCount: baseline.count,
+        editorBeforeChars: this.readText(initialInput).length, requestStartsBefore: requestStarts };
+      if (this.lastTask) { this.lastTask.send = sendDiagnostic; }
       const inputWasCleared = () => {
         const input = this.findUsable(inputConfig?.selector || '');
         if (!input) { return false; } // A remount is not a submitted message.
@@ -2730,15 +2821,33 @@
         }
         return inputWasNonEmpty;
       };
-      const sendConfirmed = (button = null) => this.conversationAdvanced(baseline)
-        || Boolean(this.accumulatedText) || inputWasCleared()
-        || this.sendButtonAccepted(button) || this.hasStreamingControl();
+      let clicked = false;
+      let buttonWasStreaming = false;
+      const sendConfirmed = (button = null) => {
+        const advanced = this.conversationAdvanced(baseline);
+        const requestStarted = (this.proxy?.requestStarts.get(taskId) || 0) > requestStarts;
+        const cleared = inputWasCleared();
+        const composerStreaming = this.hasStreamingControl(this.composerWatchScope());
+        const transitioned = clicked && !buttonWasStreaming && this.controlIsVisible(button)
+          && this.sendButtonAccepted(button);
+        Object.assign(sendDiagnostic, { editorAfterChars: this.readText(document.querySelector(inputConfig.selector)).length,
+          newUserTurn: advanced, responseRequestStarted: requestStarted, composerStreaming });
+        const reason = gemini
+          ? (advanced ? 'new-user-turn'
+            : clicked && this.lastDataSource === 'network' && this.accumulatedText ? 'network-answer'
+              : cleared && transitioned && composerStreaming ? 'composer-transition' : '')
+          : (advanced ? 'new-user-turn' : this.accumulatedText ? 'answer'
+            : cleared ? 'editor-cleared' : this.sendButtonAccepted(button) || this.hasStreamingControl() ? 'generating-control' : '');
+        if (reason) { sendDiagnostic.acknowledgement = reason; }
+        return Boolean(reason);
+      };
       let sentButton = null;
       if (typeof send === 'string') {
         const ready = await this.waitForCondition(() => {
           if (cancelled()) { return { cancelled: true }; }
-          if (this.observedManualSend(baseline)) { return { manual: true }; }
-          const button = this.findUsable(send);
+          if (gemini ? sendConfirmed() : this.observedManualSend(baseline)) { return { manual: true }; }
+          const button = this.findUsable(send, gemini ? this.composerWatchScope() : document);
+          if (gemini && button && this.sendButtonAccepted(button)) { return null; }
           return button ? { button } : null;
         }, SEND_BUTTON_WAIT_MS);
         if (cancelled()) { return false; }
@@ -2762,6 +2871,12 @@
         // setTimeout to >=1s, so a 25x100ms loop would stretch to 25s and the
         // send would visibly fire only when the tab regains focus.
         setStatus('正在输入并发送…');
+        buttonWasStreaming = this.sendButtonAccepted(button);
+        clicked = true;
+        Object.assign(sendDiagnostic, { clicked: true, clickedAt: new Date().toISOString(),
+          buttonBefore: { tag: button.localName, testId: button.getAttribute('data-testid'),
+            ariaLabel: button.getAttribute('aria-label'), disabled: Boolean(button.disabled) } });
+        this.recordDiagnostic('send-click');
         button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
         button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
         button.click();
@@ -2821,23 +2936,58 @@
       this.chatGPTStableSince = null;
     }
 
+    scheduleChatGPTCompletion() {
+      const id = this.currentTaskId;
+      const epoch = this.chatGPTCaptureEpoch;
+      const text = this.chatGPTNetworkText;
+      const eligible = () => this.isRunning && this.currentTaskId === id && !this.doneSignal
+        && this.chatGPTCaptureEpoch === epoch && this.chatGPTTransportDone && Boolean(text)
+        // Message-level end_turn can precede later frames. A stream terminal
+        // is authoritative even if HTTP stays open; otherwise await closure.
+        && (this.chatGPTStreamDone || (!this.proxy?.activeRequests.get(id)
+          && !this.proxy?.activeStreams.get(id)));
+      if (!id || !eligible()) {
+        this.cancelChatGPTCompletion?.(); this.cancelChatGPTCompletion = null;
+        return;
+      }
+      if (this.cancelChatGPTCompletion && this.chatGPTCompletionText === text) { return; }
+      this.cancelChatGPTCompletion?.();
+      this.chatGPTCompletionText = text;
+      this.cancelChatGPTCompletion = scheduleDeadline(() => {
+        this.cancelChatGPTCompletion = null;
+        if (!eligible() || text !== this.chatGPTNetworkText) { return; }
+        if (this.lastTask) { this.lastTask.completionSource = 'network-terminal'; }
+        this.onNewData(text, true, 'network');
+        this.stopDomWatcher();
+      }, 1500);
+    }
+
     sampleChatGPTAnswer() {
       const baseline = this.chatGPTBaseline;
       if (!baseline || !this.currentTaskId || this.doneSignal) { return; }
+      const reading = { boundUser: false, boundAnswers: 0,
+        activeRequests: this.proxy?.activeRequests.get(this.currentTaskId) || 0,
+        activeStreams: this.proxy?.activeStreams.get(this.currentTaskId) || 0,
+        transportDone: Boolean(this.chatGPTTransportDone) };
+      if (this.lastTask) { this.lastTask.dom = reading; }
       const follows = (node, before) => Boolean(before.compareDocumentPosition(node) & 4);
       const users = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
+      reading.users = users.length;
       if (!this.chatGPTUser || !this.chatGPTUser.isConnected) {
         this.chatGPTUser = users.find(node => !baseline.users.has(node)
           && !baseline.userIDs.has(node.getAttribute('data-message-id')));
       }
-      if (!this.chatGPTUser) { return; }
+      if (!this.chatGPTUser) { reading.waitingFor = 'new-user-boundary'; return; }
+      reading.boundUser = true;
       const nextUser = users.find(node => node !== this.chatGPTUser && follows(node, this.chatGPTUser));
       const answers = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter(node =>
         !baseline.answers.has(node) && !baseline.answerIDs.has(node.getAttribute('data-message-id'))
         && follows(node, this.chatGPTUser) && (!nextUser || follows(nextUser, node)));
-      if (!answers.length) { return; }
+      reading.boundAnswers = answers.length;
+      if (!answers.length) { reading.waitingFor = 'new-answer-boundary'; return; }
       const text = answers.map(chatGPTAnswerMarkdown).filter(Boolean).join('\n\n');
-      if (!text) { return; }
+      reading.textLength = text.length;
+      if (!text) { reading.waitingFor = 'answer-text'; return; }
       if (text !== this.chatGPTStableText) {
         this.chatGPTStableText = text;
         this.chatGPTStableSince = Date.now();
@@ -2854,15 +3004,20 @@
         + (this.proxy?.activeRequests.get(this.currentTaskId) || 0);
       const busy = this.composerWatchScope()?.matches('[aria-busy="true"]')
         || this.composerWatchScope()?.querySelector('[aria-busy="true"]');
+      const streaming = this.hasStreamingControl();
+      Object.assign(reading, { actions, busy: Boolean(busy), streaming });
       // A terminal response plus a settled current-turn DOM is completion
       // evidence even when ChatGPT remounts or changes its action toolbar.
       // Live requests, generation controls and composer processing still veto
       // it; silence alone must never finish a paused answer.
-      if (active || this.hasStreamingControl() || busy || (!actions && !this.chatGPTTransportDone)) {
+      if (active || streaming || busy || (!actions && !this.chatGPTTransportDone)) {
+        reading.waitingFor = active ? 'active-transport' : streaming ? 'generation-control'
+          : busy ? 'composer-busy' : 'completion-evidence';
         this.chatGPTStableSince = Date.now();
         return;
       }
       if (Date.now() - this.chatGPTStableSince >= 1500) {
+        reading.waitingFor = '';
         this.onNewData(text, true, 'chatgpt-dom');
         this.stopDomWatcher();
       }
