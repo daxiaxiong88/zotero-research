@@ -1049,6 +1049,9 @@
 
     beginRequest(taskId) {
       this.clearIdle();
+      if (this.connector.currentTaskId === taskId && this.connector.config.name === 'ChatGPT') {
+        this.connector.chatGPTTransportDone = false;
+      }
       if (this.connector.currentTaskId === taskId && this.connector.config.name === 'Gemini') {
         this.connector.geminiTransportDone = false;
         this.connector.cancelGeminiCompletion?.();
@@ -1351,7 +1354,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'conversation-timeline-1',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'chatgpt-completion-1',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -2840,16 +2843,22 @@
         this.chatGPTStableSince = Date.now();
         this.onNewData(text, false, 'chatgpt-dom');
       }
-      const turn = answers.at(-1).closest('[data-testid^="conversation-turn"], article') || answers.at(-1).parentElement;
-      const actions = Array.from(turn?.querySelectorAll('button[data-testid="copy-turn-action-button"], button[data-testid="good-response-turn-action-button"], button[data-testid="bad-response-turn-action-button"], button[data-testid*="thumbs-"], button[aria-label="Copy"], button[aria-label="复制"], button[aria-label="Good response"], button[aria-label="Regenerate"]') || [])
+      const turn = answers.at(-1).closest('[data-turn="assistant"], [data-testid^="conversation-turn"], article') || answers.at(-1).parentElement;
+      const actions = Array.from(turn?.querySelectorAll('button') || [])
         .some(control => this.controlIsVisible(control) && !control.closest('pre, code')
-          && (/(?:turn-action-button|thumbs-)/.test(control.getAttribute('data-testid') || '')
-            || !answers.some(answer => answer.contains(control))));
+          && (/^(?:(?:copy|good-response|bad-response)-turn-action-button$)|thumbs-/.test(control.getAttribute('data-testid') || '')
+            || (!answers.some(answer => answer.contains(control))
+              && /^(?:copy(?: (?:response|answer|message))?|复制(?:回复|回答|响应|消息)?|good response|bad response|regenerate(?: response)?|喜欢此回复|不喜欢此回复|重新生成(?:回复|回答)?)$/i
+                .test((control.getAttribute('aria-label') || '').trim()))));
       const active = (this.proxy?.activeStreams.get(this.currentTaskId) || 0)
         + (this.proxy?.activeRequests.get(this.currentTaskId) || 0);
       const busy = this.composerWatchScope()?.matches('[aria-busy="true"]')
         || this.composerWatchScope()?.querySelector('[aria-busy="true"]');
-      if (active || this.hasStreamingControl() || busy || !actions) {
+      // A terminal response plus a settled current-turn DOM is completion
+      // evidence even when ChatGPT remounts or changes its action toolbar.
+      // Live requests, generation controls and composer processing still veto
+      // it; silence alone must never finish a paused answer.
+      if (active || this.hasStreamingControl() || busy || (!actions && !this.chatGPTTransportDone)) {
         this.chatGPTStableSince = Date.now();
         return;
       }

@@ -11,6 +11,8 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwM
 for (const scenario of [
   { provider: 'chatgpt', upload: 'file' },
   { provider: 'chatgpt', upload: 'drag' },
+  { provider: 'chatgpt', upload: 'file', capture: 'terminal', actions: 'none', layout: 'turn-wrapper' },
+  { provider: 'chatgpt', upload: 'file', capture: 'dom-only', actions: 'localized', layout: 'turn-wrapper' },
   { provider: 'gemini', upload: 'paste' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr' },
   { provider: 'gemini', upload: 'paste', capture: 'network-lag' },
@@ -89,6 +91,7 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
       }, ms);
     }
     window.notices = [];
+    window.__ZRA_TEST__ = {};
     window.fixtureMenus = new Map();
     window.GM_info = { script: { version: 'browser-test' } };
     const values = new Map();
@@ -197,7 +200,10 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
               + (scenario.capture === 'xhr' ? '<fixture-response data-message-id="answer-new"><p>回答前半段</p></fixture-response>'
                 : '<message-content data-message-id="answer-new"><p>回答前半段</p></message-content>')
               + (scenario.capture === 'xhr-dom' ? '<div hidden aria-busy="true"></div>' : '') + '</model-response>'
-            : '<article><div data-message-author-role="user" data-message-id="user-new"></div></article><article id="new-turn"><div data-message-author-role="assistant" data-message-id="answer-new"><p>回答前半段</p></div></article>');
+            : '<article><div data-message-author-role="user" data-message-id="user-new"></div></article>'
+              + (scenario.layout === 'turn-wrapper'
+                ? '<section data-turn="assistant" id="new-turn"><div><div data-message-author-role="assistant" data-message-id="answer-new"><p>回答前半段</p></div></div></section>'
+                : '<article id="new-turn"><div data-message-author-role="assistant" data-message-id="answer-new"><p>回答前半段</p></div></article>'));
           document.querySelector('[data-message-id="user-new"]').textContent = input.textContent; input.textContent = '';
           send.setAttribute('data-testid', 'stop-button'); send.setAttribute('aria-label', 'Stop generating');
           // Deliberately outside the Gemini hook: the actual DOM fallback,
@@ -214,7 +220,7 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
           } else {
             const url = scenario.capture === 'network-lag'
               ? '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'
-              : (gemini ? '/fixture-unintercepted-response' : '/backend-api/f/conversation');
+              : (gemini || scenario.capture === 'dom-only' ? '/fixture-unintercepted-response' : '/backend-api/f/conversation');
             void fetch(url).then(response => response.text());
           }
         }, 3000);
@@ -222,9 +228,10 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
       window.appendAnswer = () => {
         if (background) return; // Gemini leaves its DOM and Stop button stale until foregrounded
         document.querySelector('[data-message-id="answer-new"]').insertAdjacentHTML('beforeend', '<div data-math-source="\\frac{a}{b}"><span class="katex-display"><span class="katex"><span class="katex-html">重复字形</span></span></span></div><p>完整回答的最后一句。</p>');
-        if (scenario.capture !== 'xhr-dom') document.querySelector('#new-turn').insertAdjacentHTML('beforeend', gemini
+        if (scenario.capture !== 'xhr-dom' && scenario.actions !== 'none') document.querySelector('#new-turn').insertAdjacentHTML('beforeend', gemini
           ? '<button aria-label="Copy response"><mat-icon data-mat-icon-name="copy"></mat-icon></button>'
-          : '<button data-testid="copy-turn-action-button">Copy</button>');
+          : scenario.actions === 'localized' ? '<button aria-label="复制回复">复制</button>'
+            : '<button data-testid="copy-turn-action-button">Copy</button>');
         send.setAttribute('data-testid', 'send-button'); send.removeAttribute('aria-label'); send.disabled = false;
       };
     }, { once: true });
@@ -297,6 +304,7 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
   expect(result.fractions).toBe(1);
   await expect(sidebar.locator('.zrp-message-error')).toHaveCount(0);
   await expect(input).toBeEnabled();
+  await expect.poll(() => web.evaluate(() => __ZRA_TEST__.connector.currentTaskId)).toBe(null);
   if (scenario.fault === 'relay-timeout') {
     expect(await sidebar.evaluate(() => events.some(event => event.type === 'answer' && event.error))).toBe(true);
     await expect(sidebar.getByText('网页联动失败；请查看上方提示。')).toHaveCount(0);

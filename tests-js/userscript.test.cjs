@@ -150,6 +150,114 @@ test('ChatGPT final DOM is bound to the new turn and preserves math without dupl
   assert.match(rendered.textContent, /最后的结论/);
 });
 
+test('ChatGPT terminal response finishes sidebar rendering without legacy action buttons', async (t) => {
+  const api = setup('https://chatgpt.com/', '<body><main></main><form><textarea id="prompt-textarea"></textarea></form></body>');
+  t.after(() => api.window.close());
+  for (const name of ['relay.js', 'markdown.js', 'panel.js']) {
+    api.window.eval(fs.readFileSync(path.join(__dirname, '..', 'addon', 'content', name), 'utf8'));
+  }
+  const store = api.window.ZoteroResearchRelay.createRelayStore();
+  t.after(() => store.destroy());
+  const secret = 'chatgpt-completion-fixture';
+  store.connect({ sessionSecret: secret, ai: 'ChatGPT', url: 'https://chatgpt.com/' });
+  const events = [];
+  store.subscribe(event => events.push(event));
+  const host = api.window.document.createElement('aside');
+  api.window.document.body.append(host);
+  const panel = api.window.ZoteroResearchPanel.mount(host, {
+    relay: store, getProvider: () => 'chatgpt', retrieveEvidence: async () => [],
+  });
+  t.after(() => panel.destroy());
+  panel.setContext({ item_key: 'REPRO001', attachment_key: 'PDF00001', library_id: 1, title: 'Completion regression' });
+  host.querySelector('[data-testid="webai-chat-input"]').value = '解释表格';
+  host.querySelector('[data-testid="webai-chat-send"]').click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const { task } = await store.poll({ sessionSecret: secret }, 0);
+  assert.ok(task);
+  const c = api.connector;
+  c.isRunning = true; c.currentTaskId = task.id; c.sessionSecret = secret;
+  c.taskStartedAt = Date.now();
+  c.captureChatGPTTurn();
+  const updates = [];
+  api.window.GM_xmlhttpRequest = options => {
+    const payload = JSON.parse(options.data);
+    updates.push(payload);
+    options.onload({ status: 200, responseText: JSON.stringify(store.update(payload)) });
+    return { abort() {} };
+  };
+  api.window.document.querySelector('main').innerHTML = '<div data-message-author-role="user">解释表格</div>'
+    + '<section data-turn="assistant"><div><div data-message-author-role="assistant" data-message-id="answer-new">'
+    + '<table><tr><th>任务</th><th>数据集</th></tr><tr><td>地震相分类</td><td>Parihaka</td></tr></table>'
+    + '<p><strong>完整回答的最后一句。</strong></p></div></div><button aria-label="复制回复">复制</button></section>';
+  const raw = 'data: ' + JSON.stringify({ message: {
+    id: 'answer-new', author: { role: 'assistant' }, channel: 'final',
+    content: { content_type: 'text', parts: ['| 任务 | 数据集 |\n| --- | --- |\n| 地震相分类 | Parihaka |\n\n**完整回答的最后一句。**'] },
+    end_turn: true,
+  } }) + '\n\ndata: [DONE]\n\n';
+  await c.proxy.readStream(new ReadableStream({ start(controller) {
+    controller.enqueue(new TextEncoder().encode(raw)); controller.close();
+  } }), task.id);
+  c.sampleChatGPTAnswer();
+  await new Promise(resolve => setTimeout(resolve, 1800));
+  c.sampleChatGPTAnswer();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(events.filter(event => event.type === 'answer' && !event.error).length, 1,
+    'a terminal current-turn answer must release the sidebar instead of remaining plain pending text');
+  assert.equal(c.currentTaskId, null, 'the web connector must return to polling');
+  assert.equal(updates.filter(update => update.isDone).length, 1);
+  assert.equal(host.querySelectorAll('.zrp-md table').length, 1);
+  assert.match(host.querySelector('.zrp-md strong').textContent, /完整回答的最后一句/);
+  assert.equal(host.querySelectorAll('.zrp-message-assistant .zrp-hint').length, 0);
+  assert.match(host.querySelector('[data-testid="webai-chat-status"]').textContent, /回答已接收/);
+});
+
+for (const veto of ['stream', 'request', 'stop', 'busy', 'no-terminal']) {
+  test(`ChatGPT action-free completion still waits for ${veto}`, (t) => {
+    const api = setup('https://chatgpt.com/', '<body><main></main><form><textarea id="prompt-textarea"></textarea></form></body>');
+    t.after(() => api.window.close());
+    const c = api.connector;
+    c.isRunning = true; c.currentTaskId = 'completion-veto'; c.isSendingUpdate = true;
+    c.captureChatGPTTurn();
+    api.window.document.querySelector('main').innerHTML = '<div data-message-author-role="user">Q</div>'
+      + '<section data-turn="assistant"><div data-message-author-role="assistant"><p>回答尚未结束</p></div></section>';
+    c.chatGPTTransportDone = veto !== 'no-terminal';
+    if (veto === 'stream') c.proxy.activeStreams.set(c.currentTaskId, 1);
+    if (veto === 'request') c.proxy.activeRequests.set(c.currentTaskId, 1);
+    if (veto === 'stop') api.window.document.querySelector('form').insertAdjacentHTML('beforeend', '<button data-testid="stop-button">停止生成</button>');
+    if (veto === 'busy') api.window.document.querySelector('form').setAttribute('aria-busy', 'true');
+    c.sampleChatGPTAnswer();
+    c.chatGPTStableSince = Date.now() - 5000;
+    c.sampleChatGPTAnswer();
+    assert.equal(c.doneSignal, false, `${veto} must veto completion even after a terminal frame`);
+  });
+}
+
+test('ChatGPT completed DOM recognizes localized actions in the current turn wrapper', (t) => {
+  const api = setup('https://chatgpt.com/', '<body><main></main><form><textarea id="prompt-textarea"></textarea></form></body>');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true; c.currentTaskId = 'localized-actions'; c.isSendingUpdate = true;
+  c.captureChatGPTTurn();
+  api.window.document.querySelector('main').innerHTML = '<div data-message-author-role="user">Q</div>'
+    + '<section data-turn="assistant"><div><div data-message-author-role="assistant"><p>DOM 回退的完整结论。</p></div></div>'
+    + '<button aria-label="复制回复">复制</button><button aria-label="不喜欢此回复">不喜欢</button></section>';
+  c.sampleChatGPTAnswer();
+  c.chatGPTStableSince = Date.now() - 5000;
+  c.sampleChatGPTAnswer();
+  assert.equal(c.doneSignal, true, 'localized current-turn controls must complete DOM fallback without a captured network stream');
+  assert.match(c.accumulatedText, /完整结论/);
+});
+
+test('a new ChatGPT request invalidates the previous transport terminal', (t) => {
+  const api = setup('https://chatgpt.com/');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.currentTaskId = 'continued-answer'; c.chatGPTTransportDone = true;
+  const release = c.proxy.beginRequest(c.currentTaskId);
+  assert.equal(c.chatGPTTransportDone, false, 'a follow-up stream must not reuse a previous message terminal');
+  release();
+});
+
 test('parseChatGPT treats the latest message snapshot as authoritative', () => {
   const api = setup('https://chatgpt.com/');
   const raw = [
