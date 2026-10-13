@@ -3,10 +3,10 @@
     "zotero-research@local.invalid": {
       "updates": [
         {
-          "version": "0.9.3",
-          "update_link": "https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.3/zotero-research-0.9.3.xpi",
-          "update_hash": "sha256:2acaeaf608602fe9ba2bb01fe8ec31cda9b10d9f047644c9c0ebedc4593a06c0",
-          "update_info_url": "https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.9.3",
+          "version": "0.9.4",
+          "update_link": "https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.4/zotero-research-0.9.4.xpi",
+          "update_hash": "sha256:86a402df7cc41a9ac0957661bad7b2c7f7ad3b04352441cfa3237843ead6b070",
+          "update_info_url": "https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.9.4",
           "applications": {
             "zotero": {
               "strict_min_version": "10.0",
@@ -18,7 +18,7 @@
     }
   },
   "userscript": {
-    "version": "1.1.2",
-    "release": "0.9.3"
+    "version": "1.1.3",
+    "release": "0.9.4"
   }
 }
