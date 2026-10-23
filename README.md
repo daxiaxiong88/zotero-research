@@ -216,3 +216,23 @@ uv run python scripts/build_release_metadata.py --check
 本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.9.5.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
 
 时间轴交互参考 [Reborn14/chatgpt-conversation-timeline](https://github.com/Reborn14/chatgpt-conversation-timeline)（MIT），本项目针对 Zotero 与六个平台独立实现了共享导航组件；没有照搬其三个站点的完整扩展或 React 内部状态读取逻辑。
+
+## 许可证
+
+本项目以 **GNU General Public License v3.0 or later** 发布，完整条款见 [LICENSE](LICENSE)。
+
+```
+Copyright (C) 2026 Zhiheng Xiong <daxiaxiong88@gmail.com>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+```
+
+如果你是分发本项目的衍生版本（包括打包进 Zotero 插件后对外发布），需同样以 GPL-3.0 或兼容许可证开放源码。仅在本机自用而不分发，不受此约束。
