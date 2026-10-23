@@ -3,6 +3,7 @@ name = "zotero-research-mcp"
 version = "0.4.1"
 description = "A Zotero 10 reading sidebar with browser-AI relay and page-linked evidence."
 readme = "README.md"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28,<1",

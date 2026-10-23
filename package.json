@@ -1,6 +1,7 @@
 {
   "name": "zotero-research-panel",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "scripts": {
     "build:userscript": "node scripts/build_userscript.cjs",
     "check:userscript": "node scripts/build_userscript.cjs --check",
