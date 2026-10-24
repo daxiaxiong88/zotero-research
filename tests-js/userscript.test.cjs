@@ -496,6 +496,95 @@ test('parseDeepSeek separates THINK and RESPONSE blocks', () => {
   assert.equal(parsed.text, '<think>推理中</think>\n答案第二段');
 });
 
+test('DeepSeek preserves every fragment and empty answer starts across metadata frames', () => {
+  const api = setup('https://chat.deepseek.com/');
+  const frames = [
+    { v: { response: { fragments: [
+      { type: 'THINK', content: '先分析。' },
+      { type: 'RESPONSE', content: '' },
+    ] } } },
+    { p: 'response/fragments/-1/content', o: 'APPEND', v: '第一段。\n\n' },
+    { response_message_id: 2 },
+    { v: '第二段。\n\n' },
+    { p: 'response/fragments', o: 'APPEND', v: [
+      { type: 'RESPONSE', content: '公式：$x^2$\n\n' },
+      { type: 'RESPONSE', content: '最后一段。' },
+    ] },
+  ];
+  const raw = frames.map(frame => 'data: ' + JSON.stringify(frame)).join('\n') + '\n';
+  assert.equal(api.parseDeepSeek(raw).text,
+    '<think>先分析。</think>\n第一段。\n\n第二段。\n\n公式：$x^2$\n\n最后一段。');
+});
+
+test('DeepSeek applies batched relative patches and inherited batches without leaking control values', () => {
+  const api = setup('https://chat.deepseek.com/');
+  const frames = [
+    { v: { response: { fragments: [{ type: 'RESPONSE', content: '第一段。' }] } } },
+    { p: 'response', o: 'BATCH', v: [
+      { p: 'accumulated_token_usage', v: 20 },
+      { p: 'fragments', o: 'APPEND', v: [
+        { type: 'RESPONSE', content: '\n\n第二段。' },
+        { type: 'RESPONSE', content: '' },
+      ] },
+      { p: 'fragments/-1', o: 'BATCH', v: [
+        { p: 'content', o: 'APPEND', v: '\n\n第三段。' },
+        { p: 'status', o: 'SET', v: 'FINISHED' },
+      ] },
+    ] },
+    // The parent BATCH path/operation, not its last nested child, is inherited.
+    { v: [{ p: 'fragments/-2/content', o: 'APPEND', v: '补充。' }] },
+    { p: 'response/fragments/-1/content', o: 'APPEND', v: '结尾。' },
+    { p: 'response/status', o: 'SET', v: 'FINISHED' },
+    { v: 'not answer text' },
+  ];
+  const raw = frames.map(frame => 'data: ' + JSON.stringify(frame)).join('\n');
+  assert.equal(api.parseDeepSeek(raw).text, '第一段。\n\n第二段。补充。\n\n第三段。结尾。');
+});
+
+test('DeepSeek snapshots and SET corrections replace rather than duplicate or retain old text', () => {
+  const api = setup('https://chat.deepseek.com/');
+  const frames = [
+    { v: { response: { fragments: [{ type: 'RESPONSE', content: '较长但错误的草稿。' }] } } },
+    { p: 'response/fragments/0/content', o: 'SET', v: '正确。' },
+    { p: 'response/fragments/0/content', o: 'APPEND', v: '好' },
+    { v: '好' },
+    { v: { response: { fragments: [{ type: 'RESPONSE', content: '正确。好好' }] } } },
+    { p: 'response/fragments', o: 'APPEND', v: [{ type: 'RESPONSE', content: '尾段。' }] },
+    { p: 'response/fragments/1', o: 'SET', v: { type: 'RESPONSE', content: '修正的尾段。' } },
+  ];
+  const raw = frames.map(frame => 'data: ' + JSON.stringify(frame)).join('\n');
+  assert.equal(api.parseDeepSeek(raw).text, '正确。好好修正的尾段。');
+});
+
+test('DeepSeek preserves direct response content and does not append statuses or search metadata', () => {
+  const api = setup('https://chat.deepseek.com/');
+  const frames = [
+    { v: { response: { content: '', fragments: [], status: 'WIP' } } },
+    { p: 'response/content', o: 'APPEND', v: '开头。\n\n' },
+    { v: '中间。' },
+    { p: 'response', o: 'BATCH', v: [
+      { p: 'content', o: 'APPEND', v: '\n\n结尾。' },
+      { p: 'accumulated_token_usage', v: 30 },
+      { p: 'status', v: 'FINISHED' },
+    ] },
+  ];
+  const raw = frames.map(frame => 'data: ' + JSON.stringify(frame)).join('\n');
+  assert.equal(api.parseDeepSeek(raw).text, '开头。\n\n中间。\n\n结尾。');
+  assert.equal(api.parseDeepSeek('data: ' + JSON.stringify({ v: { response: { fragments: [
+    { type: 'SEARCH', content: '搜索状态，不是正文' },
+    { type: 'RESPONSE', content: '正文' },
+  ] } } })).text, '正文');
+});
+
+test('DeepSeek keeps incomplete final frames pending until their remaining bytes arrive', () => {
+  const api = setup('https://chat.deepseek.com/');
+  const first = 'data: ' + JSON.stringify({ v: [{ type: 'RESPONSE', content: '完整前段。' }] }) + '\r\n\r\n';
+  const final = 'data: ' + JSON.stringify({ p: 'response/fragments/-1/content', o: 'APPEND', v: '\n末段：中文 🌍 $\\alpha$' });
+  const partial = first + final.slice(0, -5);
+  assert.equal(api.parseDeepSeek(partial).text, '完整前段。');
+  assert.equal(api.parseDeepSeek(first + final + '\r\n\r\n').text, '完整前段。\n末段：中文 🌍 $\\alpha$');
+});
+
 test('parseKimi collects text blocks and explicit done frame', () => {
   const api = setup();
   const raw = [

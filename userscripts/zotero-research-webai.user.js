@@ -681,21 +681,90 @@
   }
 
   function parseDeepSeek(raw) {
-    let response = '';
-    let think = '';
-    let responseType = 'system';
+    const fragments = [];
+    let content = '';
+    let lastPath = '';
+    let lastOperation = 'APPEND';
+    const copyFragment = block => ({
+      type: typeof block?.type === 'string' ? block.type : '',
+      content: typeof block?.content === 'string' ? block.content : '',
+    });
+    const setFragments = (blocks, replace) => {
+      if (replace) { fragments.length = 0; }
+      for (const block of blocks) { fragments.push(copyFragment(block)); }
+    };
+    const resolvePath = (path, base = '') => {
+      const clean = path.replace(/^\//, '');
+      if (path.startsWith('/') || clean === 'response' || clean.startsWith('response/')) { return clean; }
+      return base ? base + '/' + clean : 'response/' + clean;
+    };
+    const apply = (value, path, operation, depth = 0) => {
+      if (depth > 20) { return; }
+      if (operation === 'BATCH' && Array.isArray(value)) {
+        for (const patch of value) {
+          if (typeof patch?.p !== 'string') { continue; }
+          apply(patch.v, resolvePath(patch.p, path), String(patch.o || 'SET').toUpperCase(), depth + 1);
+        }
+        return;
+      }
+      if (value?.response && !path) {
+        apply(value.response, 'response', 'SET', depth + 1);
+        return;
+      }
+      if (path === 'response' && value && typeof value === 'object' && !Array.isArray(value)) {
+        if (Array.isArray(value.fragments)) { setFragments(value.fragments, true); }
+        if (typeof value.content === 'string') { content = value.content; }
+        return;
+      }
+      if (path === 'response/fragments' && Array.isArray(value)) {
+        setFragments(value, operation !== 'APPEND');
+        return;
+      }
+      if (path === 'response/content' && typeof value === 'string') {
+        content = operation === 'APPEND' ? content + value : value;
+        return;
+      }
+      const match = /^response\/fragments\/(-?\d+)(?:\/(content|type))?$/.exec(path);
+      if (!match) { return; } // Status, token usage and search metadata are not answer text.
+      const offset = Number(match[1]);
+      const index = offset < 0 ? fragments.length + offset : offset;
+      if (index < 0 || index > fragments.length) { return; }
+      if (!match[2] && value && typeof value === 'object' && !Array.isArray(value)) {
+        fragments[index] = copyFragment(value);
+        return;
+      }
+      const block = fragments[index];
+      if (!block || typeof value !== 'string') { return; }
+      if (match[2] === 'type') { block.type = value; }
+      else if (match[2] === 'content') {
+        // APPEND is a delta, not a cumulative prefix: repeated words and
+        // whitespace are real answer text and must survive unchanged.
+        block.content = operation === 'APPEND' ? block.content + value : value;
+      }
+    };
     for (const payload of ssePayloads(raw)) {
       const data = parseJson(payload);
       if (!data) { continue; }
-      let block = {};
-      if (data.v?.response) { block = data.v.response.fragments?.[0] || {}; }
-      else if (Array.isArray(data.v)) { block = data.v[0] || {}; }
-      else if (typeof data.v === 'string') { block = { content: data.v }; }
-      if (block.type) { responseType = block.type; }
-      if (!block.content) { responseType = 'system'; }
-      if (responseType === 'RESPONSE') { response += block.content || ''; }
-      else if (responseType === 'THINK') { think += block.content || ''; }
+      const hasPath = typeof data.p === 'string';
+      const snapshot = data.v?.response && typeof data.v.response === 'object';
+      const legacyBlocks = !hasPath && Array.isArray(data.v)
+        && data.v.length > 0 && data.v.every(block => block && typeof block.type === 'string');
+      const path = snapshot ? '' : hasPath ? resolvePath(data.p)
+        : legacyBlocks ? 'response/fragments' : lastPath;
+      const operation = String(data.o || (hasPath ? 'APPEND' : lastOperation)).toUpperCase();
+      if (hasPath) { lastPath = path; }
+      if (hasPath || data.o) { lastOperation = operation; }
+      apply(data.v, path, operation);
+      if (snapshot || legacyBlocks || (path === 'response/fragments' && Array.isArray(data.v))) {
+        // Empty typed fragments still select the destination of following
+        // pathless deltas. Metadata without a path must not clear that state.
+        lastPath = fragments.length ? 'response/fragments/-1/content' : 'response/content';
+        lastOperation = 'APPEND';
+      }
     }
+    const answers = fragments.filter(block => block.type === 'RESPONSE');
+    const response = answers.length ? answers.map(block => block.content).join('') : content;
+    const think = fragments.filter(block => block.type === 'THINK').map(block => block.content).join('');
     return { text: withThinking(response, think), done: false };
   }
 
