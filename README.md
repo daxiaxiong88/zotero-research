@@ -4,9 +4,9 @@
 
 ## 效果演示
 
-<video src="https://github.com/user-attachments/assets/10eed7ee-1096-41f4-a54a-b4f40a553c52" controls preload="metadata" muted></video>
+https://github.com/user-attachments/assets/10eed7ee-1096-41f4-a54a-b4f40a553c52
 
-*完整的问答、公式渲染与页码跳转演示；视频无法播放时请直接阅读下方说明。*
+*完整的问答、公式渲染与页码跳转演示。若内嵌播放器未加载，可[直接打开演示视频](https://github.com/user-attachments/assets/10eed7ee-1096-41f4-a54a-b4f40a553c52)。*
 
 ## 它能做什么
 
@@ -42,18 +42,18 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ## 安装
 
-要求：**Zotero 10.0.x**。当前正式版为 **0.9.5**，配套网页连接脚本为 **1.1.5**。
+要求：**Zotero 10.0.x**。当前正式版为 **0.9.6**，配套网页连接脚本为 **1.1.6**。
 
 | 组件 | 下载 | 用途 |
 | --- | --- | --- |
-| Zotero 插件 0.9.5 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.5/zotero-research-0.9.5.xpi) | 在 Zotero 中安装 |
-| 网页连接脚本 1.1.5 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.5/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
+| Zotero 插件 0.9.6 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.6/zotero-research-0.9.6.xpi) | 在 Zotero 中安装 |
+| 网页连接脚本 1.1.6 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.6/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
 
-[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.9.5.md)
+[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.9.6.md)
 
 **已安装带有效更新源的版本，可直接检查更新**；更早缺少更新地址的旧版，仍需手动安装新版 XPI 和油猴脚本一次。安装后重启 Zotero、刷新 AI 网页。无需清空设置、文献或对话；API 直连用户只更新 XPI。不要把源码压缩包、`.meta.js` 或 `previous-stable` 回滚包当作安装文件。
 
-本版修复 **ChatGPT 网页已答完、侧栏仍未排版并持续等待**，以及 **Gemini 问题留在输入框、不自动发送**。ChatGPT 的本轮完整网络回答可在页面尚未重绘时完成回传；Gemini 通过编辑器粘贴事务录入文字，并用本轮发送证据确认提交。修复位于网页脚本：已有插件的用户更新脚本至 **1.1.5** 并刷新 AI 网页即可生效；更新 XPI 后重启 Zotero。
+本版修复 **DeepSeek 网页回答完整、侧栏却遗漏段落**：按顺序合并多个回答片段和批量更新，避免正文被误归入思考过程，并保留公式、表格和结尾段落。这不是刻意精简回答。修复位于网页脚本：已有插件的用户更新脚本至 **1.1.6** 并刷新 DeepSeek 网页即可生效；更新 XPI 后重启 Zotero。旧存档中已缺失的内容不会自动补回，请用新一轮问答验证。
 
 ### 以后如何获得更新
 
@@ -65,7 +65,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ### 1. 安装 Zotero 插件
 
-1. 下载上方的 `zotero-research-0.9.5.xpi`。
+1. 下载上方的 `zotero-research-0.9.6.xpi`。
 2. 打开 Zotero，进入“工具 → 插件”。
 3. 点击右上角齿轮，选择“从文件安装插件”。
 4. 选择下载的 XPI，按提示完成安装并重启 Zotero。
@@ -80,7 +80,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
    <img width="1028" height="425" alt="Tampermonkey 配置示意" src="https://github.com/user-attachments/assets/d395c165-9f26-413c-8ebc-7168cab48546" />
 
 2. 点击上方的“下载网页连接脚本”，在 Tampermonkey 中安装；若浏览器只下载文件，可在 Tampermonkey 编辑器中粘贴文件全文并保存。
-3. 如果以前装过，请更新原脚本，不要同时保留多个副本。确认脚本版本为 **1.1.5**。
+3. 如果以前装过，请更新原脚本，不要同时保留多个副本。确认脚本版本为 **1.1.6**。
 4. 打开并登录任一支持的 AI 网站；更新脚本后刷新已打开的 AI 页面，不必清空原有网页对话。
 5. 页面右下角出现“已连接，等待 Zotero 消息”，同时 Zotero 侧栏显示对应模型“已连接”，即安装完成。
 
@@ -176,15 +176,19 @@ API 模式的「附带全文 PDF」当前仅支持 Anthropic 兼容协议，所�
 
 ### ChatGPT 把长文本变成附件后提示输入失败
 
-请确认油猴脚本已更新至 **1.1.5** 并刷新 ChatGPT 页面。当前脚本能识别本轮新增的“已粘贴的文本”附件，等待其就绪后继续发送；普通短文本和截图发送保持原有方式。若上次失败的文本附件仍留在网页输入区，先手动发送或移除它，再重试，避免叠加旧草稿。
+请确认油猴脚本已更新至 **1.1.6** 并刷新 ChatGPT 页面。当前脚本能识别本轮新增的“已粘贴的文本”附件，等待其就绪后继续发送；普通短文本和截图发送保持原有方式。若上次失败的文本附件仍留在网页输入区，先手动发送或移除它，再重试，避免叠加旧草稿。
 
 ### ChatGPT 已答完，侧栏仍显示原始 Markdown 并持续等待
 
-网页脚本 **1.1.5** 收到本轮完整网络回答和响应流结束标记后，正文稳定 1.5 秒即可完成回传并触发侧栏排版，无需等待页面重绘、旧工具栏或停止按钮更新。仅有消息级结束标记时仍等待传输关闭，防止回答断尾；没有有效网络正文时保留页面读取后备。请更新油猴中的原脚本、保存并刷新 ChatGPT 页面。
+网页脚本 **1.1.6** 收到本轮完整网络回答和响应流结束标记后，正文稳定 1.5 秒即可完成回传并触发侧栏排版，无需等待页面重绘、旧工具栏或停止按钮更新。仅有消息级结束标记时仍等待传输关闭，防止回答断尾；没有有效网络正文时保留页面读取后备。请更新油猴中的原脚本、保存并刷新 ChatGPT 页面。
 
 ### Gemini 问题留在输入框，没有自动发送
 
-网页脚本 **1.1.5** 通过粘贴事务将完整问题提交给 Gemini 编辑器，等待编辑器确认内容后点击发送。页面显示出文字但编辑器仍为空时，不再误判录入成功；无关停止按钮、请求或历史节点重建也不会被认成已经发送。更新原油猴脚本并刷新 Gemini 即可生效。
+网页脚本 **1.1.6** 通过粘贴事务将完整问题提交给 Gemini 编辑器，等待编辑器确认内容后点击发送。页面显示出文字但编辑器仍为空时，不再误判录入成功；无关停止按钮、请求或历史节点重建也不会被认成已经发送。更新原油猴脚本并刷新 Gemini 即可生效。
+
+### DeepSeek 网页完整，但侧栏少了内容
+
+请更新网页脚本至 **1.1.6**，刷新 DeepSeek 后重新提问。当前脚本会重建完整的回答片段序列，分别处理思考和正文，不再只取首个片段或因中途状态更新而丢段。只更新 XPI 无法替换旧网页脚本；更新也不会自动改写之前已经截短的本机记录。
 
 ### 公式仍显示为 LaTeX 原文
 
@@ -213,7 +217,7 @@ uv run python scripts/build_release_metadata.py --check
 
 更完整的操作细节见 [Zotero 10 使用指南](docs/USAGE_ZOTERO10.md)。
 
-本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.9.5.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
+本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.9.6.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
 
 时间轴交互参考 [Reborn14/chatgpt-conversation-timeline](https://github.com/Reborn14/chatgpt-conversation-timeline)（MIT），本项目针对 Zotero 与六个平台独立实现了共享导航组件；没有照搬其三个站点的完整扩展或 React 内部状态读取逻辑。
 

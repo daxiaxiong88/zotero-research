@@ -48,3 +48,16 @@ def test_readme_offers_matching_release_assets_not_development_script() -> None:
     assert release + "zotero-research-webai.user.js" in readme
     assert "/raw/" not in readme
     assert "RELEASE_AUDIT.md" not in readme
+
+
+def test_readme_demo_uses_github_attachment_autolink_and_fallback() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    demo = readme.split("## 效果演示\n", 1)[1].split("\n## ", 1)[0]
+    # GitHub rewrites standalone attachment URLs to signed media URLs; a raw
+    # HTML video src can remain on github.com and fail the signed-in media CSP.
+    attachment = re.search(
+        r"(?:^|\n)\n(https://github\.com/user-attachments/assets/[a-f0-9-]+)\n\n", demo
+    )
+    assert attachment is not None
+    assert not re.search(r"<\s*(?:video|iframe)\b", demo, re.IGNORECASE)
+    assert f"]({attachment.group(1)})" in demo

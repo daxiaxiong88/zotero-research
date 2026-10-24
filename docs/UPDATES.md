@@ -15,6 +15,8 @@
 
 ## 发布者检查表
 
+本项目的“更新 GitHub”默认指完整发布：源码、版本标签、正式 Release、XPI、网页脚本、更新源和安装文档一并更新并核验。除非明确要求仅同步源码，不以 `git push` 成功作为发布完成。
+
 1. 同步 XPI 与脚本版本、README、使用指南及发布说明。
 2. 执行 `npm run build:userscript` 和 `npm run check:userscript`，再运行回归测试。
 3. 执行 `python scripts/build_addon.py` 构建 XPI。
