@@ -624,8 +624,9 @@ test('parseGemini extracts response text and terminal frame', () => {
   assert.equal(parsed.done, true);
 });
 
-function geminiWire(text, done = false) {
+function geminiWire(text, done = false, candidateState) {
   const result = []; result[1] = [text];
+  if (candidateState !== undefined) result[8] = [candidateState];
   const inner = []; inner[4] = [result];
   return JSON.stringify([['wrb.fr', null, JSON.stringify(inner)]]) + (done ? '\n[["e",10,null]]' : '');
 }
@@ -778,6 +779,30 @@ test('Gemini still accepts network corrections and a shorter terminal answer aft
   assert.equal(c.doneSignal, true);
 });
 
+test('Gemini completes the latest final candidate while HTTP stays open; duplicate frames do not postpone it', t => {
+  const { c, wakeups, wake } = backgroundGemini(t);
+  const id = c.currentTaskId;
+  const old = c.proxy.beginRequest(id);
+  const current = c.proxy.beginRequest(id);
+  const capture = (text, state, request) => c.proxy.handleCapture(geminiWire(text, false, state), id, request.captureEpoch);
+  capture('旧请求。', 2, old);
+  capture('半句', 1, current);
+  assert.equal(wakeups.some(msg => msg.ms === 3500), false);
+  capture('第一版结尾。', 2, current);
+  const first = wakeups.find(msg => msg.ms === 3500);
+  assert.ok(first);
+  capture('修订中的答案', 1, current);
+  wake(first);
+  assert.equal(c.doneSignal, false);
+  capture('完整修订。', 2, current);
+  const final = wakeups.filter(msg => msg.ms === 3500).at(-1);
+  capture('完整修订。', 2, current);
+  wake(final);
+  assert.equal(c.doneSignal, true);
+  assert.equal(c.accumulatedText, '完整修订。');
+  current(); old();
+});
+
 test('background Gemini completes on terminal plus closed transport using the worker, not stale UI', (t) => {
   const { c, wakeups, wake } = backgroundGemini(t);
   const release = c.proxy.beginRequest(c.currentTaskId);
@@ -896,6 +921,26 @@ test('Gemini thinking-only terminal data never replaces or completes the answer'
   c.proxy.handleCapture(JSON.stringify([['wrb.fr', null, JSON.stringify(inner)]]) + '\n[["e",10]]', c.currentTaskId);
   assert.equal(c.accumulatedText, '第一句。');
   assert.equal(wakeups.some(message => message.ms === 3500), false);
+});
+
+test('Gemini DOM fallback observes Stop returning to Send without a copy action and preserves the network tail', t => {
+  const api = setup();
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true; c.isSendingUpdate = true; c.currentTaskId = 'composer-transition';
+  c.captureGeminiTurn();
+  api.window.document.body.innerHTML = '<user-query>问题</user-query><model-response><message-content>第一句。</message-content></model-response>'
+    + '<form><rich-textarea><div class="textarea"></div></rich-textarea><button class="send-button" aria-label="Stop generating"></button></form>';
+  c.proxy.handleCapture(geminiWire('第一句。完整结论。'), c.currentTaskId);
+  c.sampleGeminiAnswer();
+  c.geminiStableSince = Date.now() - 5000;
+  c.sampleGeminiAnswer();
+  assert.equal(c.doneSignal, false);
+  api.window.document.querySelector('button').setAttribute('aria-label', 'Send');
+  c.geminiStableSince = Date.now() - 2000;
+  c.sampleGeminiAnswer();
+  assert.equal(c.doneSignal, true);
+  assert.equal(c.accumulatedText, '第一句。完整结论。');
 });
 
 test('Gemini DOM fallback handles user-query with query-text instead of user-query-content', (t) => {

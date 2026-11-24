@@ -23,6 +23,7 @@ for (const scenario of [
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'lost-callback' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'relay-timeout' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background' },
+  { provider: 'gemini', upload: 'paste', capture: 'xhr-candidate', fault: 'background' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background-retry' },
 ]) {
 test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${scenario.layout || 'standard'}/${scenario.fault || 'normal'}: image → one send → complete sidebar math`, async ({ context }) => {
@@ -34,9 +35,11 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
   await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><meta charset="utf-8"><body></body>' }));
   if (scenario.capture?.startsWith('xhr')) {
     const result = []; result[1] = ['回答前半段\n\\[\\frac{a}{b}\\]\n完整回答的最后一句。'];
+    if (scenario.capture === 'xhr-candidate') result[8] = [2];
     const inner = []; inner[4] = [result];
     await context.route('**/*StreamGenerate*', route => route.fulfill({ contentType: 'text/plain',
-      body: JSON.stringify([['wrb.fr', null, JSON.stringify(inner)]]) + '\n[["e",10,null,null,null]]',
+      body: JSON.stringify([['wrb.fr', null, JSON.stringify(inner)]])
+        + (scenario.capture === 'xhr-candidate' ? '' : '\n[["e",10,null,null,null]]'),
     }));
   }
   await sidebar.goto('https://zotero-fixture.invalid/');

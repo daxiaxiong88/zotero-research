@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.1.6
+// @version      1.1.7
 // @updateURL    https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.meta.js
 // @downloadURL  https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.user.js
 // @supportURL   https://github.com/daxiaxiong88/zotero-research/issues
@@ -657,6 +657,8 @@
     let think = '';
     let response = '';
     let done = false;
+    let answerId;
+    let candidateDone = false;
     for (const data of extractGeminiFrames(raw)) {
       for (const record of data) {
         if (!Array.isArray(record)) { continue; }
@@ -668,13 +670,20 @@
         if (record[0] !== 'wrb.fr') { continue; }
         const result = parseJson(record[2])?.[4]?.[0];
         const nextResponse = result?.[1]?.[0];
-        if (typeof nextResponse === 'string' && nextResponse) { response = nextResponse; }
+        if (typeof nextResponse === 'string' && nextResponse) {
+          response = nextResponse;
+          answerId = result[0];
+          candidateDone = result[8]?.[0] === 2;
+        } else if (answerId && result?.[0] === answerId && result[8]?.[0] != null) {
+          candidateDone = result[8][0] === 2;
+        }
         if (typeof result?.[37]?.[0]?.[0] === 'string') { think = result[37][0][0]; }
       }
     }
     return {
       text: withThinking(response.replace(/\[cite.+?\]/g, ''), think),
       hasAnswer: Boolean(response.trim()),
+      candidateDone,
       done,
       waitingForResponse: !done,
     };
@@ -1123,18 +1132,19 @@
       if (this.connector.currentTaskId === taskId && this.connector.config.name === 'ChatGPT') {
         this.connector.chatGPTTransportDone = false;
         this.connector.chatGPTStreamDone = false;
-        this.connector.chatGPTCaptureEpoch += 1;
         this.connector.cancelChatGPTCompletion?.();
         this.connector.cancelChatGPTCompletion = null;
       }
       if (this.connector.currentTaskId === taskId && this.connector.config.name === 'Gemini') {
         this.connector.geminiTransportDone = false;
+        this.connector.geminiCandidateDone = false;
+        this.connector.geminiNetworkText = '';
         this.connector.cancelGeminiCompletion?.();
         this.connector.cancelGeminiCompletion = null;
       }
       this.activeRequests.set(taskId, (this.activeRequests.get(taskId) || 0) + 1);
       this.requestStarts.set(taskId, (this.requestStarts.get(taskId) || 0) + 1);
-      const captureEpoch = this.connector.chatGPTCaptureEpoch;
+      const captureEpoch = ++this.connector.captureEpoch;
       let released = false;
       const release = () => {
         if (released) { return; }
@@ -1184,6 +1194,7 @@
         text: typeof parsed === 'string' ? parsed : String(parsed?.text || ''),
         done: hasDone ? Boolean(parsed.done) : genericNetworkDone(allText),
         streamDone: Boolean(parsed?.streamDone),
+        candidateDone: Boolean(parsed?.candidateDone),
         waitingForResponse: Boolean(parsed?.waitingForResponse),
         hasAnswer: parsed?.hasAnswer !== false,
       };
@@ -1191,8 +1202,8 @@
 
     handleCapture(allText, taskId, captureEpoch) {
       if (this.connector.currentTaskId !== taskId || !this.connector.isRunning) { return; }
-      if (this.connector.config.name === 'ChatGPT' && captureEpoch !== undefined
-        && captureEpoch !== this.connector.chatGPTCaptureEpoch) { return; }
+      if (['ChatGPT', 'Gemini'].includes(this.connector.config.name) && captureEpoch !== undefined
+        && captureEpoch !== this.connector.captureEpoch) { return; }
       if (this.connector.lastTask) {
         this.connector.lastTask.networkCaptures += 1;
         this.connector.lastTask.networkChars = allText.length;
@@ -1211,6 +1222,7 @@
         const connector = this.connector;
         if (connector.doneSignal) { return; }
         connector.geminiTransportDone = parsed.done;
+        connector.geminiCandidateDone = parsed.hasAnswer && parsed.candidateDone;
         // Gemini may stop painting after its first sentence in a hidden tab.
         // Its response stream already contains Markdown/TeX; do not wait for
         // stale DOM to catch up or let that DOM replace the stream snapshot.
@@ -1278,7 +1290,7 @@
       unsafeWindow.fetch = proxy;
     }
 
-    async readStream(stream, taskId, captureEpoch = this.connector.chatGPTCaptureEpoch) {
+    async readStream(stream, taskId, captureEpoch = this.connector.captureEpoch) {
       const reader = stream.getReader();
       this.clearIdle();
       this.activeStreams.set(taskId, (this.activeStreams.get(taskId) || 0) + 1);
@@ -1437,7 +1449,7 @@
       this.accumulatedText = '';
       this.lastDataSource = null;
       this.doneSignal = false;
-      this.chatGPTCaptureEpoch = 0;
+      this.captureEpoch = 0;
       this.isSendingUpdate = false;
       this.hasPendingData = false;
       this.awaitingManualSend = false;
@@ -1452,7 +1464,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-deepseek-fragments-1',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-gemini-completion-1',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -1808,6 +1820,8 @@
       this.geminiStableText = '';
       this.geminiStableSince = null;
       this.geminiTransportDone = false;
+      this.geminiCandidateDone = false;
+      this.geminiCompletionText = '';
       this.geminiNetworkText = '';
       this.stopDomWatcher();
       this.recordDiagnostic('reset-' + reason);
@@ -1826,10 +1840,10 @@
       const geminiDom = this.config.name === 'Gemini' && source === 'gemini-dom';
       if (networkData && this.lastDataSource === 'chatgpt-dom' && !isDone) { return; }
       if (geminiDom && this.geminiNetworkText && !isDone) {
-        if (this.geminiTransportDone || !isGeminiTextExtension(nextText, this.geminiNetworkText)
+        if (this.geminiTransportDone || this.geminiCandidateDone || !isGeminiTextExtension(nextText, this.geminiNetworkText)
           || !isGeminiTextExtension(nextText, this.accumulatedText)) { return; }
       }
-      if (networkData && this.config.name === 'Gemini' && !isDone && !this.geminiTransportDone
+      if (networkData && this.config.name === 'Gemini' && !isDone && !this.geminiTransportDone && !this.geminiCandidateDone
         && this.lastDataSource === 'gemini-dom' && isGeminiTextExtension(this.accumulatedText, nextText)) {
         return; // The page already supplied this prefix plus more of the same answer.
       }
@@ -3007,10 +3021,10 @@
 
     scheduleChatGPTCompletion() {
       const id = this.currentTaskId;
-      const epoch = this.chatGPTCaptureEpoch;
+      const epoch = this.captureEpoch;
       const text = this.chatGPTNetworkText;
       const eligible = () => this.isRunning && this.currentTaskId === id && !this.doneSignal
-        && this.chatGPTCaptureEpoch === epoch && this.chatGPTTransportDone && Boolean(text)
+        && this.captureEpoch === epoch && this.chatGPTTransportDone && Boolean(text)
         // Message-level end_turn can precede later frames. A stream terminal
         // is authoritative even if HTTP stays open; otherwise await closure.
         && (this.chatGPTStreamDone || (!this.proxy?.activeRequests.get(id)
@@ -3108,23 +3122,30 @@
       this.geminiUser = null;
       this.geminiStableText = '';
       this.geminiStableSince = null;
+      this.geminiSawStop = false;
     }
 
     scheduleGeminiCompletion() {
-      this.cancelGeminiCompletion?.();
-      this.cancelGeminiCompletion = null;
       const id = this.currentTaskId;
+      const epoch = this.captureEpoch;
+      const text = this.geminiNetworkText;
       const eligible = () => this.isRunning && this.currentTaskId === id && !this.doneSignal
-        && this.geminiTransportDone && this.geminiNetworkText
-        && !this.proxy?.activeStreams.get(id) && !this.proxy?.activeRequests.get(id);
-      if (!id || !eligible()) { return; }
-      // A terminal frame plus a closed transport is positive evidence; an
-      // idle/pause without that terminal never completes. New streams cancel
-      // this quiet window. No copy button, repaint or focus change is needed.
+        && this.captureEpoch === epoch && text && text === this.geminiNetworkText
+        && (this.geminiCandidateDone || (this.geminiTransportDone
+          && !this.proxy?.activeStreams.get(id) && !this.proxy?.activeRequests.get(id)));
+      if (!id || !eligible()) {
+        this.cancelGeminiCompletion?.();
+        this.cancelGeminiCompletion = null;
+        return;
+      }
+      if (this.cancelGeminiCompletion && this.geminiCompletionText === text) { return; }
+      this.cancelGeminiCompletion?.();
+      this.geminiCompletionText = text;
       this.cancelGeminiCompletion = scheduleDeadline(() => {
         this.cancelGeminiCompletion = null;
         if (!eligible()) { return; }
-        this.onNewData(this.geminiNetworkText, true, 'network');
+        if (this.lastTask) { this.lastTask.completionSource = this.geminiCandidateDone ? 'gemini-final-candidate' : 'network-terminal'; }
+        this.onNewData(text, true, 'network');
         this.stopDomWatcher();
       }, NETWORK_IDLE_COMPLETE_MS);
     }
@@ -3164,21 +3185,32 @@
         && !node.closest('pre, code') && !bodies.some(body => body.contains(node)));
       const active = (this.proxy?.activeStreams.get(this.currentTaskId) || 0)
         + (this.proxy?.activeRequests.get(this.currentTaskId) || 0);
-      const busy = answers.some(node => node.matches('[aria-busy="true"]') || node.querySelector('[aria-busy="true"]'));
-      const streaming = this.hasStreamingControl();
+      const lastAnswer = answers.at(-1);
+      const busy = lastAnswer?.matches('[aria-busy="true"]') ||
+        Array.from(lastAnswer?.querySelectorAll('[aria-busy="true"]') || []).some(node => this.controlIsVisible(node));
+      const composer = document.querySelector(this.config.input.text.selector)?.closest('form, .input-area, input-area-v2');
+      const streaming = this.hasStreamingControl(composer || document);
+      if (composer && streaming) { this.geminiSawStop = true; }
+      const composerReady = this.geminiSawStop && !streaming && composer
+        && Array.from(composer.querySelectorAll('button.send-button, button[data-testid="send-button"], button[aria-label*="microphone" i], button[aria-label*="麦克风"]'))
+          .some(node => this.controlIsVisible(node));
       const transportDone = this.geminiTransportDone === true;
-      Object.assign(reading, { completeControl, active, busy, streaming, transportDone });
+      Object.assign(reading, { completeControl, active, busy, streaming, composerReady: Boolean(composerReady), transportDone });
       // A parsed final response owns completion even if the page still shows
       // the first sentence / Stop button. Its separate worker pacer finishes.
-      if (this.geminiNetworkText && transportDone) { return; }
+      if (this.geminiNetworkText && (transportDone || this.geminiCandidateDone)) { return; }
       // Current-turn terminal frame is a second positive completion signal.
       // Hidden copy actions / stale busy widgets must not veto that signal;
       // live generation and additional response streams still veto completion.
-      if (active || streaming || (!transportDone && (!completeControl || busy))) {
+      if (active || streaming || (!transportDone && ((!completeControl && !composerReady) || busy))) {
         this.geminiStableSince = Date.now(); return;
       }
       if (Date.now() - this.geminiStableSince >= 1500) {
-        this.onNewData(text, true, 'gemini-dom'); this.stopDomWatcher();
+        // A resumed composer can precede the final DOM paint. Preserve a
+        // longer network snapshot when this rendered body is still its prefix.
+        const finalText = isGeminiTextExtension(this.geminiNetworkText, text) ? this.geminiNetworkText : text;
+        if (this.lastTask) { this.lastTask.completionSource = 'gemini-dom'; }
+        this.onNewData(finalText, true, 'gemini-dom'); this.stopDomWatcher();
       }
     }
 
