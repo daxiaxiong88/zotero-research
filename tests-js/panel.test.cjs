@@ -384,6 +384,33 @@ function setupWithMarkdown(adapter) {
   return { dom, panel, root, adapter };
 }
 
+test('Gemini 完成信号延迟时，侧栏独立渲染进度和同长度的正文修订', async t => {
+  const harness = makeRelayHarness();
+  const { dom, root, panel } = setupWithMarkdown(makeAdapter(harness));
+  t.after(() => { panel.destroy(); dom.window.close(); });
+  panel.setContext(CONTEXT);
+  await settle();
+  const send = root.querySelector('[data-testid="webai-chat-send"]');
+  root.querySelector('[data-testid="webai-chat-input"]').value = '解释公式';
+  send.click();
+  await settle();
+
+  const message = () => root.querySelector('[data-testid="webai-chat-message-1"]');
+  const prefix = '## 结果\n\n- **系数** $x=2$\n\n' + '背景材料'.repeat(12);
+  for (const tail of ['甲', '乙']) {
+    harness.relay.emit({ type: 'progress', id: 'task-1', text: prefix + tail });
+    await new Promise(resolve => dom.window.setTimeout(resolve, 200));
+    assert.equal(message().querySelector('h3')?.textContent, '结果');
+    assert.equal(message().querySelector('li strong')?.textContent, '系数');
+    assert.equal(message().querySelector('.zrp-math-inline')?.textContent, 'x=2');
+    assert.ok(message().querySelector('.zrp-md').textContent.endsWith(tail));
+    assert.equal(send.disabled, true);
+  }
+  harness.relay.emit({ type: 'answer', id: 'task-1', text: prefix + '最终结果', done: true });
+  assert.ok(message().querySelector('.zrp-md').textContent.endsWith('最终结果'));
+  assert.equal(send.disabled, false);
+});
+
 test('回答完成时分离思考过程并渲染 Markdown', async () => {
   const harness = makeRelayHarness();
   const { root, panel } = setupWithMarkdown(makeAdapter(harness));

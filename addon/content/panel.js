@@ -670,8 +670,6 @@
     function messageSignature(message) {
       return [
         message.role,
-        String(message.content || '').length,
-        String(message.content || '').slice(0, 48),
         message.pending ? 1 : 0,
         message.error ? 1 : 0,
         message.notice ? 1 : 0,
@@ -701,7 +699,7 @@
         var role = message.role === 'assistant' ? 'assistant' : 'user';
         var signature = messageSignature(message);
         var cached = messageDomCache.get(message);
-        if (cached && cached.signature === signature) {
+        if (cached && cached.signature === signature && cached.content === message.content) {
           // Unchanged message: re-attach the cached node. Markdown/KaTeX
           // parsing is far too expensive to repeat on every progress tick.
           cached.node.setAttribute('data-testid', 'webai-chat-message-' + String(index));
@@ -713,8 +711,9 @@
           'data-testid': 'webai-chat-message-' + String(index),
         });
         article.appendChild(createElement(document, 'div', { className: 'zrp-message-role' }, role === 'assistant' ? providerLabel() : '我'));
-        if (role === 'assistant' && !message.pending) {
-          // Finished answers: separate the thinking block, render markdown.
+        // A web relay snapshot can arrive well before the browser confirms
+        // completion. Format the received text on the panel's progress tick.
+        if (role === 'assistant' && (!message.pending || (message.taskId && message.content))) {
           var parts = markdownApi.splitThinking(message.content);
           if (parts.think) {
             var thinkDetails = createElement(document, 'details', { className: 'zrp-think' });
@@ -724,12 +723,11 @@
             article.appendChild(thinkDetails);
           }
           var content = createElement(document, 'div', { className: 'zrp-message-content zrp-md' });
-          content.appendChild(markdownApi.renderMarkdown(document, parts.answer || message.content));
+          content.appendChild(markdownApi.renderMarkdown(document, parts.answer));
           article.appendChild(content);
         } else {
-          // Streaming/plain messages stay as fast plain text. A distillation
-          // request carries a long template (and the transcript in API mode),
-          // so show a short label instead of the payload.
+          // A distillation request carries a long template (and the transcript
+          // in API mode), so show a short label instead of the payload.
           var plain = message.content;
           if (role === 'user' && message.distillRequest) {
             plain = '（已发送「知识沉淀」请求：正在根据本次对话整理 Markdown 文档）';
@@ -757,7 +755,7 @@
         // saved source context, so a 来源 row under each answer duplicated
         // what the model already sees. The selection card keeps its jump.
         refs.chatMessages.appendChild(article);
-        messageDomCache.set(message, { node: article, signature: signature });
+        messageDomCache.set(message, { node: article, signature: signature, content: message.content });
       });
       refs.chatMessages.scrollTop = previousScrollTop;
       if (timeline) {

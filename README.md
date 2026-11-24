@@ -42,18 +42,18 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ## 安装
 
-要求：**Zotero 10.0.x**。当前正式版为 **0.9.6**，配套网页连接脚本为 **1.1.6**。
+要求：**Zotero 10.0.x**。当前正式版为 **0.9.7**，配套网页连接脚本为 **1.1.6**。
 
 | 组件 | 下载 | 用途 |
 | --- | --- | --- |
-| Zotero 插件 0.9.6 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.6/zotero-research-0.9.6.xpi) | 在 Zotero 中安装 |
-| 网页连接脚本 1.1.6 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.6/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
+| Zotero 插件 0.9.7 | [下载插件 XPI](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.7/zotero-research-0.9.7.xpi) | 在 Zotero 中安装 |
+| 网页连接脚本 1.1.6 | [下载网页连接脚本](https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.7/zotero-research-webai.user.js) | 在浏览器的 Tampermonkey 中安装；API 直连模式不需要 |
 
-[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.9.6.md)
+[最新版发布页面](https://github.com/daxiaxiong88/zotero-research/releases/latest) · [本版更新说明与已知限制](docs/releases/v0.9.7.md)
 
 **已安装带有效更新源的版本，可直接检查更新**；更早缺少更新地址的旧版，仍需手动安装新版 XPI 和油猴脚本一次。安装后重启 Zotero、刷新 AI 网页。无需清空设置、文献或对话；API 直连用户只更新 XPI。不要把源码压缩包、`.meta.js` 或 `previous-stable` 回滚包当作安装文件。
 
-本版修复 **DeepSeek 网页回答完整、侧栏却遗漏段落**：按顺序合并多个回答片段和批量更新，避免正文被误归入思考过程，并保留公式、表格和结尾段落。这不是刻意精简回答。修复位于网页脚本：已有插件的用户更新脚本至 **1.1.6** 并刷新 DeepSeek 网页即可生效；更新 XPI 后重启 Zotero。旧存档中已缺失的内容不会自动补回，请用新一轮问答验证。
+**Gemini 回答现在会边接收边排版。** 标题、列表和公式在正文到达 Zotero 时显示。浏览器稍后确认回答结束，侧栏随即开放追问。已有网页脚本 1.1.6 的用户只需更新 Zotero 插件。
 
 ### 以后如何获得更新
 
@@ -65,7 +65,7 @@ Zotero AI 侧边栏 → Zotero 本机端口 → Tampermonkey 脚本
 
 ### 1. 安装 Zotero 插件
 
-1. 下载上方的 `zotero-research-0.9.6.xpi`。
+1. 下载上方的 `zotero-research-0.9.7.xpi`。
 2. 打开 Zotero，进入“工具 → 插件”。
 3. 点击右上角齿轮，选择“从文件安装插件”。
 4. 选择下载的 XPI，按提示完成安装并重启 Zotero。
@@ -180,7 +180,7 @@ API 模式的「附带全文 PDF」当前仅支持 Anthropic 兼容协议，所�
 
 ### ChatGPT 已答完，侧栏仍显示原始 Markdown 并持续等待
 
-网页脚本 **1.1.6** 收到本轮完整网络回答和响应流结束标记后，正文稳定 1.5 秒即可完成回传并触发侧栏排版，无需等待页面重绘、旧工具栏或停止按钮更新。仅有消息级结束标记时仍等待传输关闭，防止回答断尾；没有有效网络正文时保留页面读取后备。请更新油猴中的原脚本、保存并刷新 ChatGPT 页面。
+网页脚本 **1.1.6** 收到本轮完整网络回答和响应流结束标记后，正文稳定 1.5 秒即可完成回传并开放追问，无需等待页面重绘、旧工具栏或停止按钮更新。仅有消息级结束标记时仍等待传输关闭，防止回答断尾；没有有效网络正文时保留页面读取后备。请更新油猴中的原脚本、保存并刷新 ChatGPT 页面。
 
 ### Gemini 问题留在输入框，没有自动发送
 
@@ -217,7 +217,7 @@ uv run python scripts/build_release_metadata.py --check
 
 更完整的操作细节见 [Zotero 10 使用指南](docs/USAGE_ZOTERO10.md)。
 
-本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.9.6.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
+本版改进、已执行的测试及尚需真实网页验收的项目见 [当前发布说明](docs/releases/v0.9.7.md)。安装文档中的版本和下载链接由 `tests/test_installation_docs.py` 检查，发布新版本时需同步更新。
 
 时间轴交互参考 [Reborn14/chatgpt-conversation-timeline](https://github.com/Reborn14/chatgpt-conversation-timeline)（MIT），本项目针对 Zotero 与六个平台独立实现了共享导航组件；没有照搬其三个站点的完整扩展或 React 内部状态读取逻辑。
 
