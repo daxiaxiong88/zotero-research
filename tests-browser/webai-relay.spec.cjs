@@ -24,6 +24,7 @@ for (const scenario of [
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'relay-timeout' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-candidate', fault: 'background' },
+  { provider: 'gemini', upload: 'paste', capture: 'dom-pulse', fault: 'background-no-worker' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background-retry' },
 ]) {
 test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${scenario.layout || 'standard'}/${scenario.fault || 'normal'}: image → one send → complete sidebar math`, async ({ context }) => {
@@ -82,12 +83,14 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
   await web.addInitScript(scenario => {
     const gemini = scenario.provider === 'gemini';
     const background = scenario.fault?.startsWith('background');
+    const domPulse = scenario.capture === 'dom-pulse';
     const nativeTimeout = window.setTimeout.bind(window);
     const nativeInterval = window.setInterval.bind(window);
     window.fixtureBackground = false;
     // Deterministic hidden-page fixture: paint and ordinary page callbacks
     // stall, but the real network and Worker remain alive. No focus switch.
     if (background) {
+      if (domPulse) window.Worker = class { constructor() { throw new Error('Worker unavailable'); } };
       Object.defineProperty(document, 'visibilityState', { get: () => window.fixtureBackground ? 'hidden' : 'visible' });
       Object.defineProperty(document, 'hidden', { get: () => window.fixtureBackground });
       window.setTimeout = (fn, ms, ...args) => nativeTimeout(() => {
@@ -226,6 +229,15 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
             request.onload = () => window.appendAnswer();
             nativeTimeout(() => request.send('fixture'), scenario.capture === 'xhr-dom' ? 600 : 0);
             if (background) window.fixtureBackground = true;
+          } else if (domPulse) {
+            window.fixtureBackground = true;
+            const body = document.querySelector('[data-message-id="answer-new"] p');
+            body.textContent = '正文'.repeat(979);
+            // Two or more Zotero wakeups during the pause must not finish it.
+            nativeTimeout(() => {
+              body.textContent += '最后六个字符';
+              window.appendAnswer();
+            }, 6500);
           } else {
             const url = scenario.capture === 'network-lag'
               ? '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'
@@ -235,7 +247,7 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
         }, 3000);
       });
       window.appendAnswer = () => {
-        if (background || scenario.fault === 'stale-ui') return; // Page and Stop may stay stale after network completion
+        if ((background && !domPulse) || scenario.fault === 'stale-ui') return;
         document.querySelector('[data-message-id="answer-new"]').insertAdjacentHTML('beforeend', '<div data-math-source="\\frac{a}{b}"><span class="katex-display"><span class="katex"><span class="katex-html">重复字形</span></span></span></div><p>完整回答的最后一句。</p>');
         if (scenario.capture !== 'xhr-dom' && scenario.actions !== 'none') document.querySelector('#new-turn').insertAdjacentHTML('beforeend', gemini
           ? '<button aria-label="Copy response"><mat-icon data-mat-icon-name="copy"></mat-icon></button>'
@@ -307,8 +319,16 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
   expect(result.answer.text).not.toMatch(/旧回答|重复字形/);
   if (scenario.fault?.startsWith('background')) {
     expect(await web.evaluate(() => document.visibilityState)).toBe('hidden');
-    await expect(web.locator('message-content[data-message-id="answer-new"]')).toHaveText('回答前半段');
-    await expect(web.locator('button[aria-label="Stop generating"]')).toHaveCount(1);
+    if (scenario.capture === 'dom-pulse') {
+      const task = await web.evaluate(() => __ZRA_TEST__.connector.lastTask);
+      expect(task.networkCaptures).toBe(0);
+      expect(task.completionSource).toBe('gemini-dom');
+      expect(task.domWakeups).toBeGreaterThan(0);
+      expect(result.answer.text).toContain('正文'.repeat(979) + '最后六个字符');
+    } else {
+      await expect(web.locator('message-content[data-message-id="answer-new"]')).toHaveText('回答前半段');
+      await expect(web.locator('button[aria-label="Stop generating"]')).toHaveCount(1);
+    }
   }
   expect(result.fractions).toBe(1);
   await expect(sidebar.locator('.zrp-message-error')).toHaveCount(0);

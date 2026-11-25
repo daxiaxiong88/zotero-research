@@ -1630,6 +1630,7 @@ function zraCreateAddon(data) {
           else if (action === 'connect') result = relayStore.connect(body);
           else if (action === 'disconnect') result = relayStore.disconnect(body);
           else if (action === 'update') result = relayStore.update(body);
+          else if (action === 'domWake') result = await relayStore.domWake(body);
           else result = { error: 'UNKNOWN_ACTION' };
         } catch (_) {
           result = { error: 'INTERNAL' };

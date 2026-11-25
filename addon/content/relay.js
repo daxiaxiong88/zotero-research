@@ -194,7 +194,7 @@
         connectedAt: now(),
       };
       notify({ type: 'session', connected: true, ai: session.ai, url: session.url });
-      return { status: 'connected', capabilities: ['task-heartbeat'] };
+      return { status: 'connected', capabilities: ['task-heartbeat', 'dom-wake'] };
     }
 
     function disconnect(payload) {
@@ -325,6 +325,21 @@
       return { ok: true };
     }
 
+    // The browser's extension request receives a callback even when hidden
+    // page timers are throttled. Share one bounded wait per claimed task.
+    async function domWake(payload) {
+      const error = sessionError(payload.sessionSecret);
+      if (error) return error;
+      const task = tasks.get(payload.id);
+      if (!task || task.claimedSession !== payload.sessionSecret) return { error: 'UNKNOWN_TASK' };
+      if (!task.domWakeWait) {
+        task.domWakeWait = new Promise(resolve => schedule(resolve, 2000))
+          .finally(() => { task.domWakeWait = null; });
+      }
+      await task.domWakeWait;
+      return update({ id: task.id, sessionSecret: payload.sessionSecret, heartbeat: true });
+    }
+
     function enqueueTask({ messages, meta }) {
       if (!Array.isArray(messages) || !messages.length) throw new Error('任务内容不能为空。');
       const mismatch = providerMismatch(meta);
@@ -429,7 +444,7 @@
     }
 
     return {
-      connect, disconnect, poll, update,
+      connect, disconnect, poll, update, domWake,
       enqueueTask, failTask, cancelTask, subscribe, state, prune, destroy,
       _tasks: tasks, _queue: queue, _pollWaiters: pollWaiters,
     };

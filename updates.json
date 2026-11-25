@@ -5,7 +5,7 @@
         {
           "version": "0.9.7",
           "update_link": "https://github.com/daxiaxiong88/zotero-research/releases/download/v0.9.7/zotero-research-0.9.7.xpi",
-          "update_hash": "sha256:59f5a0797d3f147bdd9b4ba704c14ff31d35bde72ffb04fbf0489c88f4707a18",
+          "update_hash": "sha256:a22f1210e4352ce34aed34bc590698a2d46b78ba9e95381262caa1ddaad2daab",
           "update_info_url": "https://github.com/daxiaxiong88/zotero-research/releases/tag/v0.9.7",
           "applications": {
             "zotero": {
@@ -18,7 +18,7 @@
     }
   },
   "userscript": {
-    "version": "1.1.7",
+    "version": "1.1.8",
     "release": "0.9.7"
   }
 }

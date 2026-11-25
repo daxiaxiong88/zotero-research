@@ -59,6 +59,8 @@ async function runSyntheticNativeChecks(paper, pdf) {
       'content/relay.js',
       'content/katex.min.js',
       'content/markdown.js',
+      'content/timeline.js',
+      'content/updates.js',
       'content/panel.js',
       'bootstrap.js',
     ]) {
@@ -265,6 +267,9 @@ async function runSyntheticNativeChecks(paper, pdf) {
     });
     const polled = await currentPoll;
     check(polled.task?.id === taskID, 'relay poll delivered queued task');
+    check(connected.capabilities.includes('dom-wake'), 'packaged endpoint advertises DOM wake');
+    const wake = await relayRequest({ action: 'domWake', sessionSecret, id: taskID });
+    check(wake.ok === true && wake.complete === false, 'packaged endpoint wakes a hidden reader without ending its task');
     const updated = await relayRequest({
       action: 'update', sessionSecret, id: taskID,
       text: 'synthetic relay response', isDone: true,

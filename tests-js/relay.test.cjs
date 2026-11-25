@@ -82,6 +82,34 @@ test('poll claims queued task; waiting poll resolves on enqueue', async () => {
   assert.deepEqual(await store.poll({ sessionSecret: SECRET }, 0), {});
 });
 
+test('DOM wake shares one wait per claimed task and returns its current status', async () => {
+  const waits = [];
+  const { store } = makeStore({ setTimeout(fn, ms) {
+    if (ms === 2000) waits.push(fn);
+    return 1;
+  } });
+  connect(store);
+  const id = store.enqueueTask({ messages: [{ text: 'q' }] });
+  const payload = { sessionSecret: SECRET, id };
+  assert.deepEqual(await store.domWake({ ...payload, sessionSecret: 'wrong' }), { error: 'SESSION_EXPIRED' });
+  assert.deepEqual(await store.domWake(payload), { error: 'UNKNOWN_TASK' });
+  assert.deepEqual(await store.domWake({ ...payload, id: 'unknown' }), { error: 'UNKNOWN_TASK' });
+  assert.equal(waits.length, 0);
+  await store.poll({ sessionSecret: SECRET }, 0);
+  const first = store.domWake(payload);
+  const duplicate = store.domWake(payload);
+  assert.equal(waits.length, 1);
+  waits.shift()();
+  for (const reply of await Promise.all([first, duplicate])) {
+    assert.deepEqual(reply, { ok: true, complete: false });
+  }
+  const last = store.domWake(payload);
+  store.cancelTask(id);
+  waits.shift()();
+  assert.deepEqual(await last, { ok: true, complete: true });
+  store.destroy();
+});
+
 test('waiting poll resolves when a task is enqueued later', async () => {
   const { store } = makeStore();
   connect(store);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.1.7
+// @version      1.1.8
 // @updateURL    https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.meta.js
 // @downloadURL  https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.user.js
 // @supportURL   https://github.com/daxiaxiong88/zotero-research/issues
@@ -1464,7 +1464,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-gemini-completion-1',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-gemini-dom-wake-1',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -1484,6 +1484,7 @@
             visibility: document.visibilityState, taskId: this.currentTaskId });
           this.lifecycle.events = this.lifecycle.events.slice(-12);
           this.recordDiagnostic(event);
+          if (event === 'visibilitychange' && this.domWatchInterval) { this.startDomWake(); }
           // Resume the current task, never its prompt/upload. Timers and DOM
           // observers can be delayed independently after background suspension.
           if ((event === 'resume' || document.visibilityState === 'visible')
@@ -1694,6 +1695,8 @@
         if (res.status === 'connected') {
           this.isConnected = true;
           this.supportsHeartbeat = res.capabilities?.includes('task-heartbeat') === true;
+          this.supportsDomWake = res.capabilities?.includes('dom-wake') === true;
+          if (this.domWatchInterval) { this.startDomWake(); }
           this.startHeartbeatLoop();
           if (!silent) { notify('Zotero：联动成功'); }
           setStatus('已连接，等待 Zotero 消息');
@@ -2677,6 +2680,7 @@
           sendingUpdate: this.isSendingUpdate, pendingData: this.hasPendingData,
           awaitingManualSend: this.awaitingManualSend, domWatching: Boolean(this.domWatchInterval),
           workerTimerAvailable: Boolean(timerWorker),
+          domWakeSupported: Boolean(this.supportsDomWake),
         },
         visibility: document.visibilityState, heartbeatSupported: Boolean(this.supportsHeartbeat),
         lastHeartbeatSecondsAgo: this.lastHeartbeatAt ? Math.round((Date.now() - this.lastHeartbeatAt) / 1000) : null,
@@ -3215,6 +3219,38 @@
     }
 
     // --- DOM fallback watcher (dom-mode sites, or manual send recovery) ---
+    async startDomWake() {
+      const id = this.currentTaskId;
+      const eligible = () => this.config.name === 'Gemini' && this.supportsDomWake
+        && this.currentTaskId === id && this.isRunning && this.isConnected && !this.doneSignal
+        && this.domWatchInterval && document.hidden;
+      if (!id || this.domWakeRequest || !eligible()) { return; }
+      while (eligible()) {
+        const request = gmRequest({ action: 'domWake', sessionSecret: this.sessionSecret, id }, 8000);
+        this.domWakeRequest = request;
+        try {
+          const reply = await request.promise;
+          if (this.domWakeRequest !== request || !eligible()) { return; }
+          if (!reply.ok || (reply.complete && !reply.recoverable)) { return; }
+          if (this.lastTask) { this.lastTask.domWakeups = (this.lastTask.domWakeups || 0) + 1; }
+          if (this.taskStartedAt && Date.now() - this.taskStartedAt > TASK_WAIT_LIMIT_MS) {
+            await this.sendHeartbeat();
+            return;
+          }
+          this.sampleGeminiAnswer();
+        } catch (error) {
+          if (this.domWakeRequest === request && this.lastTask) {
+            this.lastTask.domWakeError = String(error?.message || error).slice(0, 150);
+            this.domWakeRetryAt = Date.now() + 5000;
+          }
+          // A later mutation, reconnect, or visibility change can resume the wait.
+          return;
+        } finally {
+          if (this.domWakeRequest === request) { this.domWakeRequest = null; }
+        }
+      }
+    }
+
     startDomWatcher() {
       if (this.domWatchInterval) { return; }
       if (this.config.name === 'ChatGPT' && !this.chatGPTBaseline) { this.captureChatGPTTurn(); }
@@ -3267,9 +3303,14 @@
         const nowMs = Date.now();
         if (nowMs - lastRun < 150) { return; }
         lastRun = nowMs;
+        if (this.domWakeRetryAt && nowMs >= this.domWakeRetryAt) {
+          this.domWakeRetryAt = 0;
+          this.startDomWake();
+        }
         void tick();
       };
       this.domWatchInterval = setInterval(paced, 200);
+      this.startDomWake();
       if (typeof MutationObserver === 'function' && document.documentElement) {
         try {
           this.domWatchObserver = new MutationObserver(paced);
@@ -3281,6 +3322,9 @@
     }
 
     stopDomWatcher() {
+      this.domWakeRequest?.abort();
+      this.domWakeRequest = null;
+      this.domWakeRetryAt = 0;
       if (this.domWatchInterval) { clearInterval(this.domWatchInterval); this.domWatchInterval = null; }
       if (this.domWatchObserver) {
         try { this.domWatchObserver.disconnect(); } catch (_) { }
