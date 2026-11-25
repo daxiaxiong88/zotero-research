@@ -2259,3 +2259,213 @@ test('prompt verification also reads DOM text when CJK innerText collapses line 
   editor.textContent = '不相关的旧问题';
   assert.equal(api.connector.inputAccepts(api.connector.config.input.text, '第一段。\n第二段。'), false);
 });
+
+test('Gemini completes LR26 thoughts+extensions DOM despite dormant stop icons, nested busy state, and missed streaming phase', (t) => {
+  const api = setup('https://gemini.google.com/app', '<!doctype html><body><main></main>'
+    + '<div class="input-area children-ready">'
+    + '<rich-textarea><div class="ql-editor textarea new-input-ui ql-blank" contenteditable="true"></div></rich-textarea>'
+    + '<gem-icon-button class="send-button" style="opacity: 0"><button aria-label="停止回答"><mat-icon class="stop-icon">stop</mat-icon></button></gem-icon-button>'
+    + '<speech-dictation-mic-button><button aria-label="使用麦克风"><mat-icon style="display: none">stop</mat-icon><mat-icon fonticon="mic">mic</mat-icon></button></speech-dictation-mic-button>'
+    + '</div></body>');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true; c.currentTaskId = 'gemini-lr26-complete'; c.isSendingUpdate = true;
+  c.captureGeminiTurn();
+  api.window.document.querySelector('main').insertAdjacentHTML('beforeend',
+    '<div class="conversation-container">'
+    + '<user-query><user-query-content>模型是否引入了物理残差项？</user-query-content></user-query>'
+    + '<model-response class="enable-lr26-response-chrome-updates ng-star-inserted">'
+    + '<structured-content-container class="model-response-text contains-extensions-response has-thoughts processing-state-visible">'
+    + '<model-thoughts><div aria-busy="true">内部思考过程不应混入正文或阻断结束</div></model-thoughts>'
+    + '<processing-state aria-busy="true">正在检索附件</processing-state>'
+    + '<message-content id="message-content-id-r_seismic"><p>需要区分的是，该模型<strong>并没有</strong>引入波动方程物理残差项，用来验证重建波场是否真正遵循波传播物理规律。'
+    + '<source-footnote>Learning Seismic Wavefiel...</source-footnote></p></message-content>'
+    + '<message-actions><thumb-up-button><button aria-label="回答不错"><mat-icon fonticon="thumb_up">thumb_up</mat-icon></button></thumb-up-button>'
+    + '<copy-button><button mattooltip="复制"><mat-icon fonticon="content_copy">content_copy</mat-icon></button></copy-button></message-actions>'
+    + '</structured-content-container></model-response></div>');
+  c.sampleGeminiAnswer();
+  assert.equal(c.doneSignal, false);
+  assert.equal(c.lastTask?.dom?.streaming ?? false, false);
+  c.geminiStableSince = Date.now() - 2000;
+  c.sampleGeminiAnswer();
+  assert.equal(c.doneSignal, true, 'completed LR26 turn with mic button and message-actions must finish');
+  assert.match(c.accumulatedText, /\*\*并没有\*\*.*遵循波传播物理规律。/);
+  assert.doesNotMatch(c.accumulatedText, /内部思考过程|Learning Seismic Wavefiel|content_copy|thumb_up/);
+});
+
+test('parseGemini preserves candidateDone across trailing citation enrichment frames for the same answerId', (t) => {
+  const api = setup('https://gemini.google.com/app');
+  t.after(() => api.window.close());
+  const frame1 = []; frame1[0] = 'r_seismic'; frame1[1] = ['重建波场遵循波传播物理规律。']; frame1[8] = [2];
+  const inner1 = []; inner1[4] = [frame1];
+  const frame2 = []; frame2[0] = 'r_seismic'; frame2[1] = ['重建波场遵循波传播物理规律。[cite: 1]'];
+  const inner2 = []; inner2[4] = [frame2];
+  const raw = JSON.stringify([['wrb.fr', null, JSON.stringify(inner1)]]) + '\n'
+    + JSON.stringify([['wrb.fr', null, JSON.stringify(inner2)]]);
+  const parsed = api.parseGemini(raw);
+  assert.equal(parsed.text, '重建波场遵循波传播物理规律。');
+  assert.equal(parsed.candidateDone, true, 'citation metadata frame without status must not clear candidateDone');
+  frame2[1] = ['更新后的第一段，还在生成。'];
+  const revised = raw.split('\n')[0] + '\n' + JSON.stringify([['wrb.fr', null, JSON.stringify(inner2)]]);
+  assert.equal(api.parseGemini(revised).candidateDone, false);
+});
+
+test('Gemini only finishes the complete visible body of the current response', (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><main></main><form><rich-textarea><div class="textarea"></div></rich-textarea><button aria-label="麦克风"></button></form></body>');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = c.isSendingUpdate = true;
+  c.currentTaskId = 'split-answer';
+  c.captureGeminiTurn();
+  const main = api.window.document.querySelector('main');
+  main.innerHTML = '<user-query>问题</user-query><model-response><div class="model-response-text"><processing-state aria-busy="true">检索中</processing-state></div></model-response>';
+  const model = main.querySelector('model-response');
+  const sampleStable = () => {
+    c.sampleGeminiAnswer();
+    c.geminiStableSince = Date.now() - 3000;
+    c.sampleGeminiAnswer();
+  };
+  sampleStable();
+  assert.equal(c.accumulatedText, '');
+  model.insertAdjacentHTML('beforeend', '<message-content>首段</message-content>');
+  sampleStable();
+  assert.equal(c.doneSignal, false, 'idle microphone alone is ambiguous');
+  model.setAttribute('aria-busy', 'true');
+  model.insertAdjacentHTML('beforeend', '<message-actions><button aria-label="复制"></button></message-actions>');
+  sampleStable();
+  assert.equal(c.doneSignal, false, 'visible actions cannot override an explicitly busy answer');
+  model.removeAttribute('aria-busy');
+  model.insertAdjacentHTML('beforeend', '<message-content>尾段</message-content>');
+  sampleStable();
+  assert.equal(c.accumulatedText, '首段\n\n尾段');
+  assert.equal(c.doneSignal, true);
+});
+
+test('Gemini identifies visible stop glyphs and ignores hidden descendants', (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><button><span><mat-icon>stop</mat-icon></span></button></body>');
+  t.after(() => api.window.close());
+  assert.equal(api.connector.hasStreamingControl(), true);
+  api.window.document.querySelector('mat-icon').setAttribute('fonticon', 'stop');
+  api.window.document.querySelector('span').hidden = true;
+  assert.equal(api.connector.hasStreamingControl(), false);
+});
+
+test('Gemini surfaces the error and retry control on a failed answer', (t) => {
+  const api = setup();
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true;
+  c.currentTaskId = 'error-turn';
+  c.captureGeminiTurn();
+  let failure;
+  c.reportFailure = message => { failure = message; };
+  api.window.document.body.innerHTML = '<user-query>问题</user-query><model-response><message-content><div role="alert">生成失败</div></message-content><button aria-label="再试一次">重试</button></model-response>';
+  c.sampleGeminiAnswer();
+  assert.equal(failure, '生成失败');
+  assert.equal(c.accumulatedText, '');
+});
+
+test('ChatGPT settles the terminal network answer on waking before reading a stale DOM', (t) => {
+  const api = setup('https://chatgpt.com/');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.currentTaskId = 'wake-network';
+  c.isRunning = c.isSendingUpdate = true;
+  c.captureChatGPTTurn();
+  api.window.document.body.innerHTML = '<div data-message-author-role="user">问题</div><div data-message-author-role="assistant">首段</div>';
+  c.chatGPTTransportDone = c.chatGPTStreamDone = true;
+  c.chatGPTNetworkText = '首段与网络完整尾段。';
+  c.scheduleChatGPTCompletion();
+  c.sampleChatGPTAnswer();
+  assert.equal(c.doneSignal, false);
+  c.chatGPTCompletionDue = Date.now() - 1;
+  c.sampleChatGPTAnswer();
+  assert.equal(c.doneSignal, true);
+  assert.equal(c.accumulatedText, c.chatGPTNetworkText);
+});
+
+test('Gemini without Worker wakes via Zotero even when visible/occluded and finishes stalled network or DOM turns', async (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><main></main><div class="input-area">'
+    + '<rich-textarea><div class="textarea" contenteditable="true"></div></rich-textarea>'
+    + '<speech-dictation-mic-button><button aria-label="语音输入"><mat-icon fonticon="mic">mic</mat-icon></button></speech-dictation-mic-button>'
+    + '</div></body>', window => {
+    window.Worker = class { constructor() { throw new Error('CSP blocked worker'); } };
+    // Simulate stalled page timers in an occluded window where document.hidden is still false.
+    window.setTimeout = () => 1;
+    window.clearTimeout = () => {};
+  });
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = true; c.isConnected = true; c.supportsDomWake = true;
+  c.currentTaskId = 'occluded-no-worker'; c.lastTask = { id: 'occluded-no-worker' };
+  const updates = [];
+  let wakeCalls = 0;
+  let realClock = Date.now();
+  api.window.Date.now = () => realClock;
+  api.window.GM_xmlhttpRequest = options => {
+    const payload = JSON.parse(options.data);
+    if (payload.action === 'domWake') {
+      wakeCalls++;
+      realClock += 2100;
+      queueMicrotask(() => options.onload({ status: 200, responseText: JSON.stringify({ ok: true, complete: false }) }));
+    } else if (payload.action === 'update') {
+      updates.push(payload);
+      queueMicrotask(() => options.onload({ status: 200, responseText: JSON.stringify({ ok: true }) }));
+    }
+    return { abort() {} };
+  };
+  c.proxy.handleCapture(geminiWire('网络最终正文。', false, 2), c.currentTaskId);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(wakeCalls >= 2, 'Zotero wake loop must advance completion without Worker or page setTimeout');
+  assert.equal(updates.some(u => u.isDone && u.text === '网络最终正文。'), true);
+});
+
+test('DOM watcher trailing deadline captures final characters arriving within 150ms throttle window', async (t) => {
+  const api = setup('https://gemini.google.com/app', '<body><main></main></body>');
+  t.after(() => api.window.close());
+  api.window.setInterval = () => 1;
+  api.window.clearInterval = () => {};
+  const c = api.connector;
+  c.isRunning = true; c.currentTaskId = 'trailing-tail'; c.isSendingUpdate = true;
+  c.startDomWatcher();
+  t.after(() => c.stopDomWatcher());
+  api.window.document.querySelector('main').innerHTML = '<user-query>问题</user-query>'
+    + '<model-response><message-content id="m"><p>' + '甲'.repeat(1958) + '</p></message-content></model-response>';
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(c.accumulatedText.length, 1958);
+  // Final 6 chars arrive 20ms later (< 150ms) and no further mutations ever happen.
+  api.window.document.querySelector('#m p').textContent = '甲'.repeat(1958) + '最后六个字符';
+  await new Promise(resolve => setTimeout(resolve, 220));
+  assert.equal(c.accumulatedText.length, 1964, 'trailing mutation within 150ms must not be dropped');
+});
+
+test('a cancelled Zotero task releases the browser slot on its next wake', async (t) => {
+  const api = setup('https://gemini.google.com/app');
+  t.after(() => api.window.close());
+  const c = api.connector;
+  c.isRunning = c.isConnected = c.supportsDomWake = c.isSendingUpdate = true;
+  c.domWatchInterval = 1;
+  c.currentTaskId = 'cancelled-turn';
+  let polled = false;
+  c.startPolling = () => { polled = !c.currentTaskId && !c.isSendingUpdate; };
+  api.window.GM_xmlhttpRequest = options => {
+    queueMicrotask(() => reply(options, { ok: true, complete: true }));
+    return { abort() {} };
+  };
+  await c.startDomWake();
+  assert.equal(polled, true);
+  assert.equal(c.domWatchInterval, null);
+});
+
+test('blocked timer worker policy leaves the page default policy alone', (t) => {
+  const names = [];
+  const api = setup('https://gemini.google.com/app', '<body></body>', window => {
+    window.URL.createObjectURL = () => 'blob:timer';
+    window.Worker = class { constructor() { throw new TypeError('TrustedScriptURL required'); } };
+    window.trustedTypes = { createPolicy(name) { names.push(name); throw new TypeError('policy denied'); } };
+  });
+  t.after(() => api.window.close());
+  assert.deepEqual(names, ['zotero-research-timer']);
+  assert.equal(api.connector.diagnosticReport().transport.workerTimerAvailable, false);
+});

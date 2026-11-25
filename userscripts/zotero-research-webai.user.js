@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.1.8
+// @version      1.1.9
 // @updateURL    https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.meta.js
 // @downloadURL  https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.user.js
 // @supportURL   https://github.com/daxiaxiong88/zotero-research/issues
@@ -671,9 +671,14 @@
         const result = parseJson(record[2])?.[4]?.[0];
         const nextResponse = result?.[1]?.[0];
         if (typeof nextResponse === 'string' && nextResponse) {
+          const status = result[8]?.[0];
+          if (status != null) { candidateDone = status === 2; }
+          else if (candidateDone) {
+            candidateDone = result[0] === answerId && (nextResponse === response
+              || Boolean(answerId && geminiBody(nextResponse) === geminiBody(response)));
+          }
           response = nextResponse;
           answerId = result[0];
-          candidateDone = result[8]?.[0] === 2;
         } else if (answerId && result?.[0] === answerId && result[8]?.[0] != null) {
           candidateDone = result[8][0] === 2;
         }
@@ -681,12 +686,16 @@
       }
     }
     return {
-      text: withThinking(response.replace(/\[cite.+?\]/g, ''), think),
+      text: withThinking(geminiBody(response), think),
       hasAnswer: Boolean(response.trim()),
       candidateDone,
       done,
       waitingForResponse: !done,
     };
+  }
+
+  function geminiBody(text) {
+    return text.replace(/\[cite.+?\]/g, '').trim();
   }
 
   function parseDeepSeek(raw) {
@@ -878,7 +887,7 @@
         if (source?.trim()) { return display ? '\n$$' + source.trim() + '$$\n' : '$' + source.trim() + '$'; }
         return (node.querySelector('.katex-html') || node).textContent || '';
       }
-      if (node.matches('button, script, style, svg, annotation, [aria-hidden="true"], [data-testid*="reasoning"], [data-testid*="thinking"]')) { return ''; }
+      if (node.matches('button, script, style, svg, annotation, mat-icon, model-thoughts, .thoughts-container, processing-state, .processing-state, message-actions, source-footnote, sources-carousel, sources-carousel-inline, [aria-hidden="true"], [data-testid*="reasoning"], [data-testid*="thinking"]')) { return ''; }
       const content = () => Array.from(node.childNodes, walk).join('');
       if (tag === 'pre') {
         const code = node.querySelector('code') || node;
@@ -927,7 +936,7 @@
     Gemini: {
       hosts: ['gemini.google.com'],
       input: { text: { selector: 'rich-textarea .textarea', method: 'gemini' }, send: '.send-button', message: 'user-query-content .user-query-container' },
-      output: { type: 'network', regex: /BardFrontendService\/StreamGenerate/, parser: parseGemini },
+      output: { type: 'network', regex: /\/StreamGenerate(?:\b|\?|$)/, parser: parseGemini },
     },
     DeepSeek: {
       hosts: ['chat.deepseek.com'],
@@ -1464,7 +1473,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-gemini-dom-wake-1',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-gemini-completion-2',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -1484,14 +1493,22 @@
             visibility: document.visibilityState, taskId: this.currentTaskId });
           this.lifecycle.events = this.lifecycle.events.slice(-12);
           this.recordDiagnostic(event);
-          if (event === 'visibilitychange' && this.domWatchInterval) { this.startDomWake(); }
+          if (event === 'visibilitychange' && (this.domWatchInterval || this.cancelGeminiCompletion || this.cancelChatGPTCompletion)) {
+            this.startDomWake();
+          }
           // Resume the current task, never its prompt/upload. Timers and DOM
           // observers can be delayed independently after background suspension.
           if ((event === 'resume' || document.visibilityState === 'visible')
             && this.isRunning && this.currentTaskId) {
             try {
-              if (this.config.name === 'Gemini') { this.sampleGeminiAnswer(); }
-              else if (this.config.name === 'ChatGPT') { this.sampleChatGPTAnswer(); }
+              if (this.config.name === 'Gemini') {
+                this.checkGeminiCompletion();
+                this.scheduleGeminiCompletion();
+                this.sampleGeminiAnswer();
+              } else if (this.config.name === 'ChatGPT') {
+                this.scheduleChatGPTCompletion();
+                this.sampleChatGPTAnswer();
+              }
               this.flushData();
             } catch (error) {
               if (this.lastTask) { this.lastTask.resumeError = String(error?.message || error).slice(0, 300); }
@@ -1696,7 +1713,7 @@
           this.isConnected = true;
           this.supportsHeartbeat = res.capabilities?.includes('task-heartbeat') === true;
           this.supportsDomWake = res.capabilities?.includes('dom-wake') === true;
-          if (this.domWatchInterval) { this.startDomWake(); }
+          if (this.domWatchInterval || this.cancelGeminiCompletion || this.cancelChatGPTCompletion) { this.startDomWake(); }
           this.startHeartbeatLoop();
           if (!silent) { notify('Zotero：联动成功'); }
           setStatus('已连接，等待 Zotero 消息');
@@ -1727,6 +1744,7 @@
       this.heartbeatToken = null;
       this.killPoll();
       this.resetTaskState('disconnected');
+      this.isSendingUpdate = false;
       if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
       this.releaseLock();
       setStatus('未连接');
@@ -1825,7 +1843,9 @@
       this.geminiTransportDone = false;
       this.geminiCandidateDone = false;
       this.geminiCompletionText = '';
+      this.geminiCompletionSince = null;
       this.geminiNetworkText = '';
+      this.geminiSawStop = false;
       this.stopDomWatcher();
       this.recordDiagnostic('reset-' + reason);
     }
@@ -2005,6 +2025,15 @@
           if (this.accumulatedText) { this.hasPendingData = true; this.flushData(); }
         } else if (response.complete) {
           this.resetTaskState('relay-completed'); this.isSendingUpdate = false; this.startPolling();
+        } else if (this.domWatchInterval || this.cancelGeminiCompletion || this.cancelChatGPTCompletion) {
+          this.startDomWake();
+          if (this.config.name === 'Gemini') {
+            this.checkGeminiCompletion();
+            this.sampleGeminiAnswer();
+          } else if (this.config.name === 'ChatGPT') {
+            this.sampleChatGPTAnswer();
+          }
+          this.flushData();
         }
       } catch (error) {
         this.lastHeartbeatError = String(error?.message || error).slice(0, 300);
@@ -2844,22 +2873,48 @@
     controlIsVisible(control) {
       for (let node = control; node?.nodeType === 1; node = node.parentElement) {
         const style = window.getComputedStyle(node);
-        if (node.hidden || node.getAttribute('aria-hidden') === 'true'
-          || style.display === 'none' || style.visibility === 'hidden') { return false; }
+        if (node.hidden || node.hasAttribute('inert') || node.getAttribute('aria-hidden') === 'true'
+          || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
+          || style.opacity === '0') { return false; }
       }
       return Boolean(control?.isConnected);
+    }
+
+    visibleControlText(root) {
+      const walk = (node) => {
+        if (node.nodeType === 3) { return node.textContent || ''; }
+        if (node.nodeType !== 1) { return ''; }
+        const style = window.getComputedStyle(node);
+        if (node.hidden || node.hasAttribute('inert') || node.getAttribute('aria-hidden') === 'true'
+          || style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
+          || style.opacity === '0' || node.localName === 'mat-icon') { return ''; }
+        return Array.from(node.childNodes, walk).join('');
+      };
+      return walk(root).trim();
+    }
+
+    isStreamingStopControl(control) {
+      if (!control) { return false; }
+      const inner = control.localName !== 'button' ? control.querySelector?.('button') : null;
+      if (control.matches?.('[data-testid="stop-button"]') || inner?.matches?.('[data-testid="stop-button"]')) { return true; }
+      const stopPattern = /\bstop(?:ping| generating| streaming| response)?\b|cancel(?:ling)? (?:response|generation)|停止(?:生成|回答|响应)?|终止(?:生成|回答|响应)?/i;
+      const attrs = (node) => node ? [
+        node.getAttribute('aria-label'), node.getAttribute('title'),
+        node.getAttribute('mattooltip'), node.getAttribute('data-mat-tooltip'),
+      ].filter(Boolean) : [];
+      const explicitLabel = [...attrs(control), ...attrs(inner)].join(' ').trim();
+      if (explicitLabel) { return stopPattern.test(explicitLabel); }
+      const visibleText = this.visibleControlText(control);
+      if (visibleText && visibleText.length <= 40 && stopPattern.test(visibleText)) { return true; }
+      return Array.from(control.querySelectorAll?.('mat-icon, .stop-icon') || [])
+        .some(icon => (icon.matches('.stop-icon, [fonticon="stop"], [data-mat-icon-name="stop"]')
+          || icon.textContent.trim() === 'stop') && this.controlIsVisible(icon));
     }
 
     hasStreamingControl(root = document) {
       let controls = [];
       try { controls = [...root.querySelectorAll('button, [role="button"]')]; } catch { }
-      return controls.some((control) => {
-        if (!this.controlIsVisible(control)) { return false; }
-        const label = [control.getAttribute('aria-label'), control.getAttribute('title'), control.textContent]
-          .filter(Boolean).join(' ');
-        return control.matches('[data-testid="stop-button"]')
-          || /stop(?:ping)?|cancel (?:response|generation)|停止(?:生成|回答|响应)?|终止(?:生成|回答|响应)?/i.test(label);
-      });
+      return controls.some((control) => this.controlIsVisible(control) && this.isStreamingStopControl(control));
     }
 
     /**
@@ -2869,10 +2924,7 @@
      * and while a click is being processed.
      */
     sendButtonAccepted(button) {
-      if (!button) { return false; }
-      const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
-        .filter(Boolean).join(' ');
-      return /stop(?:ping| generating| streaming)?|cancel(?: generation| response)?|停止(?:生成|回答|响应)?|终止(?:生成|回答|响应)?/i.test(label);
+      return this.isStreamingStopControl(button);
     }
 
     observedManualSend(baseline) {
@@ -2917,6 +2969,7 @@
         const composerStreaming = this.hasStreamingControl(this.composerWatchScope());
         const transitioned = clicked && !buttonWasStreaming && this.controlIsVisible(button)
           && this.sendButtonAccepted(button);
+        if (gemini && (composerStreaming || transitioned)) { this.geminiSawStop = true; }
         Object.assign(sendDiagnostic, { editorAfterChars: this.readText(document.querySelector(inputConfig.selector)).length,
           newUserTurn: advanced, responseRequestStarted: requestStarted, composerStreaming });
         const reason = gemini
@@ -3037,19 +3090,30 @@
         this.cancelChatGPTCompletion?.(); this.cancelChatGPTCompletion = null;
         return;
       }
-      if (this.cancelChatGPTCompletion && this.chatGPTCompletionText === text) { return; }
-      this.cancelChatGPTCompletion?.();
-      this.chatGPTCompletionText = text;
-      this.cancelChatGPTCompletion = scheduleDeadline(() => {
+      const finish = () => {
+        this.cancelChatGPTCompletion?.();
         this.cancelChatGPTCompletion = null;
         if (!eligible() || text !== this.chatGPTNetworkText) { return; }
         if (this.lastTask) { this.lastTask.completionSource = 'network-terminal'; }
         this.onNewData(text, true, 'network');
         this.stopDomWatcher();
-      }, 1500);
+      };
+      if (this.cancelChatGPTCompletion && this.chatGPTCompletionText === text) {
+        if (Date.now() >= this.chatGPTCompletionDue) { finish(); }
+        return;
+      }
+      this.cancelChatGPTCompletion?.();
+      this.chatGPTCompletionText = text;
+      this.chatGPTCompletionDue = Date.now() + 1500;
+      this.cancelChatGPTCompletion = scheduleDeadline(finish, 1500);
+      this.startDomWake();
     }
 
     sampleChatGPTAnswer() {
+      if (this.cancelChatGPTCompletion) {
+        this.scheduleChatGPTCompletion();
+        if (this.doneSignal || this.cancelChatGPTCompletion) { return; }
+      }
       const baseline = this.chatGPTBaseline;
       if (!baseline || !this.currentTaskId || this.doneSignal) { return; }
       const reading = { boundUser: false, boundAnswers: 0,
@@ -3129,33 +3193,59 @@
       this.geminiSawStop = false;
     }
 
+    geminiNetworkCompletionEligible(id = this.currentTaskId, epoch = this.captureEpoch, text = this.geminiNetworkText) {
+      return Boolean(id && this.isRunning && this.currentTaskId === id && !this.doneSignal
+        && this.captureEpoch === epoch && text && text === this.geminiNetworkText
+        && (this.geminiCandidateDone || (this.geminiTransportDone
+          && !this.proxy?.activeStreams.get(id) && !this.proxy?.activeRequests.get(id))));
+    }
+
+    checkGeminiCompletion() {
+      if (!this.geminiNetworkCompletionEligible() || this.geminiCompletionSince === null) { return false; }
+      if (Date.now() - this.geminiCompletionSince < NETWORK_IDLE_COMPLETE_MS) { return false; }
+      const text = this.geminiNetworkText;
+      this.cancelGeminiCompletion?.();
+      this.cancelGeminiCompletion = null;
+      this.geminiCompletionSince = null;
+      if (this.lastTask) {
+        this.lastTask.completionSource = this.geminiCandidateDone ? 'gemini-final-candidate' : 'network-terminal';
+      }
+      this.onNewData(text, true, 'network');
+      this.stopDomWatcher();
+      return true;
+    }
+
     scheduleGeminiCompletion() {
       const id = this.currentTaskId;
       const epoch = this.captureEpoch;
       const text = this.geminiNetworkText;
-      const eligible = () => this.isRunning && this.currentTaskId === id && !this.doneSignal
-        && this.captureEpoch === epoch && text && text === this.geminiNetworkText
-        && (this.geminiCandidateDone || (this.geminiTransportDone
-          && !this.proxy?.activeStreams.get(id) && !this.proxy?.activeRequests.get(id)));
-      if (!id || !eligible()) {
+      if (!this.geminiNetworkCompletionEligible(id, epoch, text)) {
         this.cancelGeminiCompletion?.();
         this.cancelGeminiCompletion = null;
+        this.geminiCompletionSince = null;
+        this.geminiCompletionText = '';
         return;
       }
       if (this.cancelGeminiCompletion && this.geminiCompletionText === text) { return; }
       this.cancelGeminiCompletion?.();
       this.geminiCompletionText = text;
+      this.geminiCompletionSince = Date.now();
       this.cancelGeminiCompletion = scheduleDeadline(() => {
         this.cancelGeminiCompletion = null;
-        if (!eligible()) { return; }
-        if (this.lastTask) { this.lastTask.completionSource = this.geminiCandidateDone ? 'gemini-final-candidate' : 'network-terminal'; }
+        if (!this.geminiNetworkCompletionEligible(id, epoch, text)) { return; }
+        this.geminiCompletionSince = null;
+        if (this.lastTask) {
+          this.lastTask.completionSource = this.geminiCandidateDone ? 'gemini-final-candidate' : 'network-terminal';
+        }
         this.onNewData(text, true, 'network');
         this.stopDomWatcher();
       }, NETWORK_IDLE_COMPLETE_MS);
+      this.startDomWake();
     }
 
     sampleGeminiAnswer() {
       if (!this.geminiBaseline || !this.currentTaskId || this.doneSignal) { return; }
+      if (this.checkGeminiCompletion()) { return; }
       const follows = (node, before) => Boolean(before.compareDocumentPosition(node) & 4);
       const users = this.geminiUserNodes();
       const reading = {
@@ -3166,64 +3256,158 @@
       if (!this.geminiUser?.isConnected) {
         this.geminiUser = users.find(node => !this.geminiBaseline.users.has(node));
       }
-      if (!this.geminiUser) { return; }
+      if (!this.geminiUser) { reading.waitingFor = 'new-user-boundary'; return; }
       reading.boundUser = true;
       const nextUser = users.find(node => node !== this.geminiUser && follows(node, this.geminiUser));
       const answers = Array.from(document.querySelectorAll('model-response')).filter(node =>
         !this.geminiBaseline.answers.has(node) && follows(node, this.geminiUser)
         && (!nextUser || follows(nextUser, node)));
-      const bodies = answers.map(node => node.querySelector('message-content, .model-response-text')).filter(Boolean);
+      const bodies = answers.flatMap(node => {
+        const messages = Array.from(node.querySelectorAll('message-content'))
+          .filter(body => !body.parentElement?.closest('message-content, model-thoughts, .thoughts-container, processing-state, .processing-state'));
+        return messages.length ? messages : Array.from(node.querySelectorAll('.model-response-text'))
+          .filter(body => !body.parentElement?.closest('.model-response-text'));
+      });
+      const messageBodies = bodies.filter(body => body.matches('message-content'));
       reading.boundModels = answers.length; reading.bodies = bodies.length;
       // Reuse the math-aware DOM→Markdown serializer, not the old user-message
       // selector. A missing network hook must not echo the prompt as an answer.
       const text = bodies.map(chatGPTAnswerMarkdown).filter(Boolean).join('\n\n');
       reading.textLength = text.length;
-      if (!text) { return; }
+      const lastAnswer = answers.at(-1);
+      const turnRoot = lastAnswer?.closest('response-container, .conversation-container, .response-container') || lastAnswer;
+      const controlScope = turnRoot && (!nextUser || !turnRoot.contains(nextUser))
+        && !Array.from(this.geminiBaseline.answers).some(old => turnRoot.contains(old))
+        ? turnRoot : lastAnswer;
+      const alert = lastAnswer?.querySelector('[role="alert"]');
+      const retry = controlScope?.querySelector('button[aria-label="再试一次"], button[aria-label="Try again" i], button[aria-label="Retry" i]');
+      if (alert && retry && this.controlIsVisible(alert) && this.controlIsVisible(retry)
+        && !retry.closest('user-query, user-query-content, model-thoughts, pre, code')
+        && !alert.closest('model-thoughts, processing-state, pre, code')) {
+        this.doneSignal = true;
+        this.stopDomWatcher();
+        void this.reportFailure((alert.textContent.trim() || 'Gemini 生成失败，请重试。').slice(0, 300));
+        return;
+      }
+      if (!text) { reading.waitingFor = 'answer-text'; return; }
       if (text !== this.geminiStableText) {
         this.geminiStableText = text;
         this.geminiStableSince = Date.now();
         this.onNewData(text, false, 'gemini-dom');
       }
-      const controls = answers.at(-1)?.querySelectorAll('button[data-test-id="copy-button"], button[aria-label*="Copy" i], button[aria-label*="复制"], button:has(mat-icon[data-mat-icon-name="copy"])') || [];
-      const completeControl = Array.from(controls).some(node => this.controlIsVisible(node)
-        && !node.closest('pre, code') && !bodies.some(body => body.contains(node)));
+      const directControls = Array.from(controlScope?.querySelectorAll([
+        'message-actions button',
+        'copy-button button',
+        'thumb-up-button button',
+        'thumb-down-button button',
+        'regenerate-button button',
+        'button[data-test-id="copy-button"]',
+        'button[data-test-id="thumbs-up-button"]',
+        'button[data-test-id="thumbs-down-button"]',
+        'button[data-test-id="redo-button"]',
+        'button[data-test-id="regenerate-button"]',
+        'button[data-test-id="more-menu-button"]',
+        'button[aria-label*="Copy" i]',
+        'button[aria-label*="复制"]',
+        'button[mattooltip*="Copy" i]',
+        'button[mattooltip*="复制"]',
+        'button[aria-label*="Good response" i]',
+        'button[aria-label*="Bad response" i]',
+        'button[aria-label*="Regenerate" i]',
+        'button[aria-label*="Redo" i]',
+        'button[aria-label*="回答不错"]',
+        'button[aria-label*="回答不好"]',
+        'button[aria-label*="喜欢"]',
+        'button[aria-label*="重新生成"]',
+      ].join(', ')) || []);
+      const iconControls = Array.from(controlScope?.querySelectorAll([
+        'mat-icon[data-mat-icon-name="copy"]',
+        'mat-icon[data-mat-icon-name="content_copy"]',
+        'mat-icon[fonticon="copy"]',
+        'mat-icon[fonticon="content_copy"]',
+        'mat-icon[data-mat-icon-name="thumb_up"]',
+        'mat-icon[fonticon="thumb_up"]',
+        'mat-icon[data-mat-icon-name="refresh"]',
+        'mat-icon[fonticon="refresh"]',
+      ].join(', ')) || []).map(icon => icon.closest('button, [role="button"]')).filter(Boolean);
+      const completeControl = [...new Set([...directControls, ...iconControls])].some(node =>
+        this.controlIsVisible(node)
+        && (!this.geminiUser || !this.geminiUser.contains(node))
+        && !node.closest('pre, code, code-block, .code-block, table, .table-footer, model-thoughts, .thoughts-container')
+        && !messageBodies.some(body => body.contains(node)));
       const active = (this.proxy?.activeStreams.get(this.currentTaskId) || 0)
         + (this.proxy?.activeRequests.get(this.currentTaskId) || 0);
-      const lastAnswer = answers.at(-1);
-      const busy = lastAnswer?.matches('[aria-busy="true"]') ||
-        Array.from(lastAnswer?.querySelectorAll('[aria-busy="true"]') || []).some(node => this.controlIsVisible(node));
-      const composer = document.querySelector(this.config.input.text.selector)?.closest('form, .input-area, input-area-v2');
+      const answerBusyNodes = [
+        ...(lastAnswer?.matches('[aria-busy="true"]') ? [lastAnswer] : []),
+        ...Array.from(lastAnswer?.querySelectorAll('[aria-busy="true"]') || [])
+          .filter(node => !node.closest('model-thoughts, .thoughts-container, processing-state, .processing-state')),
+      ];
+      const busy = answerBusyNodes.some(node => this.controlIsVisible(node));
+      const composer = document.querySelector(this.config.input.text.selector)
+        ?.closest('form, .input-area, input-area-v2, .input-area-container, .text-input-field')
+        || document.querySelector('input-area-v2, .input-area, .input-area-container');
       const streaming = this.hasStreamingControl(composer || document);
       if (composer && streaming) { this.geminiSawStop = true; }
-      const composerReady = this.geminiSawStop && !streaming && composer
-        && Array.from(composer.querySelectorAll('button.send-button, button[data-testid="send-button"], button[aria-label*="microphone" i], button[aria-label*="麦克风"]'))
-          .some(node => this.controlIsVisible(node));
+      const micDirect = Array.from(composer?.querySelectorAll([
+        'speech-dictation-mic-button button',
+        'button[data-node-type="speech_dictation_mic_button"]',
+        'button[aria-label*="microphone" i]',
+        'button[aria-label*="麦克风"]',
+        'button[aria-label*="语音输入"]',
+        'button[mattooltip*="麦克风"]',
+        'button[mattooltip*="语音"]',
+      ].join(', ')) || []);
+      const micIcons = Array.from(composer?.querySelectorAll(
+        'mat-icon[fonticon="mic"], mat-icon[data-mat-icon-name="mic"]',
+      ) || []).map(icon => icon.closest('button, [role="button"]')).filter(Boolean);
+      const micReady = !streaming && [...new Set([...micDirect, ...micIcons])]
+        .some(node => this.controlIsVisible(node));
+      const sendReady = this.geminiSawStop && !streaming && Boolean(composer)
+        && Array.from(composer.querySelectorAll('button.send-button, .send-button button, gem-icon-button.send-button, button[data-testid="send-button"]'))
+          .some(node => this.controlIsVisible(node) && !this.sendButtonAccepted(node));
+      const composerReady = (this.geminiSawStop && micReady) || sendReady;
       const transportDone = this.geminiTransportDone === true;
-      Object.assign(reading, { completeControl, active, busy, streaming, composerReady: Boolean(composerReady), transportDone });
+      Object.assign(reading, {
+        completeControl, active, busy, streaming,
+        composerReady: Boolean(composerReady), micReady, sendReady,
+        sawStop: Boolean(this.geminiSawStop), transportDone,
+      });
       // A parsed final response owns completion even if the page still shows
-      // the first sentence / Stop button. Its separate worker pacer finishes.
-      if (this.geminiNetworkText && (transportDone || this.geminiCandidateDone)) { return; }
+      // the first sentence / Stop button. Its separate worker/wake pacer finishes.
+      if (this.geminiNetworkCompletionEligible()) {
+        reading.waitingFor = 'network-quiet-window';
+        this.scheduleGeminiCompletion();
+        return;
+      }
       // Current-turn terminal frame is a second positive completion signal.
       // Hidden copy actions / stale busy widgets must not veto that signal;
       // live generation and additional response streams still veto completion.
       if (active || streaming || (!transportDone && ((!completeControl && !composerReady) || busy))) {
+        reading.waitingFor = active ? 'active-transport' : streaming ? 'generation-control'
+          : (!completeControl && !composerReady) ? 'completion-evidence' : 'answer-busy';
         this.geminiStableSince = Date.now(); return;
       }
       if (Date.now() - this.geminiStableSince >= 1500) {
+        reading.waitingFor = '';
         // A resumed composer can precede the final DOM paint. Preserve a
         // longer network snapshot when this rendered body is still its prefix.
         const finalText = isGeminiTextExtension(this.geminiNetworkText, text) ? this.geminiNetworkText : text;
         if (this.lastTask) { this.lastTask.completionSource = 'gemini-dom'; }
         this.onNewData(finalText, true, 'gemini-dom'); this.stopDomWatcher();
+      } else {
+        reading.waitingFor = 'stable-window';
       }
     }
 
     // --- DOM fallback watcher (dom-mode sites, or manual send recovery) ---
     async startDomWake() {
       const id = this.currentTaskId;
-      const eligible = () => this.config.name === 'Gemini' && this.supportsDomWake
+      const needsWake = () => (this.config.name === 'Gemini' || this.config.name === 'ChatGPT')
+        && Boolean(this.domWatchInterval || this.cancelGeminiCompletion || this.cancelChatGPTCompletion)
+        && (document.hidden || !timerWorker);
+      const eligible = () => this.supportsDomWake
         && this.currentTaskId === id && this.isRunning && this.isConnected && !this.doneSignal
-        && this.domWatchInterval && document.hidden;
+        && needsWake();
       if (!id || this.domWakeRequest || !eligible()) { return; }
       while (eligible()) {
         const request = gmRequest({ action: 'domWake', sessionSecret: this.sessionSecret, id }, 8000);
@@ -3231,19 +3415,40 @@
         try {
           const reply = await request.promise;
           if (this.domWakeRequest !== request || !eligible()) { return; }
-          if (!reply.ok || (reply.complete && !reply.recoverable)) { return; }
+          if (reply.error === 'SESSION_EXPIRED') {
+            void this.disconnect();
+            return;
+          }
+          if (reply.error === 'UNKNOWN_TASK' || (reply.complete && !reply.recoverable)) {
+            this.resetTaskState('relay-completed');
+            this.isSendingUpdate = false;
+            this.startPolling();
+            return;
+          }
+          if (!reply.ok) { return; }
           if (this.lastTask) { this.lastTask.domWakeups = (this.lastTask.domWakeups || 0) + 1; }
           if (this.taskStartedAt && Date.now() - this.taskStartedAt > TASK_WAIT_LIMIT_MS) {
             await this.sendHeartbeat();
             return;
           }
-          this.sampleGeminiAnswer();
-        } catch (error) {
-          if (this.domWakeRequest === request && this.lastTask) {
-            this.lastTask.domWakeError = String(error?.message || error).slice(0, 150);
-            this.domWakeRetryAt = Date.now() + 5000;
+          if (this.config.name === 'Gemini') {
+            this.checkGeminiCompletion();
+            this.sampleGeminiAnswer();
+          } else if (this.config.name === 'ChatGPT') {
+            this.sampleChatGPTAnswer();
           }
-          // A later mutation, reconnect, or visibility change can resume the wait.
+          this.flushData();
+        } catch (error) {
+          const aborted = this.domWakeRequest !== request || error?.name === 'AbortError';
+          if (!aborted && this.lastTask) {
+            this.lastTask.domWakeError = String(error?.message || error).slice(0, 150);
+          }
+          if (aborted || !eligible()) { return; }
+          this.cancelDomWakeRetry?.();
+          this.cancelDomWakeRetry = scheduleDeadline(() => {
+            this.cancelDomWakeRetry = null;
+            if (eligible()) { this.startDomWake(); }
+          }, 2000);
           return;
         } finally {
           if (this.domWakeRequest === request) { this.domWakeRequest = null; }
@@ -3301,12 +3506,20 @@
       // background tabs, MutationObserver callbacks are not.
       const paced = () => {
         const nowMs = Date.now();
-        if (nowMs - lastRun < 150) { return; }
-        lastRun = nowMs;
-        if (this.domWakeRetryAt && nowMs >= this.domWakeRetryAt) {
-          this.domWakeRetryAt = 0;
-          this.startDomWake();
+        const elapsed = nowMs - lastRun;
+        if (elapsed < 150) {
+          if (!this.domWatchTrailingCancel) {
+            this.domWatchTrailingCancel = scheduleDeadline(() => {
+              this.domWatchTrailingCancel = null;
+              lastRun = Date.now();
+              void tick();
+            }, 150 - elapsed);
+          }
+          return;
         }
+        this.domWatchTrailingCancel?.();
+        this.domWatchTrailingCancel = null;
+        lastRun = nowMs;
         void tick();
       };
       this.domWatchInterval = setInterval(paced, 200);
@@ -3315,7 +3528,7 @@
         try {
           this.domWatchObserver = new MutationObserver(paced);
           this.domWatchObserver.observe(document.documentElement, {
-            childList: true, subtree: true, characterData: true,
+            childList: true, subtree: true, attributes: true, characterData: true,
           });
         } catch (_) { this.domWatchObserver = null; }
       }
@@ -3324,7 +3537,10 @@
     stopDomWatcher() {
       this.domWakeRequest?.abort();
       this.domWakeRequest = null;
-      this.domWakeRetryAt = 0;
+      this.cancelDomWakeRetry?.();
+      this.cancelDomWakeRetry = null;
+      this.domWatchTrailingCancel?.();
+      this.domWatchTrailingCancel = null;
       if (this.domWatchInterval) { clearInterval(this.domWatchInterval); this.domWatchInterval = null; }
       if (this.domWatchObserver) {
         try { this.domWatchObserver.disconnect(); } catch (_) { }
@@ -3342,12 +3558,29 @@
   // freeze, so the relay separately supports bounded late-answer recovery.
   const sleepWaiters = new Map();
   let sleepSequence = 0;
-  const timerWorker = (() => {
+  let timerWorker = (() => {
     try {
       const source = 'const timers=new Map();onmessage=({data:d})=>{if(d.cancel){clearTimeout(timers.get(d.cancel));timers.delete(d.cancel);return;}timers.set(d.id,setTimeout(()=>{timers.delete(d.id);postMessage(d.id)},d.ms))}';
-      const url = URL.createObjectURL(new Blob([source]));
+      const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
       let worker;
-      try { worker = new Worker(url); } finally { URL.revokeObjectURL?.(url); }
+      try {
+        try { worker = new Worker(url); }
+        catch (error) {
+          if (!globalThis.trustedTypes?.createPolicy || error?.name !== 'TypeError') { throw error; }
+          const policy = globalThis.trustedTypes.createPolicy('zotero-research-timer', {
+            createScriptURL(value) {
+              if (value !== url) { throw new TypeError('Unexpected timer URL'); }
+              return url;
+            },
+          });
+          worker = new Worker(policy.createScriptURL(url));
+        }
+      } finally { URL.revokeObjectURL?.(url); }
+      worker.onerror = () => {
+        worker.terminate();
+        timerWorker = null;
+        connector?.startDomWake();
+      };
       worker.onmessage = (event) => {
         sleepWaiters.get(event.data)?.();
       };

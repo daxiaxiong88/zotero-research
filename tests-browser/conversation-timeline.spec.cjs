@@ -40,7 +40,8 @@ for (const [name, url, question, answer] of sites) {
     await dots.nth(8).hover();
     await expect(rail.getByRole('tooltip')).toContainText('问题 9');
     await dots.nth(8).click();
-    await expect.poll(() => page.locator('main').evaluate(el => el.scrollTop)).toBe(2000);
+    // Gecko may align scrolling to a fractional CSS pixel on scaled displays.
+    await expect.poll(() => page.locator('main').evaluate(el => Math.abs(el.scrollTop - 2000))).toBeLessThan(1);
     await expect(dots.nth(8)).toHaveAttribute('aria-current', 'step');
     await dots.nth(8).focus(); await page.keyboard.press('s');
     await expect(dots.nth(8)).toHaveAttribute('aria-pressed', 'true');
@@ -91,7 +92,7 @@ test('Zotero narrow sidebar timeline stays left-centered beside the reading area
     expect(railBox.x).toBeGreaterThanOrEqual(panelBox.x);
     expect(railBox.x + railBox.width).toBeLessThanOrEqual((await page.locator('.zrp-chat-card').boundingBox()).x);
     expect(Math.abs(railBox.y + railBox.height / 2 - (top + bottom) / 2)).toBeLessThan(2);
-    expect(railBox.height).toBeLessThanOrEqual(360);
+    expect(railBox.height).toBeLessThanOrEqual(360.01);
     expect(railBox.y).toBeGreaterThanOrEqual(top);
     expect(railBox.y + railBox.height).toBeLessThanOrEqual(Math.min(bottom, composer.y));
   }

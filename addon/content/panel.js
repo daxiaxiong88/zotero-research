@@ -920,6 +920,10 @@
         }
         return;
       } else {
+        if (renderThrottleTimer !== null && typeof view.clearTimeout === 'function') {
+          view.clearTimeout(renderThrottleTimer);
+          renderThrottleTimer = null;
+        }
         message.content = stripWebAIInternalCitations(event.text)
           || (event.error ? '未收到完整的网页回答。' : '网页 AI 返回了空回答。');
         message.pending = false;
