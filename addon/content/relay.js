@@ -194,7 +194,7 @@
         connectedAt: now(),
       };
       notify({ type: 'session', connected: true, ai: session.ai, url: session.url });
-      return { status: 'connected', capabilities: ['task-heartbeat', 'dom-wake'] };
+      return { status: 'connected', capabilities: ['task-heartbeat', 'dom-wake', 'ordered-updates'] };
     }
 
     function disconnect(payload) {
@@ -283,10 +283,17 @@
       }
       const text = String((payload && payload.text) || '');
       if (text.length > MAX_TEXT_LENGTH) return { error: 'TEXT_TOO_LONG' };
+      const sequenceNumber = payload.updateSequence;
+      if (sequenceNumber !== undefined) {
+        if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 1) return { error: 'INVALID_SEQUENCE' };
+        if (task.claimedSession !== session.secret) return { error: 'UNKNOWN_TASK' };
+        if (sequenceNumber <= (task.lastUpdateSequence || 0)) return { ok: true, duplicate: true };
+      }
       if (task.complete) {
         if (task.completionReason === 'delivered' && payload.isDone && task.text === text
           && task.error === String(payload.failed || '').slice(0, 300)) return { ok: true };
         if (!canRecover(task)) return { error: 'TASK_CLOSED', complete: true };
+        if (sequenceNumber !== undefined) task.lastUpdateSequence = sequenceNumber;
         task.text = text;
         if (payload.isDone) {
           task.done = true;
@@ -300,6 +307,7 @@
           error: task.error, meta: task.meta });
         return { ok: true, recovered: true };
       }
+      if (sequenceNumber !== undefined) task.lastUpdateSequence = sequenceNumber;
       task.text = text;
       if (task.claimedAt !== null) task.claimedAt = now();
       task.notice = String((payload && payload.notice) || '').slice(0, 300);

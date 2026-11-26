@@ -270,8 +270,12 @@ async function runSyntheticNativeChecks(paper, pdf) {
     check(connected.capabilities.includes('dom-wake'), 'packaged endpoint advertises DOM wake');
     const wake = await relayRequest({ action: 'domWake', sessionSecret, id: taskID });
     check(wake.ok === true && wake.complete === false, 'packaged endpoint wakes a hidden reader without ending its task');
+    check(connected.capabilities.includes('ordered-updates'), 'packaged endpoint supports sequenced progress');
+    const progress = await relayRequest({ action: 'update', sessionSecret, id: taskID, updateSequence: 2, text: 'later snapshot' });
+    const late = await relayRequest({ action: 'update', sessionSecret, id: taskID, updateSequence: 1, text: 'prefix' });
+    check(progress.ok && late.duplicate, 'packaged endpoint ignores out-of-order progress');
     const updated = await relayRequest({
-      action: 'update', sessionSecret, id: taskID,
+      action: 'update', sessionSecret, id: taskID, updateSequence: 3,
       text: 'synthetic relay response', isDone: true,
     });
     check(updated.ok === true, 'relay update');

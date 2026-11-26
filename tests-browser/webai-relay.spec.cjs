@@ -25,6 +25,7 @@ for (const scenario of [
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-candidate', fault: 'background' },
   { provider: 'gemini', upload: 'paste', capture: 'dom-pulse', fault: 'background-no-worker' },
+  { provider: 'gemini', upload: 'paste', capture: 'dom-pulse', fault: 'background-held-acks' },
   { provider: 'gemini', upload: 'paste', capture: 'xhr-dom', fault: 'background-retry' },
 ]) {
 test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${scenario.layout || 'standard'}/${scenario.fault || 'normal'}: image → one send → complete sidebar math`, async ({ context }) => {
@@ -119,7 +120,7 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
       if (dropCallback) dropped = true;
       relayRequest(payload).then(value => {
         if (value.task) window.fixtureTask = value.task;
-        if (dropCallback) return; // fetch mode supplies neither onload nor ontimeout
+        if (dropCallback || (scenario.fault === 'background-held-acks' && payload.action === 'update' && payload.text && !payload.isDone)) return;
         if (!cancelled) options.onload({ status: 200, responseText: JSON.stringify(value) });
       }).catch(() => { if (!cancelled) options.onerror(); });
       return { abort() { cancelled = true; } };
@@ -232,7 +233,11 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
           } else if (domPulse) {
             window.fixtureBackground = true;
             const body = document.querySelector('[data-message-id="answer-new"] p');
-            body.textContent = '正文'.repeat(979);
+            if (scenario.fault === 'background-held-acks') {
+              body.textContent = '文'.repeat(62);
+              nativeTimeout(() => { body.textContent = '文'.repeat(1601); }, 2100);
+              nativeTimeout(() => { body.textContent = '文'.repeat(1908); }, 4300);
+            } else body.textContent = '正文'.repeat(979);
             // Two or more Zotero wakeups during the pause must not finish it.
             nativeTimeout(() => {
               body.textContent += '最后六个字符';
@@ -283,6 +288,10 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
   }, PNG);
   await expect(sidebar.locator('.zrp-image-chip')).toBeVisible();
   await input.press('Enter');
+  if (scenario.fault === 'background-held-acks') {
+    await expect(sidebar.locator('.zrp-message-assistant')).toContainText('文'.repeat(1601), { timeout: 25000 });
+    expect(await sidebar.evaluate(() => events.some(event => event.type === 'answer'))).toBe(false);
+  }
   if (scenario.capture === 'network-lag') {
     await expect(sidebar.locator('.zrp-message-assistant')).toContainText('完整回答的最后一句。', { timeout: 20000 });
     const progressAt = await sidebar.evaluate(() => events.find(event => event.type === 'progress'
@@ -324,7 +333,11 @@ test(`${scenario.provider}/${scenario.upload}/${scenario.capture || 'dom'}/${sce
       expect(task.networkCaptures).toBe(0);
       expect(task.completionSource).toBe('gemini-dom');
       expect(task.domWakeups).toBeGreaterThan(0);
-      expect(result.answer.text).toContain('正文'.repeat(979) + '最后六个字符');
+      if (scenario.fault === 'background-held-acks') {
+        const lengths = await sidebar.evaluate(() => events.filter(e => e.type === 'progress').map(e => e.text?.length));
+        expect(lengths).toEqual(expect.arrayContaining([62, 1601, 1908]));
+        expect(result.answer.text).toContain('文'.repeat(1908) + '最后六个字符');
+      } else expect(result.answer.text).toContain('正文'.repeat(979) + '最后六个字符');
     } else {
       await expect(web.locator('message-content[data-message-id="answer-new"]')).toHaveText('回答前半段');
       await expect(web.locator('button[aria-label="Stop generating"]')).toHaveCount(1);

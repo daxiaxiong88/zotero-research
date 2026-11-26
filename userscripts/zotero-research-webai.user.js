@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zotero 网页 AI 中继
 // @namespace    zotero-research
-// @version      1.1.9
+// @version      1.1.10
 // @updateURL    https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.meta.js
 // @downloadURL  https://github.com/daxiaxiong88/zotero-research/releases/latest/download/zotero-research-webai.user.js
 // @supportURL   https://github.com/daxiaxiong88/zotero-research/issues
@@ -1473,7 +1473,7 @@
       this.lockTimer = null;
       this.domInitialized = false;
       this.runtime = {
-        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-gemini-completion-2',
+        id: TAB_ID, startedAt: new Date().toISOString(), sourceRevision: 'webai-gemini-ordered-progress-1',
         version: GM_info.script.version, handler: GM_info.scriptHandler || 'unknown',
         timeOrigin: performance.timeOrigin || null,
         navigationType: performance.getEntriesByType?.('navigation')?.[0]?.type || 'unknown',
@@ -1713,6 +1713,7 @@
           this.isConnected = true;
           this.supportsHeartbeat = res.capabilities?.includes('task-heartbeat') === true;
           this.supportsDomWake = res.capabilities?.includes('dom-wake') === true;
+          this.supportsOrderedUpdates = res.capabilities?.includes('ordered-updates') === true;
           if (this.domWatchInterval || this.cancelGeminiCompletion || this.cancelChatGPTCompletion) { this.startDomWake(); }
           this.startHeartbeatLoop();
           if (!silent) { notify('Zotero：联动成功'); }
@@ -1819,6 +1820,9 @@
       this.cancelGeminiCompletion = null;
       this.cancelUpdateRetry?.();
       this.cancelUpdateRetry = null;
+      this.pendingUpdateRequest?.abort();
+      this.pendingUpdateRequest = null;
+      this.updateSequence = 0;
       this.currentTaskId = null;
       this.doneSignal = false;
       this.accumulatedText = '';
@@ -1903,7 +1907,14 @@
     }
 
     flushData() {
-      if (this.isSendingUpdate || !this.hasPendingData) { return; }
+      if (!this.hasPendingData) { return; }
+      if (this.isSendingUpdate) {
+        // The page can keep receiving DOM mutations while Chrome holds the
+        // first GM onload callback. The negotiated receiver orders snapshots.
+        if (!this.pendingUpdateRequest || !this.supportsOrderedUpdates || this.config.name !== 'Gemini'
+          || (!document.hidden && timerWorker) || (!this.doneSignal && Date.now() - this.updateSentAt < 1000)) { return; }
+        this.pendingUpdateRequest.abort();
+      }
       this.cancelUpdateRetry?.();
       this.cancelUpdateRetry = null;
       if (this.pollDelayTimer) { clearTimeout(this.pollDelayTimer); this.pollDelayTimer = null; }
@@ -1919,18 +1930,33 @@
       const textToSend = this.accumulatedText;
       const doneToSend = this.doneSignal;
       const startedAt = Date.now();
-      if (this.lastTask) { this.lastTask.updateAttempts = (this.lastTask.updateAttempts || 0) + 1; }
+      this.updateSentAt = startedAt;
+      this.updateSequence = (this.updateSequence || 0) + 1;
+      const sequence = this.updateSequence;
+      if (this.lastTask) {
+        this.lastTask.updateAttempts = (this.lastTask.updateAttempts || 0) + 1;
+        if (!doneToSend) {
+          this.lastTask.lastProgressSent = { sequence, textLength: textToSend.length, at: new Date(startedAt).toISOString() };
+        }
+      }
       this.recordDiagnostic('update-start', !doneToSend);
       try {
-        const response = await gmRequest({
+        const request = gmRequest({
           action: 'update', id: tid, text: textToSend || '', isDone: doneToSend,
+          ...(this.supportsOrderedUpdates ? { updateSequence: sequence } : {}),
           sessionSecret: this.sessionSecret,
-        }, 8000).promise;
-        if (this.currentTaskId !== tid) { return; }
+        }, 8000);
+        this.pendingUpdateRequest = request;
+        const response = await request.promise;
+        if (this.currentTaskId !== tid || this.updateSequence !== sequence) { return; }
+        this.pendingUpdateRequest = null;
         if (this.lastTask) {
           this.lastTask.lastUpdate = { ok: response?.ok === true, error: response?.error || '',
             textLength: textToSend.length, isDone: doneToSend,
             durationMs: Date.now() - startedAt, recovered: response?.recovered === true };
+          if (!doneToSend && response.ok) {
+            this.lastTask.lastProgressAck = { sequence, textLength: textToSend.length, at: new Date().toISOString() };
+          }
         }
         this.recordDiagnostic('update-response', !doneToSend && !response?.error);
         if (response?.error === 'SESSION_EXPIRED') {
@@ -1953,7 +1979,8 @@
         } else if (this.hasPendingData) { this.performUpdate(); }
         else { this.schedulePolling(); }
       } catch (error) {
-        if (this.currentTaskId !== tid) { return; }
+        if (this.currentTaskId !== tid || this.updateSequence !== sequence) { return; }
+        this.pendingUpdateRequest = null;
         if (this.lastTask) {
           this.lastTask.updateError = String(error?.message || error).slice(0, 300);
           this.lastTask.lastUpdate = { ok: false, error: this.lastTask.updateError,
@@ -2710,6 +2737,7 @@
           awaitingManualSend: this.awaitingManualSend, domWatching: Boolean(this.domWatchInterval),
           workerTimerAvailable: Boolean(timerWorker),
           domWakeSupported: Boolean(this.supportsDomWake),
+          orderedUpdatesSupported: Boolean(this.supportsOrderedUpdates),
         },
         visibility: document.visibilityState, heartbeatSupported: Boolean(this.supportsHeartbeat),
         lastHeartbeatSecondsAgo: this.lastHeartbeatAt ? Math.round((Date.now() - this.lastHeartbeatAt) / 1000) : null,

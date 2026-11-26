@@ -2341,6 +2341,38 @@ test('Gemini only finishes the complete visible body of the current response', (
   assert.equal(c.doneSignal, true);
 });
 
+test('hidden Gemini delivers later snapshots and final text before the first progress acknowledgement', async t => {
+  const { api, c } = backgroundGemini(t);
+  c.isSendingUpdate = false;
+  c.supportsOrderedUpdates = true;
+  const requests = [];
+  let now = Date.now();
+  api.window.Date.now = () => now;
+  api.window.GM_xmlhttpRequest = options => {
+    const data = JSON.parse(options.data);
+    if (data.action === 'update') requests.push({ options, data });
+    return { abort() {} };
+  };
+  const body = api.window.document.querySelector('message-content');
+  for (const length of [62, 1601, 1908]) {
+    now += 2100;
+    body.textContent = '文'.repeat(length);
+    c.sampleGeminiAnswer();
+  }
+  assert.deepEqual(requests.map(r => r.data.text.length), [62, 1601, 1908]);
+  api.window.document.querySelector('[aria-label="Stop generating"]').remove();
+  api.window.document.querySelector('[aria-busy]').remove();
+  body.parentElement.insertAdjacentHTML('beforeend', '<message-actions><button aria-label="复制"></button></message-actions>');
+  now += 2100;
+  c.sampleGeminiAnswer();
+  assert.equal(requests.at(-1).data.isDone, true);
+  assert.equal(requests.at(-1).data.text.length, 1908);
+  for (const request of [...requests].reverse()) reply(request.options, { ok: true });
+  await settleBrowser();
+  assert.equal(c.currentTaskId, null);
+  assert.equal(requests.length, 4);
+});
+
 test('Gemini identifies visible stop glyphs and ignores hidden descendants', (t) => {
   const api = setup('https://gemini.google.com/app', '<body><button><span><mat-icon>stop</mat-icon></span></button></body>');
   t.after(() => api.window.close());

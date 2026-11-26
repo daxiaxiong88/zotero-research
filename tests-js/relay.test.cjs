@@ -172,6 +172,25 @@ test('update streams progress and finalizes with done', async () => {
   assert.equal(store._tasks.get(id).text, '部分+完整');
 });
 
+test('late progress and duplicate final snapshots never overwrite a newer revision', async () => {
+  const { store } = makeStore();
+  connect(store);
+  const events = [];
+  store.subscribe(event => events.push(event));
+  const id = store.enqueueTask({ messages: [{ text: 'q' }] });
+  await store.poll({ sessionSecret: SECRET }, 0);
+  function submit(updateSequence, text, isDone = false) {
+    return store.update({ sessionSecret: SECRET, id, updateSequence, text, isDone });
+  }
+  assert.equal(submit(2, '第二段').ok, true);
+  assert.equal(submit(1, '首句').duplicate, true);
+  assert.equal(submit(4, '终稿', true).ok, true);
+  assert.equal(submit(3, '下一段').duplicate, true);
+  assert.equal(submit(4, '终稿', true).duplicate, true);
+  assert.deepEqual(events.map(event => [event.type, event.text]), [['progress', '第二段'], ['answer', '终稿']]);
+  store.destroy();
+});
+
 test('rejects foreign secret, unknown task, oversized text', () => {
   const { store } = makeStore();
   connect(store);
